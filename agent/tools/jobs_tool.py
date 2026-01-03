@@ -46,13 +46,11 @@ ALL_FLAVORS = CPU_FLAVORS + GPU_FLAVORS + SPECIALIZED_FLAVORS
 # Operation names
 OperationType = Literal[
     "run",
-    "uv",
     "ps",
     "logs",
     "inspect",
     "cancel",
     "scheduled run",
-    "scheduled uv",
     "scheduled ps",
     "scheduled inspect",
     "scheduled delete",
@@ -104,6 +102,8 @@ def _build_uv_command(
     if script_args:
         parts.extend(script_args)
 
+    # add defaults
+    # parts.extend(["--push_to_hub"])
     return parts
 
 
@@ -124,8 +124,6 @@ def _wrap_inline_script(
 
 def _ensure_hf_transfer_dependency(deps: list[str] | None) -> list[str]:
     """Ensure hf-transfer is included in the dependencies list"""
-    if deps is None:
-        return ["hf-transfer"]
 
     if isinstance(deps, list):
         deps_copy = deps.copy()  # Don't modify the original
@@ -170,7 +168,7 @@ def _job_info_to_dict(job_info) -> Dict[str, Any]:
         "createdAt": job_info.created_at.isoformat(),
         "dockerImage": job_info.docker_image,
         "spaceId": job_info.space_id,
-        "flavor": job_info.flavor,
+        "hardware_flavor": job_info.flavor,
         "owner": {"name": job_info.owner.name},
     }
 
@@ -209,7 +207,7 @@ def _scheduled_job_info_to_dict(scheduled_job_info) -> Dict[str, Any]:
             "dockerImage": job_spec.docker_image,
             "spaceId": job_spec.space_id,
             "command": job_spec.command or [],
-            "flavor": job_spec.flavor or "cpu-basic",
+            "hardware_flavor": job_spec.flavor or "cpu-basic",
         },
     }
 
@@ -224,7 +222,8 @@ class HfJobsTool:
     async def execute(self, params: Dict[str, Any]) -> ToolResult:
         """Execute the specified operation"""
         operation = params.get("operation")
-        args = params.get("args", {})
+
+        args = params
 
         # If no operation provided, return error
         if not operation:
@@ -242,8 +241,6 @@ class HfJobsTool:
             # Route to appropriate handler
             if operation == "run":
                 return await self._run_job(args)
-            elif operation == "uv":
-                return await self._run_uv_job(args)
             elif operation == "ps":
                 return await self._list_jobs(args)
             elif operation == "logs":
@@ -254,8 +251,6 @@ class HfJobsTool:
                 return await self._cancel_job(args)
             elif operation == "scheduled run":
                 return await self._scheduled_run(args)
-            elif operation == "scheduled uv":
-                return await self._scheduled_uv(args)
             elif operation == "scheduled ps":
                 return await self._list_scheduled_jobs(args)
             elif operation == "scheduled inspect":
@@ -270,8 +265,8 @@ class HfJobsTool:
                 return {
                     "formatted": f'Unknown operation: "{operation}"\n\n'
                     "Available operations:\n"
-                    "- run, uv, ps, logs, inspect, cancel\n"
-                    "- scheduled run, scheduled uv, scheduled ps, scheduled inspect, "
+                    "- run, ps, logs, inspect, cancel\n"
+                    "- scheduled run, scheduled ps, scheduled inspect, "
                     "scheduled delete, scheduled suspend, scheduled resume\n\n"
                     "Call this tool with no operation for full usage instructions.",
                     "totalResults": 0,
@@ -322,32 +317,69 @@ class HfJobsTool:
         return final_status, all_logs
 
     async def _run_job(self, args: Dict[str, Any]) -> ToolResult:
-        """Run a job using HfApi.run_job()"""
+        """Run a job using HfApi.run_job() - smart detection of Python vs Docker mode"""
         try:
+            script = args.get("script")
+            command = args.get("command")
+
+            # Validate mutually exclusive parameters
+            if script and command:
+                raise ValueError(
+                    "'script' and 'command' are mutually exclusive. Provide one or the other, not both."
+                )
+
+            if not script and not command:
+                raise ValueError(
+                    "Either 'script' (for Python) or 'command' (for Docker) must be provided."
+                )
+
+            # Python mode: script provided
+            if script:
+                # Get dependencies and ensure hf-transfer is included
+                deps = _ensure_hf_transfer_dependency(args.get("dependencies"))
+
+                # Resolve the command based on script type (URL, inline, or file)
+                command = _resolve_uv_command(
+                    script=script,
+                    with_deps=deps,
+                    python=args.get("python"),
+                    script_args=args.get("script_args"),
+                )
+
+                # Use UV image unless overridden
+                image = args.get("image", UV_DEFAULT_IMAGE)
+                job_type = "Python"
+
+            # Docker mode: command provided
+            else:
+                image = args.get("image", "python:3.12")
+                job_type = "Docker"
+
+            # Run the job
             job = await _async_call(
                 self.api.run_job,
-                image=args.get("image", "python:3.12"),
-                command=args.get("command"),
+                image=image,
+                command=command,
                 env=_add_environment_variables(args.get("env")),
                 secrets=_add_environment_variables(args.get("secrets")),
-                flavor=args.get("flavor", "cpu-basic"),
+                flavor=args.get("hardware_flavor", "cpu-basic"),
                 timeout=args.get("timeout", "30m"),
-                namespace=args.get("namespace") or self.namespace,
+                namespace=self.namespace,
             )
 
             # Wait for completion and stream logs
-            print(f"Job started: {job.url}")
+            print(f"{job_type} job started: {job.url}")
             print("Streaming logs...\n---\n")
 
             final_status, all_logs = await self._wait_for_job_completion(
                 job_id=job.id,
-                namespace=args.get("namespace") or self.namespace,
+                namespace=self.namespace,
             )
 
             # Format all logs for the agent
             log_text = "\n".join(all_logs) if all_logs else "(no logs)"
 
-            response = f"""Job completed!
+            response = f"""{job_type} job completed!
 
 **Job ID:** {job.id}
 **Final Status:** {final_status}
@@ -362,73 +394,9 @@ class HfJobsTool:
         except Exception as e:
             raise Exception(f"Failed to run job: {str(e)}")
 
-    async def _run_uv_job(self, args: Dict[str, Any]) -> ToolResult:
-        """Run UV job with inline script support (no local files needed)"""
-        try:
-            script = args.get("script")
-            if not script:
-                raise ValueError("script is required")
-
-            # Get dependencies and ensure hf-transfer is included
-            deps = (
-                args.get("with_deps")
-                or args.get("dependencies")
-                or args.get("packages")
-            )
-            deps = _ensure_hf_transfer_dependency(deps)
-
-            # Resolve the command based on script type (URL, inline, or file)
-            command = _resolve_uv_command(
-                script=script,
-                with_deps=deps,
-                python=args.get("python"),
-                script_args=args.get("script_args"),
-            )
-
-            # Use run_job with UV image instead of run_uv_job
-            job = await _async_call(
-                self.api.run_job,
-                image=UV_DEFAULT_IMAGE,
-                command=command,
-                env=_add_environment_variables(args.get("env")),
-                secrets=_add_environment_variables(args.get("secrets")),
-                flavor=args.get("flavor") or args.get("hardware") or "cpu-basic",
-                timeout=args.get("timeout", "30m"),
-                namespace=args.get("namespace") or self.namespace,
-            )
-
-            # Wait for completion and stream logs
-            print(f"UV Job started: {job.url}")
-            print("Streaming logs...\n---\n")
-
-            final_status, all_logs = await self._wait_for_job_completion(
-                job_id=job.id,
-                namespace=args.get("namespace") or self.namespace,
-            )
-
-            # Format all logs for the agent
-            log_text = "\n".join(all_logs) if all_logs else "(no logs)"
-
-            response = f"""UV Job completed!
-
-**Job ID:** {job.id}
-**Final Status:** {final_status}
-**View at:** {job.url}
-
-**Logs:**
-```
-{log_text}
-```"""
-            return {"formatted": response, "totalResults": 1, "resultsShared": 1}
-
-        except Exception as e:
-            raise Exception(f"Failed to run UV job: {str(e)}")
-
     async def _list_jobs(self, args: Dict[str, Any]) -> ToolResult:
         """List jobs using HfApi.list_jobs()"""
-        jobs_list = await _async_call(
-            self.api.list_jobs, namespace=args.get("namespace") or self.namespace
-        )
+        jobs_list = await _async_call(self.api.list_jobs, namespace=self.namespace)
 
         # Filter jobs
         if not args.get("all", False):
@@ -451,7 +419,7 @@ class HfJobsTool:
                     "resultsShared": 0,
                 }
             return {
-                "formatted": 'No running jobs found. Use `{"args": {"all": true}}` to show all jobs.',
+                "formatted": 'No running jobs found. Use `{"operation": "ps", "all": true}` to show all jobs.',
                 "totalResults": 0,
                 "resultsShared": 0,
             }
@@ -476,9 +444,7 @@ class HfJobsTool:
 
         try:
             # Fetch logs (returns generator, convert to list)
-            logs_gen = self.api.fetch_job_logs(
-                job_id=job_id, namespace=args.get("namespace") or self.namespace
-            )
+            logs_gen = self.api.fetch_job_logs(job_id=job_id, namespace=self.namespace)
             logs = await _async_call(list, logs_gen)
 
             if not logs:
@@ -522,7 +488,7 @@ class HfJobsTool:
                 job = await _async_call(
                     self.api.inspect_job,
                     job_id=jid,
-                    namespace=args.get("namespace") or self.namespace,
+                    namespace=self.namespace,
                 )
                 jobs.append(_job_info_to_dict(job))
             except Exception as e:
@@ -551,40 +517,81 @@ class HfJobsTool:
         await _async_call(
             self.api.cancel_job,
             job_id=job_id,
-            namespace=args.get("namespace") or self.namespace,
+            namespace=self.namespace,
         )
 
         response = f"""✓ Job {job_id} has been cancelled.
 
-To verify, call this tool with `{{"operation": "inspect", "args": {{"job_id": "{job_id}"}}}}`"""
+To verify, call this tool with `{{"operation": "inspect", "job_id": "{job_id}"}}`"""
 
         return {"formatted": response, "totalResults": 1, "resultsShared": 1}
 
     async def _scheduled_run(self, args: Dict[str, Any]) -> ToolResult:
-        """Create scheduled job using HfApi.create_scheduled_job()"""
+        """Create scheduled job using HfApi.create_scheduled_job() - smart detection of Python vs Docker mode"""
         try:
+            script = args.get("script")
+            command = args.get("command")
+            schedule = args.get("schedule")
+
+            if not schedule:
+                raise ValueError("schedule is required for scheduled jobs")
+
+            # Validate mutually exclusive parameters
+            if script and command:
+                raise ValueError(
+                    "'script' and 'command' are mutually exclusive. Provide one or the other, not both."
+                )
+
+            if not script and not command:
+                raise ValueError(
+                    "Either 'script' (for Python) or 'command' (for Docker) must be provided."
+                )
+
+            # Python mode: script provided
+            if script:
+                # Get dependencies and ensure hf-transfer is included
+                deps = _ensure_hf_transfer_dependency(args.get("dependencies"))
+
+                # Resolve the command based on script type
+                command = _resolve_uv_command(
+                    script=script,
+                    with_deps=deps,
+                    python=args.get("python"),
+                    script_args=args.get("script_args"),
+                )
+
+                # Use UV image unless overridden
+                image = args.get("image", UV_DEFAULT_IMAGE)
+                job_type = "Python"
+
+            # Docker mode: command provided
+            else:
+                image = args.get("image", "python:3.12")
+                job_type = "Docker"
+
+            # Create scheduled job
             scheduled_job = await _async_call(
                 self.api.create_scheduled_job,
-                image=args.get("image", "python:3.12"),
-                command=args.get("command"),
-                schedule=args.get("schedule"),
+                image=image,
+                command=command,
+                schedule=schedule,
                 env=_add_environment_variables(args.get("env")),
                 secrets=_add_environment_variables(args.get("secrets")),
-                flavor=args.get("flavor", "cpu-basic"),
+                flavor=args.get("hardware_flavor", "cpu-basic"),
                 timeout=args.get("timeout", "30m"),
-                namespace=args.get("namespace") or self.namespace,
+                namespace=self.namespace,
             )
 
             scheduled_dict = _scheduled_job_info_to_dict(scheduled_job)
 
-            response = f"""✓ Scheduled job created successfully!
+            response = f"""✓ Scheduled {job_type} job created successfully!
 
 **Scheduled Job ID:** {scheduled_dict["id"]}
 **Schedule:** {scheduled_dict["schedule"]}
 **Suspended:** {"Yes" if scheduled_dict.get("suspend") else "No"}
 **Next Run:** {scheduled_dict.get("nextRun", "N/A")}
 
-To inspect, call this tool with `{{"operation": "scheduled inspect", "args": {{"scheduled_job_id": "{scheduled_dict["id"]}"}}}}`
+To inspect, call this tool with `{{"operation": "scheduled inspect", "scheduled_job_id": "{scheduled_dict["id"]}"}}`
 To list all, call this tool with `{{"operation": "scheduled ps"}}`"""
 
             return {"formatted": response, "totalResults": 1, "resultsShared": 1}
@@ -592,67 +599,11 @@ To list all, call this tool with `{{"operation": "scheduled ps"}}`"""
         except Exception as e:
             raise Exception(f"Failed to create scheduled job: {str(e)}")
 
-    async def _scheduled_uv(self, args: Dict[str, Any]) -> ToolResult:
-        """Create scheduled UV job with inline script support"""
-        try:
-            script = args.get("script")
-            if not script:
-                raise ValueError("script is required")
-
-            schedule = args.get("schedule")
-            if not schedule:
-                raise ValueError("schedule is required")
-
-            # Get dependencies and ensure hf-transfer is included
-            deps = (
-                args.get("with_deps")
-                or args.get("dependencies")
-                or args.get("packages")
-            )
-            deps = _ensure_hf_transfer_dependency(deps)
-
-            # Resolve the command based on script type
-            command = _resolve_uv_command(
-                script=script,
-                with_deps=deps,
-                python=args.get("python"),
-                script_args=args.get("script_args"),
-            )
-
-            # Use create_scheduled_job with UV image
-            scheduled_job = await _async_call(
-                self.api.create_scheduled_job,
-                image=UV_DEFAULT_IMAGE,
-                command=command,
-                schedule=schedule,
-                env=_add_environment_variables(args.get("env")),
-                secrets=_add_environment_variables(args.get("secrets")),
-                flavor=args.get("flavor") or args.get("hardware") or "cpu-basic",
-                timeout=args.get("timeout", "30m"),
-                namespace=args.get("namespace") or self.namespace,
-            )
-
-            scheduled_dict = _scheduled_job_info_to_dict(scheduled_job)
-
-            response = f"""✓ Scheduled UV job created successfully!
-
-**Scheduled Job ID:** {scheduled_dict["id"]}
-**Schedule:** {scheduled_dict["schedule"]}
-**Suspended:** {"Yes" if scheduled_dict.get("suspend") else "No"}
-**Next Run:** {scheduled_dict.get("nextRun", "N/A")}
-
-To inspect, call this tool with `{{"operation": "scheduled inspect", "args": {{"scheduled_job_id": "{scheduled_dict["id"]}"}}}}`"""
-
-            return {"formatted": response, "totalResults": 1, "resultsShared": 1}
-
-        except Exception as e:
-            raise Exception(f"Failed to create scheduled UV job: {str(e)}")
-
     async def _list_scheduled_jobs(self, args: Dict[str, Any]) -> ToolResult:
         """List scheduled jobs using HfApi.list_scheduled_jobs()"""
         scheduled_jobs_list = await _async_call(
             self.api.list_scheduled_jobs,
-            namespace=args.get("namespace") or self.namespace,
+            namespace=self.namespace,
         )
 
         # Filter jobs - default: hide suspended jobs unless --all is specified
@@ -672,7 +623,7 @@ To inspect, call this tool with `{{"operation": "scheduled inspect", "args": {{"
                     "resultsShared": 0,
                 }
             return {
-                "formatted": 'No active scheduled jobs found. Use `{"args": {"all": true}}` to show suspended jobs.',
+                "formatted": 'No active scheduled jobs found. Use `{"operation": "scheduled ps", "all": true}` to show suspended jobs.',
                 "totalResults": 0,
                 "resultsShared": 0,
             }
@@ -698,7 +649,7 @@ To inspect, call this tool with `{{"operation": "scheduled inspect", "args": {{"
         scheduled_job = await _async_call(
             self.api.inspect_scheduled_job,
             scheduled_job_id=scheduled_job_id,
-            namespace=args.get("namespace") or self.namespace,
+            namespace=self.namespace,
         )
 
         scheduled_dict = _scheduled_job_info_to_dict(scheduled_job)
@@ -724,7 +675,7 @@ To inspect, call this tool with `{{"operation": "scheduled inspect", "args": {{"
         await _async_call(
             self.api.delete_scheduled_job,
             scheduled_job_id=scheduled_job_id,
-            namespace=args.get("namespace") or self.namespace,
+            namespace=self.namespace,
         )
 
         return {
@@ -747,12 +698,12 @@ To inspect, call this tool with `{{"operation": "scheduled inspect", "args": {{"
         await _async_call(
             self.api.suspend_scheduled_job,
             scheduled_job_id=scheduled_job_id,
-            namespace=args.get("namespace") or self.namespace,
+            namespace=self.namespace,
         )
 
         response = f"""✓ Scheduled job {scheduled_job_id} has been suspended.
 
-To resume, call this tool with `{{"operation": "scheduled resume", "args": {{"scheduled_job_id": "{scheduled_job_id}"}}}}`"""
+To resume, call this tool with `{{"operation": "scheduled resume", "scheduled_job_id": "{scheduled_job_id}"}}`"""
 
         return {"formatted": response, "totalResults": 1, "resultsShared": 1}
 
@@ -770,12 +721,12 @@ To resume, call this tool with `{{"operation": "scheduled resume", "args": {{"sc
         await _async_call(
             self.api.resume_scheduled_job,
             scheduled_job_id=scheduled_job_id,
-            namespace=args.get("namespace") or self.namespace,
+            namespace=self.namespace,
         )
 
         response = f"""✓ Scheduled job {scheduled_job_id} has been resumed.
 
-To inspect, call this tool with `{{"operation": "scheduled inspect", "args": {{"scheduled_job_id": "{scheduled_job_id}"}}}}`"""
+To inspect, call this tool with `{{"operation": "scheduled inspect", "scheduled_job_id": "{scheduled_job_id}"}}`"""
 
         return {"formatted": response, "totalResults": 1, "resultsShared": 1}
 
@@ -784,40 +735,35 @@ To inspect, call this tool with `{{"operation": "scheduled inspect", "args": {{"
 HF_JOBS_TOOL_SPEC = {
     "name": "hf_jobs",
     "description": (
-        "Manage Hugging Face CPU/GPU compute jobs. Run commands in Docker containers, "
-        "execute Python scripts with UV. List, schedule and monitor jobs/logs. "
-        "Call this tool with no operation for full usage instructions and examples.\n\n"
-        "## Available Operations\n"
-        "**Job Management:**\n"
-        "- run: Run job with Docker image\n"
-        "- uv: Run Python script with inline dependencies (recommended for Python)\n"
-        "- ps: List jobs (shows running by default, use args: {'all': true} for all)\n"
-        "- logs: Fetch job logs (args: {'job_id': 'xxx'})\n"
-        "- inspect: Get job details (args: {'job_id': 'xxx'})\n"
-        "- cancel: Cancel running job (args: {'job_id': 'xxx'})\n\n"
-        "**Scheduled Jobs:**\n"
-        "- same functionality as Job Management, but recurring periodically\n"
-        "- schedule: One of '@annually', '@yearly', '@monthly', '@weekly', '@daily', '@hourly', or a CRON schedule expression (e.g., '0 9 * * 1' for 9 AM every Monday).\n"
-        "- scheduled run/uv/ps/inspect/delete/suspend/resume\n\n"
+        "Manage Hugging Face CPU/GPU compute jobs. Run Python scripts with UV or custom Docker commands. "
+        "List, schedule and monitor jobs/logs.\n\n"
+        "## Operations\n"
+        "**Jobs:** run, ps, logs, inspect, cancel\n"
+        "**Scheduled Jobs:** scheduled run, scheduled ps, scheduled inspect, scheduled delete, scheduled suspend, scheduled resume\n\n"
+        "## 'run' Operation Behavior\n"
+        "The 'run' operation automatically detects what you want to do:\n"
+        "- If 'script' provided → runs a Python script and auto installs dependencies in the env\n"
+        "- If 'command' provided → runs a custom Docker command (full control)\n"
+        "- 'script' and 'command' are MUTUALLY EXCLUSIVE - provide one or the other, not both\n\n"
         "## Available Hardware Flavors\n"
         "**CPU:** cpu-basic, cpu-upgrade, cpu-performance, cpu-xl\n"
         "**GPU:** t4-small, t4-medium, l4x1, l4x4, a10g-small, a10g-large, a10g-largex2, a10g-largex4, a100-large, h100, h100x8\n"
         "**Specialized:** inf2x6\n\n"
         "## Usage Examples\n"
-        "**Run Python with UV (recommended):**\n"
-        "{'operation': 'uv', 'args': {'script': 'import torch\\nprint(torch.cuda.is_available())', "
-        "'dependencies': ['torch', 'transformers'], 'flavor': 'a10g-small', 'secrets': {'HF_TOKEN': '$HF_TOKEN'}}}\n\n"
-        "**Run Docker command:**\n"
-        "{'operation': 'run', 'args': {'image': 'python:3.12', 'command': ['python', '-c', 'print(42)'], 'flavor': 'cpu-basic'}}\n\n"
+        "**Run Python script with dependencies:**\n"
+        "{'operation': 'run', 'script': 'import torch\\nprint(torch.cuda.is_available())', 'dependencies': ['torch', 'transformers'], 'hardware_flavor': 'a10g-small'}\n\n"
+        "**Run Python with secrets:**\n"
+        "{'operation': 'run', 'script': 'from huggingface_hub import HfApi\\napi = HfApi()\\nprint(api.whoami())', 'dependencies': ['huggingface-hub']}\n\n"
+        "**Run custom Docker command:**\n"
+        "{'operation': 'run', 'image': 'nvidia/cuda:12.0-base', 'command': ['nvidia-smi']}\n\n"
         "**List running jobs:**\n"
         "{'operation': 'ps'}\n\n"
-        "## Key Parameters\n"
-        "- script: Python code (for uv) - can be inline string, URL, or file path\n"
-        "- dependencies/packages: List of pip packages (for uv)\n"
-        "- command: Array format ['cmd', 'arg1', 'arg2'] (for run)\n"
-        "- flavor/hardware: Choose appropriate size (default: cpu-basic)\n"
-        "- secrets: {'HF_TOKEN': '$HF_TOKEN'} for Hub access\n"
-        "- timeout: Max runtime (default: '30m')\n\n"
+        "**Get job logs:**\n"
+        "{'operation': 'logs', 'job_id': 'xxx'}\n\n"
+        "**Cancel job:**\n"
+        "{'operation': 'cancel', 'job_id': 'xxx'}\n\n"
+        "**Schedule daily Python job:**\n"
+        "{'operation': 'scheduled run', 'script': 'print(\"daily task\")', 'schedule': '@daily'}\n\n"
         "## Important Notes\n"
         "- **CRITICAL: Job files are EPHEMERAL** - ALL files created in HF Jobs (trained models, datasets, outputs, completions etc.) are DELETED when the job completes. You MUST upload any outputs to HF Hub in the script itself (using model.push_to_hub() when training models, dataset.push_to_hub() when creating text based outputs, etc.)."
         "- Always pass full script content - no local files available on server\n"
@@ -832,13 +778,11 @@ HF_JOBS_TOOL_SPEC = {
                 "type": "string",
                 "enum": [
                     "run",
-                    "uv",
                     "ps",
                     "logs",
                     "inspect",
                     "cancel",
                     "scheduled run",
-                    "scheduled uv",
                     "scheduled ps",
                     "scheduled inspect",
                     "scheduled delete",
@@ -846,22 +790,101 @@ HF_JOBS_TOOL_SPEC = {
                     "scheduled resume",
                 ],
                 "description": (
-                    "Operation to execute. Valid values: [run, uv, ps, logs, inspect, cancel, "
-                    "scheduled run, scheduled uv, scheduled ps, scheduled inspect, scheduled delete, "
+                    "Operation to execute. Valid values: [run, ps, logs, inspect, cancel, "
+                    "scheduled run, scheduled ps, scheduled inspect, scheduled delete, "
                     "scheduled suspend, scheduled resume]"
                 ),
             },
-            "args": {
+            # Python/UV specific parameters
+            "script": {
+                "type": "string",
+                "description": (
+                    "Python code to execute. Can be inline code or a raw GitHub URL. "
+                    "Auto-uses UV image and builds UV command. "
+                    "USED with: 'run', 'scheduled run' (triggers Python mode). "
+                    "MUTUALLY EXCLUSIVE with 'command'. "
+                    "NOT USED with: 'ps', 'logs', 'inspect', 'cancel', 'scheduled ps/inspect/delete/suspend/resume'."
+                ),
+            },
+            "dependencies": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "List of pip packages to install. Example: ['torch', 'transformers']. "
+                    "Only used when 'script' is provided. "
+                    "USED with: 'run', 'scheduled run' (optional, only with script). "
+                    "NOT USED with: 'ps', 'logs', 'inspect', 'cancel', 'scheduled ps/inspect/delete/suspend/resume'."
+                ),
+            },
+            # Docker specific parameters
+            "image": {
+                "type": "string",
+                "description": (
+                    "Docker image to use. Default: UV image if 'script' provided, else 'python:3.12'. "
+                    "Can override the default UV image when using 'script'. "
+                    "USED with: 'run', 'scheduled run' (optional). "
+                    "NOT USED with: 'ps', 'logs', 'inspect', 'cancel', 'scheduled ps/inspect/delete/suspend/resume'."
+                ),
+            },
+            "command": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Command to execute as array. Example: ['python', '-c', 'print(42)']. "
+                    "Use this for full Docker control. "
+                    "USED with: 'run', 'scheduled run' (triggers Docker mode). "
+                    "MUTUALLY EXCLUSIVE with 'script'. "
+                    "NOT USED with: 'ps', 'logs', 'inspect', 'cancel', 'scheduled ps/inspect/delete/suspend/resume'."
+                ),
+            },
+            # Hardware and environment
+            "hardware_flavor": {
+                "type": "string",
+                "description": (
+                    "Hardware flavor. CPU: cpu-basic, cpu-upgrade, cpu-performance, cpu-xl. "
+                    "GPU: t4-small, t4-medium, l4x1, l4x4, a10g-small, a10g-large, a10g-largex2, a10g-largex4, a100-large, h100, h100x8. "
+                    "Default: cpu-basic. "
+                    "USED with: 'run', 'uv', 'scheduled run', 'scheduled uv' (optional). "
+                    "NOT USED with: 'ps', 'logs', 'inspect', 'cancel', 'scheduled ps/inspect/delete/suspend/resume'."
+                ),
+            },
+            "secrets": {
                 "type": "object",
                 "description": (
-                    "Operation-specific arguments as a JSON object. "
-                    "Common args: script (for uv), packages/dependencies (array), "
-                    "flavor/hardware (e.g., a10g-large, cpu-basic), command (array), "
-                    "image (string), env (object), secrets (object)."
+                    "Secret environment variables. Format: {'KEY': 'VALUE'}. HF_TOKEN is loaded automatically. "
+                    "USED with: 'run', 'uv', 'scheduled run', 'scheduled uv' (optional). "
+                    "NOT USED with: 'ps', 'logs', 'inspect', 'cancel', 'scheduled ps/inspect/delete/suspend/resume'."
                 ),
-                "additionalProperties": True,
+            },
+            # Job management parameters
+            "job_id": {
+                "type": "string",
+                "description": (
+                    "Job ID to operate on. "
+                    "REQUIRED for: 'logs', 'inspect', 'cancel'. "
+                    "NOT USED with: 'run', 'uv', 'ps', 'scheduled run/uv/ps/inspect/delete/suspend/resume'."
+                ),
+            },
+            # Scheduled job parameters
+            "scheduled_job_id": {
+                "type": "string",
+                "description": (
+                    "Scheduled job ID to operate on. "
+                    "REQUIRED for: 'scheduled inspect', 'scheduled delete', 'scheduled suspend', 'scheduled resume'. "
+                    "NOT USED with: 'run', 'uv', 'ps', 'logs', 'inspect', 'cancel', 'scheduled run', 'scheduled uv', 'scheduled ps'."
+                ),
+            },
+            "schedule": {
+                "type": "string",
+                "description": (
+                    "Cron schedule or preset. Presets: '@hourly', '@daily', '@weekly', '@monthly', '@yearly'. "
+                    "Cron example: '0 9 * * 1' (9 AM every Monday). "
+                    "REQUIRED for: 'scheduled run', 'scheduled uv'. "
+                    "NOT USED with: 'run', 'uv', 'ps', 'logs', 'inspect', 'cancel', 'scheduled ps/inspect/delete/suspend/resume'."
+                ),
             },
         },
+        "required": ["operation"],
     },
 }
 
