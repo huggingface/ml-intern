@@ -37,8 +37,16 @@ from agent.tools.github_read_file import (
 )
 from agent.tools.jobs_tool import HF_JOBS_TOOL_SPEC, hf_jobs_handler
 from agent.tools.plan_tool import PLAN_TOOL_SPEC, plan_tool_handler
+from agent.tools.hf_repo_files_tool import (
+    HF_REPO_FILES_TOOL_SPEC,
+    hf_repo_files_handler,
+)
+from agent.tools.hf_repo_git_tool import (
+    HF_REPO_GIT_TOOL_SPEC,
+    hf_repo_git_handler,
+)
 
-# NOTE: Private HF repo tool disabled - system prompt handles pushing to hub pretty well now
+# NOTE: Private HF repo tool disabled - replaced by hf_repo_files and hf_repo_git
 # from agent.tools.private_hf_repo_tools import (
 #     PRIVATE_HF_REPO_TOOL_SPEC,
 #     private_hf_repo_handler,
@@ -280,13 +288,19 @@ def create_builtin_tools() -> list[ToolSpec]:
             parameters=HF_JOBS_TOOL_SPEC["parameters"],
             handler=hf_jobs_handler,
         ),
-        # NOTE: Private HF repo tool disabled - system prompt now reliably instructs agent to push to hub
-        # ToolSpec(
-        #     name=PRIVATE_HF_REPO_TOOL_SPEC["name"],
-        #     description=PRIVATE_HF_REPO_TOOL_SPEC["description"],
-        #     parameters=PRIVATE_HF_REPO_TOOL_SPEC["parameters"],
-        #     handler=private_hf_repo_handler,
-        # ),
+        # HF Repo management tools
+        ToolSpec(
+            name=HF_REPO_FILES_TOOL_SPEC["name"],
+            description=HF_REPO_FILES_TOOL_SPEC["description"],
+            parameters=HF_REPO_FILES_TOOL_SPEC["parameters"],
+            handler=hf_repo_files_handler,
+        ),
+        ToolSpec(
+            name=HF_REPO_GIT_TOOL_SPEC["name"],
+            description=HF_REPO_GIT_TOOL_SPEC["description"],
+            parameters=HF_REPO_GIT_TOOL_SPEC["parameters"],
+            handler=hf_repo_git_handler,
+        ),
 
 
         # NOTE: Github search code tool disabled - a bit buggy
