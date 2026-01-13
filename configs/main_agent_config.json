@@ -2,6 +2,8 @@
   "model_name": "anthropic/claude-opus-4-5-20251101",
   "save_sessions": true,
   "session_dataset_repo": "akseljoonas/hf-agent-sessions",
+  "confirm_cpu_jobs": false,
+  "auto_file_upload": false,
   "mcpServers": {
     "hf-mcp-server": {
       "transport": "http",

@@ -11,6 +11,7 @@ from lmnr import observe
 from agent.config import Config
 from agent.core.session import Event, OpType, Session
 from agent.core.tools import ToolRouter
+from agent.tools.jobs_tool import CPU_FLAVORS
 
 ToolCall = ChatCompletionMessageToolCall
 
@@ -37,10 +38,10 @@ def _validate_tool_args(tool_args: dict) -> tuple[bool, str | None]:
     return True, None
 
 
-def _needs_approval(tool_name: str, tool_args: dict, yolo_mode: bool = False) -> bool:
-    """Check if a tool call requires user approval before execution"""
+def _needs_approval(tool_name: str, tool_args: dict, config: Config | None = None) -> bool:
+    """Check if a tool call requires user approval before execution."""
     # Yolo mode: skip all approvals
-    if yolo_mode:
+    if config and config.yolo_mode:
         return False
 
     # If args are malformed, skip approval (validation error will be shown later)
@@ -49,15 +50,33 @@ def _needs_approval(tool_name: str, tool_args: dict, yolo_mode: bool = False) ->
         return False
 
     if tool_name == "hf_jobs":
-        # Check if it's a run or uv operation
         operation = tool_args.get("operation", "")
-        return operation in ["run", "uv"]
-
+        if operation not in ["run", "uv", "scheduled run", "scheduled uv"]:
+            return False
+        
+        # Check if this is a CPU-only job
+        args = tool_args.get("args", {})
+        hardware_flavor = args.get("flavor") or args.get("hardware") or args.get("hardware_flavor") or "cpu-basic"
+        is_cpu_job = hardware_flavor in CPU_FLAVORS
+        
+        if is_cpu_job:
+            if config and not config.confirm_cpu_jobs:
+                return False
+            return True
+        
+        return True
+    
+    # Check for file upload operations (hf_private_repos or other tools)
     if tool_name == "hf_private_repos":
-        # Repo creation and file uploads require approval
         operation = tool_args.get("operation", "")
-        return operation in ["create_repo", "upload_file"]
-
+        if operation == "upload_file":
+            if config and config.auto_file_upload:
+                return False
+            return True
+        # Other operations (create_repo, etc.) always require approval
+        if operation in ["create_repo"]:
+            return True
+    
     return False
 
 
@@ -147,7 +166,7 @@ class Handlers:
                     tool_name = tc.function.name
                     tool_args = json.loads(tc.function.arguments)
 
-                    if _needs_approval(tool_name, tool_args, session.config.yolo_mode):
+                    if _needs_approval(tool_name, tool_args, session.config):
                         approval_required_tools.append(tc)
                     else:
                         non_approval_tools.append(tc)

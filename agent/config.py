@@ -24,6 +24,10 @@ class Config(BaseModel):
     auto_save_interval: int = 3  # Save every N user turns (0 = disabled)
     yolo_mode: bool = False  # Auto-approve all tool calls without confirmation
 
+    # Permission control parameters
+    confirm_cpu_jobs: bool = True
+    auto_file_upload: bool = False
+
 
 def substitute_env_vars(obj: Any) -> Any:
     """
