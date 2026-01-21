@@ -25,15 +25,19 @@ export function useAgentWebSocket({
 
   const {
     addMessage,
+    updateMessage,
     setProcessing,
     setConnected,
     setPendingApprovals,
     setError,
     addTraceLog,
+    updateTraceLog,
     clearTraceLogs,
     setPanelContent,
     setPlan,
     traceLogs,
+    setCurrentTurnMessageId,
+    updateCurrentTurnTrace,
   } = useAgentStore();
 
   const { setRightPanelOpen, setLeftSidebarOpen } = useLayoutStore();
@@ -55,34 +59,61 @@ export function useAgentWebSocket({
         case 'processing':
           setProcessing(true);
           clearTraceLogs();
+          setCurrentTurnMessageId(null); // Start a new turn
           break;
 
         case 'assistant_message': {
           const content = (event.data?.content as string) || '';
           const currentTrace = useAgentStore.getState().traceLogs;
-          const message: Message = {
-            id: `msg_${Date.now()}`,
-            role: 'assistant',
-            content,
-            timestamp: new Date().toISOString(),
-            trace: currentTrace.length > 0 ? [...currentTrace] : undefined,
-          };
-          addMessage(sessionId, message);
+          const currentTurnMsgId = useAgentStore.getState().currentTurnMessageId;
+
+          if (currentTurnMsgId) {
+            // Update existing message - append content and update trace
+            const messages = useAgentStore.getState().getMessages(sessionId);
+            const existingMsg = messages.find(m => m.id === currentTurnMsgId);
+
+            if (existingMsg) {
+              const newContent = existingMsg.content ? existingMsg.content + '\n\n' + content : content;
+              updateMessage(sessionId, currentTurnMsgId, {
+                content: newContent,
+                trace: currentTrace.length > 0 ? [...currentTrace] : undefined,
+              });
+            }
+          } else {
+            // Create new message
+            const messageId = `msg_${Date.now()}`;
+            const message: Message = {
+              id: messageId,
+              role: 'assistant',
+              content,
+              timestamp: new Date().toISOString(),
+              trace: currentTrace.length > 0 ? [...currentTrace] : undefined,
+            };
+            addMessage(sessionId, message);
+            setCurrentTurnMessageId(messageId);
+          }
           break;
         }
 
         case 'tool_call': {
           const toolName = (event.data?.tool as string) || 'unknown';
           const args = (event.data?.arguments as Record<string, any>) || {};
-          const log: TraceLog = {
-            id: `tool_${Date.now()}`,
-            type: 'call',
-            text: `Calling ${toolName} with ${JSON.stringify(args)}`,
-            tool: toolName,
-            timestamp: new Date().toISOString(),
-          };
-          addTraceLog(log);
-          
+
+          // Don't display plan_tool in trace logs (it shows up elsewhere in the UI)
+          if (toolName !== 'plan_tool') {
+            const log: TraceLog = {
+              id: `tool_${Date.now()}`,
+              type: 'call',
+              text: `Agent is executing ${toolName}...`,
+              tool: toolName,
+              timestamp: new Date().toISOString(),
+              completed: false,
+            };
+            addTraceLog(log);
+            // Update the current turn message's trace in real-time
+            updateCurrentTurnTrace(sessionId);
+          }
+
           // Auto-expand Right Panel for specific tools
           if (toolName === 'hf_jobs' && (args.operation === 'run' || args.operation === 'scheduled run') && args.script) {
             setPanelContent({
@@ -111,18 +142,21 @@ export function useAgentWebSocket({
           const toolName = (event.data?.tool as string) || 'unknown';
           const output = (event.data?.output as string) || '';
           const success = event.data?.success as boolean;
-          
+
+          // Mark the corresponding trace log as completed
+          updateTraceLog(toolName, { completed: true });
+          // Update the current turn message's trace in real-time
+          updateCurrentTurnTrace(sessionId);
+
+          // Special handling for hf_jobs - update the approval message with output
           if (toolName === 'hf_jobs') {
-            // Find the last message with approval (likely the one that triggered this job)
             const messages = useAgentStore.getState().getMessages(sessionId);
-            // Reverse to find the most recent one
             const lastApprovalMsg = [...messages].reverse().find(m => m.approval);
-            
+
             if (lastApprovalMsg) {
-                // Append output if there's already some (for multiple jobs in batch)
                 const currentOutput = lastApprovalMsg.toolOutput || '';
                 const newOutput = currentOutput ? currentOutput + '\n\n' + output : output;
-                
+
                 useAgentStore.getState().updateMessage(sessionId, lastApprovalMsg.id, {
                     toolOutput: newOutput
                 });
@@ -130,19 +164,9 @@ export function useAgentWebSocket({
             } else {
                 console.warn('Received hf_jobs output but no approval message found to update.');
             }
-            // CRITICAL: Always break for hf_jobs to prevent a separate "Tool" bubble from appearing
-            break;
           }
-          
-          const message: Message = {
-            id: `msg_tool_${Date.now()}`,
-            role: 'tool',
-            content: output,
-            timestamp: new Date().toISOString(),
-            toolName: toolName,
-          };
-          addMessage(sessionId, message);
-          
+
+          // Don't create message bubbles for tool outputs - they only show in trace logs
           console.log('Tool output:', toolName, success);
           break;
         }
@@ -218,6 +242,7 @@ export function useAgentWebSocket({
 
         case 'turn_complete':
           setProcessing(false);
+          setCurrentTurnMessageId(null); // Clear the current turn
           break;
 
         case 'compacted': {

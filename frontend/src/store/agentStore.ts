@@ -18,6 +18,7 @@ interface AgentStore {
   traceLogs: TraceLog[];
   panelContent: { title: string; content: string; language?: string; parameters?: any } | null;
   plan: PlanItem[];
+  currentTurnMessageId: string | null; // Track the current turn's assistant message
 
   // Actions
   addMessage: (sessionId: string, message: Message) => void;
@@ -30,9 +31,12 @@ interface AgentStore {
   setError: (error: string | null) => void;
   getMessages: (sessionId: string) => Message[];
   addTraceLog: (log: TraceLog) => void;
+  updateTraceLog: (toolName: string, updates: Partial<TraceLog>) => void;
   clearTraceLogs: () => void;
   setPanelContent: (content: { title: string; content: string; language?: string; parameters?: any } | null) => void;
   setPlan: (plan: PlanItem[]) => void;
+  setCurrentTurnMessageId: (id: string | null) => void;
+  updateCurrentTurnTrace: (sessionId: string) => void;
 }
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
@@ -45,6 +49,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   traceLogs: [],
   panelContent: null,
   plan: [],
+  currentTurnMessageId: null,
 
   addMessage: (sessionId: string, message: Message) => {
     set((state) => {
@@ -112,6 +117,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }));
   },
 
+  updateTraceLog: (toolName: string, updates: Partial<TraceLog>) => {
+    set((state) => {
+      // Find the last trace log with this tool name and update it
+      const traceLogs = [...state.traceLogs];
+      for (let i = traceLogs.length - 1; i >= 0; i--) {
+        if (traceLogs[i].tool === toolName && traceLogs[i].type === 'call') {
+          traceLogs[i] = { ...traceLogs[i], ...updates };
+          break;
+        }
+      }
+      return { traceLogs };
+    });
+  },
+
   clearTraceLogs: () => {
     set({ traceLogs: [] });
   },
@@ -122,5 +141,27 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   setPlan: (plan: PlanItem[]) => {
     set({ plan });
+  },
+
+  setCurrentTurnMessageId: (id: string | null) => {
+    set({ currentTurnMessageId: id });
+  },
+
+  updateCurrentTurnTrace: (sessionId: string) => {
+    const state = get();
+    if (state.currentTurnMessageId) {
+      const currentMessages = state.messagesBySession[sessionId] || [];
+      const updatedMessages = currentMessages.map((msg) =>
+        msg.id === state.currentTurnMessageId
+          ? { ...msg, trace: state.traceLogs.length > 0 ? [...state.traceLogs] : undefined }
+          : msg
+      );
+      set({
+        messagesBySession: {
+          ...state.messagesBySession,
+          [sessionId]: updatedMessages,
+        },
+      });
+    }
   },
 }));

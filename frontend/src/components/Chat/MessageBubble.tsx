@@ -63,34 +63,6 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
           </Box>
         )}
 
-        {/* Persisted Trace Logs */}
-        {message.trace && message.trace.length > 0 && (
-          <Box
-            sx={{
-              bgcolor: 'rgba(0,0,0,0.3)',
-              borderRadius: 1,
-              p: 1.5,
-              border: 1,
-              borderColor: 'rgba(255,255,255,0.05)',
-              width: '100%',
-              mb: 2,
-            }}
-          >
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-              {message.trace.map((log) => (
-                <Typography
-                  key={log.id}
-                  variant="caption"
-                  component="div"
-                  sx={{ color: 'var(--muted-text)', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace', fontSize: '0.75rem' }}
-                >
-                  &gt; {log.text}
-                </Typography>
-              ))}
-            </Box>
-          </Box>
-        )}
-
         <Box
           sx={{
             '& p': { m: 0, color: isUser ? 'var(--text)' : 'var(--text)' }, // User might want different text color? Defaults to --text
@@ -147,7 +119,56 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         >
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
         </Box>
-        
+
+        {/* Persisted Trace Logs - Now at the bottom */}
+        {message.trace && message.trace.length > 0 && (
+          <Box
+            sx={{
+              bgcolor: 'rgba(0,0,0,0.3)',
+              borderRadius: 1,
+              p: 1.5,
+              border: 1,
+              borderColor: 'rgba(255,255,255,0.05)',
+              width: '100%',
+              mt: 2,
+            }}
+          >
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+              {message.trace.map((log) => {
+                // Extract tool name from text "Agent is executing {toolName}..."
+                const match = log.text.match(/Agent is executing (.+)\.\.\./);
+                const toolName = match ? match[1] : log.tool;
+
+                return (
+                  <Typography
+                    key={log.id}
+                    variant="caption"
+                    component="div"
+                    sx={{
+                      color: 'var(--muted-text)',
+                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+                      fontSize: '0.75rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 0.5,
+                    }}
+                  >
+                    <span style={{ color: log.completed ? '#FDB022' : 'inherit' }}>*</span>
+                    <span>Agent is executing </span>
+                    <span style={{
+                      fontWeight: 600,
+                      color: 'rgba(255, 255, 255, 0.9)',
+                    }}>
+                      {toolName}
+                    </span>
+                    <span>...</span>
+                  </Typography>
+                );
+              })}
+            </Box>
+          </Box>
+        )}
+
         <Typography className="meta" variant="caption" sx={{ display: 'block', textAlign: 'right', mt: 1, fontSize: '11px', opacity: 0.5 }}>
             {new Date(message.timestamp).toLocaleTimeString()}
         </Typography>

@@ -54,6 +54,7 @@ export interface TraceLog {
   text: string;
   tool: string;
   timestamp: string;
+  completed?: boolean;
 }
 
 export interface User {

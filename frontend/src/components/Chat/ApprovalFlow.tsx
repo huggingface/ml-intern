@@ -118,6 +118,10 @@ export default function ApprovalFlow({ message }: ApprovalFlowProps) {
 
   const currentTool = batch.tools[currentIndex];
 
+  // Check if script contains push_to_hub or upload_file
+  const args = currentTool.arguments as any;
+  const containsPushToHub = currentTool.tool === 'hf_jobs' && args.script && (args.script.includes('push_to_hub') || args.script.includes('upload_file'));
+
   const getToolDescription = (toolName: string, args: any) => {
     if (toolName === 'hf_jobs') {
       return (
@@ -216,6 +220,12 @@ export default function ApprovalFlow({ message }: ApprovalFlowProps) {
         {getToolDescription(currentTool.tool, currentTool.arguments)}
         <OpenInNewIcon sx={{ fontSize: 16, color: 'var(--muted-text)', opacity: 0.7 }} />
       </Box>
+
+      {containsPushToHub && (
+        <Typography variant="caption" sx={{ color: 'var(--accent-green)', fontSize: '0.75rem', opacity: 0.8, px: 0.5 }}>
+          We've detected the result will be pushed to hub.
+        </Typography>
+      )}
 
       {showLogsButton && (
         <Button

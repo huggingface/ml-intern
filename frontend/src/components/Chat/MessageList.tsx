@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react';
 import { Box, Typography } from '@mui/material';
-import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import MessageBubble from './MessageBubble';
 import type { Message } from '@/types/agent';
@@ -40,21 +39,12 @@ const TechnicalIndicator = () => (
 
 export default function MessageList({ messages, isProcessing }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
-  const traceBoxRef = useRef<HTMLDivElement>(null);
-  const { traceLogs } = useAgentStore();
   const { activeSessionId } = useSessionStore();
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isProcessing, traceLogs]);
-
-  // Auto-scroll trace box
-  useEffect(() => {
-    if (traceBoxRef.current) {
-      traceBoxRef.current.scrollTop = traceBoxRef.current.scrollHeight;
-    }
-  }, [traceLogs]);
+  }, [messages, isProcessing]);
 
   return (
     <Box
@@ -67,7 +57,7 @@ export default function MessageList({ messages, isProcessing }: MessageListProps
       }}
     >
       <Box sx={{ maxWidth: 'md', mx: 'auto', width: '100%', display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {messages.length === 0 && traceLogs.length === 0 && !isProcessing ? (
+        {messages.length === 0 && !isProcessing ? (
           <Box
             sx={{
               flex: 1,
@@ -95,37 +85,6 @@ export default function MessageList({ messages, isProcessing }: MessageListProps
               </Typography>
               <TechnicalIndicator />
             </Box>
-            
-            {traceLogs.length > 0 && (
-              <Box
-                sx={{
-                  bgcolor: 'background.default',
-                  borderRadius: 1,
-                  p: 2,
-                  border: 1,
-                  borderColor: 'divider',
-                  width: '100%',
-                  fontFamily: 'monospace',
-                  maxHeight: 120,
-                  overflowY: 'auto',
-                }}
-                ref={traceBoxRef}
-              >
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-                  {traceLogs.map((log) => (
-                    <Box key={log.id}>
-                      <Typography
-                        variant="caption"
-                        component="div"
-                        sx={{ color: 'common.white', fontFamily: 'monospace' }}
-                      >
-                        &gt; {log.text}
-                      </Typography>
-                    </Box>
-                  ))}
-                </Box>
-              </Box>
-            )}
           </Box>
         )}
 

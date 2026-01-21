@@ -47,18 +47,21 @@ const RunningIndicator = () => (
 export default function SessionSidebar({ onClose }: SessionSidebarProps) {
   const { sessions, activeSessionId, createSession, deleteSession, switchSession } =
     useSessionStore();
-  const { clearMessages, isConnected, isProcessing } = useAgentStore();
+  const { clearMessages, isConnected, isProcessing, setPlan, setPanelContent } = useAgentStore();
 
   const handleNewSession = useCallback(async () => {
     try {
       const response = await fetch('/api/session', { method: 'POST' });
       const data = await response.json();
       createSession(data.session_id);
+      // Clear plan and code panel for new session
+      setPlan([]);
+      setPanelContent(null);
       onClose?.();
     } catch (e) {
       console.error('Failed to create session:', e);
     }
-  }, [createSession, onClose]);
+  }, [createSession, setPlan, setPanelContent, onClose]);
 
   const handleDeleteSession = useCallback(
     async (sessionId: string, e: React.MouseEvent) => {
@@ -77,9 +80,12 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
   const handleSelectSession = useCallback(
     (sessionId: string) => {
       switchSession(sessionId);
+      // Clear plan and code panel when switching sessions
+      setPlan([]);
+      setPanelContent(null);
       onClose?.();
     },
-    [switchSession, onClose]
+    [switchSession, setPlan, setPanelContent, onClose]
   );
 
   const handleUndo = useCallback(async () => {
