@@ -2,6 +2,7 @@
 Context management for conversation history
 """
 
+import logging
 import os
 import zoneinfo
 from datetime import datetime
@@ -13,6 +14,72 @@ from huggingface_hub import HfApi
 from jinja2 import Template
 from litellm import Message, acompletion
 
+logger = logging.getLogger(__name__)
+
+# Module-level cache for HF username — avoids repeating the slow whoami() call
+_hf_username_cache: str | None = None
+
+_HF_WHOAMI_URL = "https://huggingface.co/api/whoami-v2"
+_HF_WHOAMI_TIMEOUT = 5  # seconds
+
+
+def _get_hf_username() -> str:
+    """Return the HF username, cached after the first call.
+
+    Uses subprocess + curl to avoid Python HTTP client IPv6 issues that
+    cause 40+ second hangs (httpx/urllib try IPv6 first which times out
+    at OS level before falling back to IPv4 — the "Happy Eyeballs" problem).
+    """
+    import json
+    import subprocess
+    import time as _t
+
+    global _hf_username_cache
+    if _hf_username_cache is not None:
+        return _hf_username_cache
+
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    if not hf_token:
+        logger.warning("No HF_TOKEN set, using 'unknown' as username")
+        _hf_username_cache = "unknown"
+        return _hf_username_cache
+
+    t0 = _t.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                "curl",
+                "-s",
+                "-4",  # force IPv4
+                "-m",
+                str(_HF_WHOAMI_TIMEOUT),  # max time
+                "-H",
+                f"Authorization: Bearer {hf_token}",
+                _HF_WHOAMI_URL,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_HF_WHOAMI_TIMEOUT + 2,
+        )
+        t1 = _t.monotonic()
+        if result.returncode == 0 and result.stdout:
+            data = json.loads(result.stdout)
+            _hf_username_cache = data.get("name", "unknown")
+            logger.info(
+                f"HF username resolved to '{_hf_username_cache}' in {t1 - t0:.2f}s"
+            )
+        else:
+            logger.warning(
+                f"curl whoami failed (rc={result.returncode}) in {t1 - t0:.2f}s"
+            )
+            _hf_username_cache = "unknown"
+    except Exception as e:
+        t1 = _t.monotonic()
+        logger.warning(f"HF whoami failed in {t1 - t0:.2f}s: {e}")
+        _hf_username_cache = "unknown"
+
+    return _hf_username_cache
+
 
 class ContextManager:
     """Manages conversation context and message history for the agent"""
@@ -23,11 +90,11 @@ class ContextManager:
         compact_size: float = 0.1,
         untouched_messages: int = 5,
         tool_specs: list[dict[str, Any]] | None = None,
-        prompt_file_suffix: str = "system_prompt_v3.yaml",
+        prompt_file_suffix: str = "system_prompt_v2.yaml",
     ):
         self.system_prompt = self._load_system_prompt(
             tool_specs or [],
-            prompt_file_suffix="system_prompt_v3.yaml",
+            prompt_file_suffix="system_prompt_v2.yaml",
         )
         self.max_context = max_context
         self.compact_size = int(max_context * compact_size)
@@ -54,9 +121,8 @@ class ContextManager:
         current_time = now.strftime("%H:%M:%S.%f")[:-3]
         current_timezone = f"{now.strftime('%Z')} (UTC{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]})"
 
-        # Get HF user info with explicit token from env
-        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-        hf_user_info = HfApi(token=hf_token).whoami().get("name", "unknown")
+        # Get HF user info (cached after the first call)
+        hf_user_info = _get_hf_username()
 
         template = Template(template_str)
         return template.render(
@@ -78,9 +144,7 @@ class ContextManager:
         """Get all messages for sending to LLM"""
         return self.items
 
-    async def compact(
-        self, model_name: str, tool_specs: list[dict] | None = None
-    ) -> None:
+    async def compact(self, model_name: str) -> None:
         """Remove old messages to keep history under target size"""
         if (self.context_length <= self.max_context) or not self.items:
             return
@@ -110,11 +174,14 @@ class ContextManager:
             )
         )
 
+        hf_key = os.environ.get("INFERENCE_TOKEN")
         response = await acompletion(
             model=model_name,
             messages=messages_to_summarize,
             max_completion_tokens=self.compact_size,
-            tools=tool_specs,
+            api_key=hf_key
+            if hf_key and model_name.startswith("huggingface/")
+            else None,
         )
         summarized_message = Message(
             role="assistant", content=response.choices[0].message.content

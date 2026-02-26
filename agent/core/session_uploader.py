@@ -15,10 +15,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Fallback token for session uploads (write-only access to akseljoonas/hf-agent-sessions)
-_SESSION_TOKEN = "".join([
-    "hf_", "Nzya", "Eeb", "ESz", "DtA", "BoW", "Czj", "SEC", "ZZv", "kVL", "Ac", "Vf", "Sz"
-])
+# Token for session uploads — loaded from env var (never hardcode tokens in source)
+_SESSION_TOKEN = os.environ.get("HF_SESSION_UPLOAD_TOKEN", "")
 
 
 def upload_session_as_file(

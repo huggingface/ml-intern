@@ -1,246 +1,344 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import {
+  Alert,
   Box,
-  List,
-  ListItem,
   IconButton,
   Typography,
-  Button,
-  Tooltip,
+  CircularProgress,
+  Divider,
 } from '@mui/material';
-import DeleteIcon from '@mui/icons-material/Delete';
-import UndoIcon from '@mui/icons-material/Undo';
+import AddIcon from '@mui/icons-material/Add';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import { useSessionStore } from '@/store/sessionStore';
 import { useAgentStore } from '@/store/agentStore';
+import { apiFetch } from '@/utils/api';
 
 interface SessionSidebarProps {
   onClose?: () => void;
 }
 
-const StatusDiode = ({ connected }: { connected: boolean }) => (
+/** Small coloured dot for connection status */
+const StatusDot = ({ connected }: { connected: boolean }) => (
   <Box
     sx={{
-      width: 10,
-      height: 10,
+      width: 6,
+      height: 6,
       borderRadius: '50%',
-      bgcolor: connected ? 'var(--accent-green)' : 'var(--accent-red)', // Use green/red for connection status
-      boxShadow: connected ? '0 0 6px rgba(47, 204, 113, 0.4)' : 'none',
-      transition: 'all 0.3s ease',
+      bgcolor: connected ? 'var(--accent-green)' : 'var(--accent-red)',
+      boxShadow: connected ? '0 0 4px rgba(76,175,80,0.4)' : 'none',
+      flexShrink: 0,
     }}
   />
-);
-
-const RunningIndicator = () => (
-    <Box
-      className="running-indicator"
-      sx={{
-        width: 10,
-        height: 10,
-        borderRadius: '50%',
-        bgcolor: 'var(--accent-yellow)',
-        boxShadow: '0 0 6px rgba(199,165,0,0.18)',
-      }}
-    />
 );
 
 export default function SessionSidebar({ onClose }: SessionSidebarProps) {
   const { sessions, activeSessionId, createSession, deleteSession, switchSession } =
     useSessionStore();
-  const { clearMessages, isConnected, isProcessing, setPlan, setPanelContent } = useAgentStore();
+  const { isConnected, setPlan, clearPanel } =
+    useAgentStore();
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const [capacityError, setCapacityError] = useState<string | null>(null);
+
+  // ── Handlers ──────────────────────────────────────────────────────
 
   const handleNewSession = useCallback(async () => {
+    if (isCreatingSession) return;
+    setIsCreatingSession(true);
+    setCapacityError(null);
     try {
-      const response = await fetch('/api/session', { method: 'POST' });
+      const response = await apiFetch('/api/session', { method: 'POST' });
+      if (response.status === 503) {
+        const data = await response.json();
+        setCapacityError(data.detail || 'Server is at capacity.');
+        return;
+      }
       const data = await response.json();
       createSession(data.session_id);
-      // Clear plan and code panel for new session
       setPlan([]);
-      setPanelContent(null);
+      clearPanel();
       onClose?.();
-    } catch (e) {
-      console.error('Failed to create session:', e);
+    } catch {
+      setCapacityError('Failed to create session.');
+    } finally {
+      setIsCreatingSession(false);
     }
-  }, [createSession, setPlan, setPanelContent, onClose]);
+  }, [isCreatingSession, createSession, setPlan, clearPanel, onClose]);
 
-  const handleDeleteSession = useCallback(
+  const handleDelete = useCallback(
     async (sessionId: string, e: React.MouseEvent) => {
       e.stopPropagation();
       try {
-        await fetch(`/api/session/${sessionId}`, { method: 'DELETE' });
+        await apiFetch(`/api/session/${sessionId}`, { method: 'DELETE' });
         deleteSession(sessionId);
-        clearMessages(sessionId);
-      } catch (e) {
-        console.error('Failed to delete session:', e);
+      } catch {
+        // Delete locally even if backend fails (session may already be gone)
+        deleteSession(sessionId);
       }
     },
-    [deleteSession, clearMessages]
+    [deleteSession],
   );
 
-  const handleSelectSession = useCallback(
+  const handleSelect = useCallback(
     (sessionId: string) => {
       switchSession(sessionId);
-      // Clear plan and code panel when switching sessions
       setPlan([]);
-      setPanelContent(null);
+      clearPanel();
       onClose?.();
     },
-    [switchSession, setPlan, setPanelContent, onClose]
+    [switchSession, setPlan, clearPanel, onClose],
   );
 
-  const handleUndo = useCallback(async () => {
-    if (!activeSessionId) return;
-    try {
-      await fetch(`/api/undo/${activeSessionId}`, { method: 'POST' });
-    } catch (e) {
-      console.error('Undo failed:', e);
-    }
-  }, [activeSessionId]);
+  const formatTime = (d: string) =>
+    new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  const formatTime = (dateString: string) => {
-    return new Date(dateString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
+  // ── Render ────────────────────────────────────────────────────────
 
   return (
-    <Box className="sidebar" sx={{ height: '100%', display: 'flex', flexDirection: 'column', bgcolor: 'var(--panel)' }}>
-      {/* Header - Aligned with AppLayout 60px */}
-      <Box sx={{ 
-        height: '60px', 
-        display: 'flex', 
-        alignItems: 'center', 
-        px: 2,
-        borderBottom: '1px solid rgba(255,255,255,0.03)'
-      }}>
-        <Box className="brand-logo" sx={{ display: 'flex' }}>
-            <img 
-              src="/hf-log-only-white.png" 
-              alt="HF Agent" 
-              style={{ height: '24px', objectFit: 'contain' }} 
-            />
-        </Box>
+    <Box
+      sx={{
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        bgcolor: 'var(--panel)',
+      }}
+    >
+      {/* ── Header ─────────────────────────────────────────────────── */}
+      <Box sx={{ px: 1.75, pt: 2, pb: 0 }}>
+        <Typography
+          variant="caption"
+          sx={{
+            color: 'var(--muted-text)',
+            fontSize: '0.65rem',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+          }}
+        >
+          Recent chats
+        </Typography>
       </Box>
 
-      {/* Content */}
-      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', p: 2, overflow: 'hidden' }}>
-        {/* System Info / Status */}
-        <Box sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
-          <StatusDiode connected={isConnected} />
-          <Typography variant="caption" sx={{ color: 'var(--muted-text)', fontFamily: 'inherit' }}>
-            {isConnected ? 'System Online' : 'Disconnected'}
-          </Typography>
-        </Box>
+      {/* ── Capacity error ─────────────────────────────────────────── */}
+      {capacityError && (
+        <Alert
+          severity="warning"
+          variant="outlined"
+          onClose={() => setCapacityError(null)}
+          sx={{
+            m: 1,
+            fontSize: '0.7rem',
+            py: 0.25,
+            '& .MuiAlert-message': { py: 0 },
+            borderColor: '#FF9D00',
+            color: 'var(--text)',
+          }}
+        >
+          {capacityError}
+        </Alert>
+      )}
 
-        <Button
-          fullWidth
-          className="create-session"
+      {/* ── Session list ───────────────────────────────────────────── */}
+      <Box
+        sx={{
+          flex: 1,
+          overflow: 'auto',
+          py: 1,
+          // Thinner scrollbar
+          '&::-webkit-scrollbar': { width: 4 },
+          '&::-webkit-scrollbar-thumb': {
+            bgcolor: 'var(--scrollbar-thumb)',
+            borderRadius: 2,
+          },
+        }}
+      >
+        {sessions.length === 0 ? (
+          <Box
+            sx={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              py: 8,
+              px: 3,
+              gap: 1.5,
+            }}
+          >
+            <ChatBubbleOutlineIcon
+              sx={{ fontSize: 28, color: 'var(--muted-text)', opacity: 0.25 }}
+            />
+            <Typography
+              variant="caption"
+              sx={{
+                color: 'var(--muted-text)',
+                opacity: 0.5,
+                textAlign: 'center',
+                lineHeight: 1.5,
+                fontSize: '0.72rem',
+              }}
+            >
+              No sessions yet
+            </Typography>
+          </Box>
+        ) : (
+          [...sessions].reverse().map((session, index) => {
+            const num = sessions.length - index;
+            const isSelected = session.id === activeSessionId;
+
+            return (
+              <Box
+                key={session.id}
+                onClick={() => handleSelect(session.id)}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1,
+                  px: 1.5,
+                  py: 0.875,
+                  mx: 0.75,
+                  borderRadius: '10px',
+                  cursor: 'pointer',
+                  transition: 'background-color 0.12s ease',
+                  bgcolor: isSelected
+                    ? 'var(--hover-bg)'
+                    : 'transparent',
+                  '&:hover': {
+                    bgcolor: 'var(--hover-bg)',
+                  },
+                  '& .delete-btn': {
+                    opacity: 0,
+                    transition: 'opacity 0.12s',
+                  },
+                  '&:hover .delete-btn': {
+                    opacity: 1,
+                  },
+                }}
+              >
+                <ChatBubbleOutlineIcon
+                  sx={{
+                    fontSize: 15,
+                    color: isSelected ? 'var(--text)' : 'var(--muted-text)',
+                    opacity: isSelected ? 0.8 : 0.4,
+                    flexShrink: 0,
+                  }}
+                />
+
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      fontWeight: isSelected ? 600 : 400,
+                      color: 'var(--text)',
+                      fontSize: '0.84rem',
+                      lineHeight: 1.4,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {session.title.startsWith('Chat ') ? `Session ${String(num).padStart(2, '0')}` : session.title}
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: 'var(--muted-text)',
+                      fontSize: '0.65rem',
+                      lineHeight: 1.2,
+                    }}
+                  >
+                    {formatTime(session.createdAt)}
+                  </Typography>
+                </Box>
+
+                <IconButton
+                  className="delete-btn"
+                  size="small"
+                  onClick={(e) => handleDelete(session.id, e)}
+                  sx={{
+                    color: 'var(--muted-text)',
+                    width: 26,
+                    height: 26,
+                    flexShrink: 0,
+                    '&:hover': { color: 'var(--accent-red)', bgcolor: 'rgba(244,67,54,0.08)' },
+                  }}
+                >
+                  <DeleteOutlineIcon sx={{ fontSize: 15 }} />
+                </IconButton>
+              </Box>
+            );
+          })
+        )}
+      </Box>
+
+      {/* ── Footer: New Session + status ──────────────────────────── */}
+      <Divider sx={{ opacity: 0.5 }} />
+      <Box
+        sx={{
+          px: 1.5,
+          py: 1.5,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 1,
+          flexShrink: 0,
+        }}
+      >
+        <Box
+          component="button"
           onClick={handleNewSession}
+          disabled={isCreatingSession}
           sx={{
             display: 'inline-flex',
             alignItems: 'center',
-            justifyContent: 'flex-start',
-            gap: '10px',
-            padding: '10px 14px',
-            borderRadius: 'var(--radius-md)',
-            border: '1px solid rgba(255,255,255,0.06)',
-            bgcolor: 'transparent',
-            color: 'var(--text)',
-            fontWeight: 600,
-            textTransform: 'none',
-            mb: 3,
+            justifyContent: 'center',
+            gap: 0.75,
+            width: '100%',
+            px: 1.5,
+            py: 1.25,
+            border: 'none',
+            borderRadius: '10px',
+            bgcolor: '#FF9D00',
+            color: '#000',
+            fontSize: '0.85rem',
+            fontWeight: 700,
+            cursor: 'pointer',
+            transition: 'all 0.12s ease',
             '&:hover': {
-                bgcolor: 'rgba(255,255,255,0.02)',
-                border: '1px solid rgba(255,255,255,0.1)',
+              bgcolor: '#FFB340',
             },
-            '&::before': {
-                content: '""',
-                width: '4px',
-                height: '20px',
-                background: 'linear-gradient(180deg, var(--accent-yellow), rgba(199,165,0,0.9))',
-                borderRadius: '4px',
-            }
+            '&:disabled': {
+              opacity: 0.5,
+              cursor: 'not-allowed',
+            },
           }}
         >
-          New Session
-        </Button>
-
-        {/* Session List */}
-        <Box sx={{ flex: 1, overflow: 'auto', mx: -1, px: 1 }}>
-            <List disablePadding sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-            {[...sessions].reverse().map((session, index) => {
-                const sessionNumber = sessions.length - index;
-                const isSelected = session.id === activeSessionId;
-                return (
-                <ListItem 
-                    key={session.id} 
-                    disablePadding 
-                    className="session-item"
-                    onClick={() => handleSelectSession(session.id)}
-                    sx={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '12px',
-                        padding: '10px',
-                        borderRadius: 'var(--radius-md)',
-                        bgcolor: isSelected ? 'rgba(255,255,255,0.05)' : 'transparent',
-                        cursor: 'pointer',
-                        transition: 'background 0.18s ease, transform 0.08s ease',
-                        '&:hover': {
-                            bgcolor: 'rgba(255,255,255,0.02)',
-                            transform: 'translateY(-1px)',
-                        },
-                        '& .delete-btn': {
-                            opacity: 0,
-                            transition: 'opacity 0.2s',
-                        },
-                        '&:hover .delete-btn': {
-                            opacity: 1,
-                        }
-                    }}
-                >
-                    <Box sx={{ flex: 1, overflow: 'hidden' }}>
-                        <Typography variant="body2" sx={{ fontWeight: 500, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            Session {String(sessionNumber).padStart(2, '0')}
-                        </Typography>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
-                            {session.isActive && <RunningIndicator />}
-                            <Typography className="time" variant="caption" sx={{ fontSize: '12px', color: 'var(--muted-text)' }}>
-                                {formatTime(session.createdAt)}
-                            </Typography>
-                        </Box>
-                    </Box>
-                    
-                    <IconButton
-                        className="delete-btn"
-                        size="small"
-                        onClick={(e) => handleDeleteSession(session.id, e)}
-                        sx={{ color: 'var(--muted-text)', '&:hover': { color: 'var(--accent-red)' } }}
-                    >
-                        <DeleteIcon fontSize="small" />
-                    </IconButton>
-                </ListItem>
-                );
-            })}
-            </List>
+          {isCreatingSession ? (
+            <>
+              <CircularProgress size={12} sx={{ color: '#000' }} />
+              Creating...
+            </>
+          ) : (
+            <>
+              <AddIcon sx={{ fontSize: 16 }} />
+              New Session
+            </>
+          )}
         </Box>
-      </Box>
 
-      {/* Footer */}
-      <Box sx={{ p: 2, borderTop: '1px solid rgba(255,255,255,0.03)' }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Typography variant="caption" className="small-note" sx={{ fontSize: '12px', color: 'var(--muted-text)' }}>
-            {sessions.length} active
-            </Typography>
-            <Tooltip title="Undo last turn">
-            <span>
-                <IconButton
-                onClick={handleUndo}
-                disabled={!activeSessionId || isProcessing}
-                size="small"
-                sx={{ color: 'var(--muted-text)', '&:hover': { color: 'var(--text)' } }}
-                >
-                <UndoIcon fontSize="small" />
-                </IconButton>
-            </span>
-            </Tooltip>
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 0.5,
+          }}
+        >
+          <StatusDot connected={isConnected} />
+          <Typography
+            variant="caption"
+            sx={{ color: 'var(--muted-text)', fontSize: '0.62rem', letterSpacing: '0.02em' }}
+          >
+            {sessions.length} session{sessions.length !== 1 ? 's' : ''} &middot; Backend {isConnected ? 'online' : 'offline'}
+          </Typography>
         </Box>
       </Box>
     </Box>

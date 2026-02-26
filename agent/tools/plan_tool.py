@@ -85,11 +85,18 @@ def get_current_plan() -> List[Dict[str, str]]:
 PLAN_TOOL_SPEC = {
     "name": "plan_tool",
     "description": (
-        "Track progress on multi-step tasks with a todo list (pending/in_progress/completed).\n\n"
-        "Use for tasks with 3+ steps. Each call replaces the entire plan (send full list).\n\n"
-        "Rules: exactly ONE task in_progress at a time. Mark completed immediately after finishing. "
-        "Only mark completed when the task fully succeeded — keep in_progress if there are errors. "
-        "Update frequently so the user sees progress."
+        "Manage task planning and progress tracking with todo list (pending/in_progress/completed statuses). "
+        "⚠️ CRITICAL: ALWAYS use for multi-step tasks (3+ steps) and MUST update frequently to show progress. "
+        "**Use when:** (1) User provides multiple tasks, (2) Complex workflows (training, evaluation, data processing), "
+        "(3) Tasks requiring multiple tool calls, (4) Need to communicate progress clearly to user, "
+        "(5) Breaking down ambiguous requests into concrete steps. "
+        "**Pattern:** Create plan at start → Mark in_progress when starting task → Mark completed immediately after finishing → User sees clear progress. "
+        "Each call replaces entire plan (full list required). "
+        "**Critical for reliability:** Exactly ONE task in_progress at a time (not zero, not multiple). "
+        "Mark tasks completed IMMEDIATELY after finishing - don't batch completions. "
+        "**For long-running tasks:** Update plan after each major step to keep user informed. "
+        "**Only mark completed when:** Task fully accomplished, no errors, all requirements met. "
+        "Keep tasks pending if blocked/errors occur - create new task to resolve blockers."
     ),
     "parameters": {
         "type": "object",

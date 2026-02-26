@@ -1,138 +1,463 @@
-import { useRef, useEffect, useMemo } from 'react';
-import { Box, Typography, IconButton } from '@mui/material';
+import { useRef, useEffect, useMemo, useState, useCallback } from 'react';
+import { Box, Stack, Typography, IconButton, Button, Tooltip } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
 import CodeIcon from '@mui/icons-material/Code';
-import TerminalIcon from '@mui/icons-material/Terminal';
 import ArticleIcon from '@mui/icons-material/Article';
+import EditIcon from '@mui/icons-material/Edit';
+import UndoIcon from '@mui/icons-material/Undo';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import CheckIcon from '@mui/icons-material/Check';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { vscDarkPlus, vs } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAgentStore } from '@/store/agentStore';
 import { useLayoutStore } from '@/store/layoutStore';
 import { processLogs } from '@/utils/logProcessor';
+import type { PanelView } from '@/store/agentStore';
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+function PlanStatusIcon({ status }: { status: string }) {
+  if (status === 'completed') return <CheckCircleIcon sx={{ fontSize: 16, color: 'var(--accent-green)' }} />;
+  if (status === 'in_progress') return <PlayCircleOutlineIcon sx={{ fontSize: 16, color: 'var(--accent-yellow)' }} />;
+  return <RadioButtonUncheckedIcon sx={{ fontSize: 16, color: 'var(--muted-text)', opacity: 0.5 }} />;
+}
+
+// ── Markdown styles (adapts via CSS vars) ────────────────────────
+const markdownSx = {
+  color: 'var(--text)',
+  fontSize: '13px',
+  lineHeight: 1.6,
+  '& p': { m: 0, mb: 1.5, '&:last-child': { mb: 0 } },
+  '& pre': {
+    bgcolor: 'var(--code-bg)',
+    p: 1.5,
+    borderRadius: 1,
+    overflow: 'auto',
+    fontSize: '12px',
+    border: '1px solid var(--tool-border)',
+  },
+  '& code': {
+    bgcolor: 'var(--hover-bg)',
+    px: 0.5,
+    py: 0.25,
+    borderRadius: 0.5,
+    fontSize: '12px',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+  },
+  '& pre code': { bgcolor: 'transparent', p: 0 },
+  '& a': {
+    color: 'var(--accent-yellow)',
+    textDecoration: 'none',
+    '&:hover': { textDecoration: 'underline' },
+  },
+  '& ul, & ol': { pl: 2.5, my: 1 },
+  '& li': { mb: 0.5 },
+  '& table': {
+    borderCollapse: 'collapse',
+    width: '100%',
+    my: 2,
+    fontSize: '12px',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+  },
+  '& th': {
+    borderBottom: '2px solid var(--border-hover)',
+    textAlign: 'left',
+    p: 1,
+    fontWeight: 600,
+  },
+  '& td': {
+    borderBottom: '1px solid var(--tool-border)',
+    p: 1,
+  },
+  '& h1, & h2, & h3, & h4': { mt: 2, mb: 1, fontWeight: 600 },
+  '& h1': { fontSize: '1.25rem' },
+  '& h2': { fontSize: '1.1rem' },
+  '& h3': { fontSize: '1rem' },
+  '& blockquote': {
+    borderLeft: '3px solid var(--accent-yellow)',
+    pl: 2,
+    ml: 0,
+    color: 'var(--muted-text)',
+  },
+} as const;
+
+// ── View toggle button ──────────────────────────────────────────
+
+function ViewToggle({ view, icon, label, isActive, onClick }: {
+  view: PanelView;
+  icon: React.ReactNode;
+  label: string;
+  isActive: boolean;
+  onClick: (v: PanelView) => void;
+}) {
+  return (
+    <Box
+      onClick={() => onClick(view)}
+      sx={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 0.5,
+        px: 1.5,
+        py: 0.75,
+        borderRadius: 1,
+        cursor: 'pointer',
+        fontSize: '0.7rem',
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        whiteSpace: 'nowrap',
+        color: isActive ? 'var(--text)' : 'var(--muted-text)',
+        bgcolor: isActive ? 'var(--tab-active-bg)' : 'transparent',
+        border: '1px solid',
+        borderColor: isActive ? 'var(--tab-active-border)' : 'transparent',
+        transition: 'all 0.15s ease',
+        '&:hover': { bgcolor: 'var(--tab-hover-bg)' },
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+    </Box>
+  );
+}
+
+// ── Component ────────────────────────────────────────────────────
 
 export default function CodePanel() {
-  const { panelContent, panelTabs, activePanelTab, setActivePanelTab, removePanelTab, plan } = useAgentStore();
-  const { setRightPanelOpen } = useLayoutStore();
+  const { panelData, panelView, panelEditable, setPanelView, updatePanelScript, setEditedScript, plan } =
+    useAgentStore();
+  const { setRightPanelOpen, themeMode } = useLayoutStore();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedContent, setEditedContent] = useState('');
+  const [originalContent, setOriginalContent] = useState('');
+  const [copied, setCopied] = useState(false);
 
-  // Get the active tab content, or fall back to panelContent for backwards compatibility
-  const activeTab = panelTabs.find(t => t.id === activePanelTab);
-  const currentContent = activeTab || panelContent;
+  const isDark = themeMode === 'dark';
+  const syntaxTheme = isDark ? vscDarkPlus : vs;
+
+  const activeSection = panelView === 'script' ? panelData?.script : panelData?.output;
+  const hasScript = !!panelData?.script;
+  const hasOutput = !!panelData?.output;
+  const hasBothViews = hasScript && hasOutput;
+
+  const isEditableScript = panelView === 'script' && panelEditable;
+  const hasUnsavedChanges = isEditing && editedContent !== originalContent;
+
+  // Sync edited content when panel data changes
+  useEffect(() => {
+    if (panelData?.script?.content && panelView === 'script' && panelEditable) {
+      setOriginalContent(panelData.script.content);
+      if (!isEditing) {
+        setEditedContent(panelData.script.content);
+      }
+    }
+  }, [panelData?.script?.content, panelView, panelEditable, isEditing]);
+
+  // Exit editing when switching away from script view or losing editable
+  useEffect(() => {
+    if (!isEditableScript && isEditing) {
+      setIsEditing(false);
+    }
+  }, [isEditableScript, isEditing]);
+
+  const handleStartEdit = useCallback(() => {
+    if (panelData?.script?.content) {
+      setEditedContent(panelData.script.content);
+      setOriginalContent(panelData.script.content);
+      setIsEditing(true);
+      setTimeout(() => textareaRef.current?.focus(), 0);
+    }
+  }, [panelData?.script?.content]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditedContent(originalContent);
+    setIsEditing(false);
+  }, [originalContent]);
+
+  const handleSaveEdit = useCallback(() => {
+    if (editedContent !== originalContent) {
+      updatePanelScript(editedContent);
+      const toolCallId = panelData?.parameters?.tool_call_id as string | undefined;
+      if (toolCallId) {
+        setEditedScript(toolCallId, editedContent);
+      }
+      setOriginalContent(editedContent);
+    }
+    setIsEditing(false);
+  }, [panelData?.parameters?.tool_call_id, editedContent, originalContent, updatePanelScript, setEditedScript]);
+
+  const handleCopy = useCallback(async () => {
+    const contentToCopy = isEditing ? editedContent : (activeSection?.content || '');
+    if (contentToCopy) {
+      try {
+        await navigator.clipboard.writeText(contentToCopy);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch (err) {
+        console.error('Failed to copy:', err);
+      }
+    }
+  }, [isEditing, editedContent, activeSection?.content]);
 
   const displayContent = useMemo(() => {
-    if (!currentContent?.content) return '';
-    // Apply log processing only for text/logs, not for code/json
-    if (!currentContent.language || currentContent.language === 'text') {
-      return processLogs(currentContent.content);
+    if (!activeSection?.content) return '';
+    if (!activeSection.language || activeSection.language === 'text') {
+      return processLogs(activeSection.content);
     }
-    return currentContent.content;
-  }, [currentContent?.content, currentContent?.language]);
+    return activeSection.content;
+  }, [activeSection?.content, activeSection?.language]);
 
   useEffect(() => {
-    // Auto-scroll only for logs tab
-    if (scrollRef.current && activePanelTab === 'logs') {
+    if (scrollRef.current && panelView === 'output') {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [displayContent, activePanelTab]);
+  }, [displayContent, panelView]);
 
-  const hasTabs = panelTabs.length > 0;
+  // ── Syntax-highlighted code block (DRY) ────────────────────────
+  const renderSyntaxBlock = (language: string) => (
+    <SyntaxHighlighter
+      language={language}
+      style={syntaxTheme}
+      customStyle={{
+        margin: 0,
+        padding: 0,
+        background: 'transparent',
+        fontSize: '13px',
+        fontFamily: 'inherit',
+      }}
+      wrapLines
+      wrapLongLines
+    >
+      {displayContent}
+    </SyntaxHighlighter>
+  );
+
+  // ── Content renderer ───────────────────────────────────────────
+  const renderContent = () => {
+    if (!activeSection?.content) {
+      return (
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', opacity: 0.5 }}>
+          <Typography variant="caption">NO CONTENT TO DISPLAY</Typography>
+        </Box>
+      );
+    }
+
+    if (isEditing && isEditableScript) {
+      return (
+        <Box sx={{ position: 'relative', width: '100%', height: '100%' }}>
+          <SyntaxHighlighter
+            language={activeSection?.language === 'python' ? 'python' : activeSection?.language === 'json' ? 'json' : 'text'}
+            style={syntaxTheme}
+            customStyle={{
+              margin: 0,
+              padding: 0,
+              background: 'transparent',
+              fontSize: '13px',
+              fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+              lineHeight: 1.55,
+              pointerEvents: 'none',
+            }}
+            wrapLines
+            wrapLongLines
+          >
+            {editedContent || ' '}
+          </SyntaxHighlighter>
+          <textarea
+            ref={textareaRef}
+            value={editedContent}
+            onChange={(e) => setEditedContent(e.target.value)}
+            spellCheck={false}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              background: 'transparent',
+              border: 'none',
+              outline: 'none',
+              resize: 'none',
+              color: 'transparent',
+              caretColor: 'var(--text)',
+              fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+              fontSize: '13px',
+              lineHeight: 1.55,
+              overflow: 'hidden',
+            }}
+          />
+        </Box>
+      );
+    }
+
+    const lang = activeSection.language;
+    if (lang === 'python') return renderSyntaxBlock('python');
+    if (lang === 'json') return renderSyntaxBlock('json');
+
+    if (lang === 'markdown') {
+      return (
+        <Box sx={markdownSx}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+        </Box>
+      );
+    }
+
+    return (
+      <Box
+        component="pre"
+        sx={{ m: 0, fontFamily: 'inherit', color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+      >
+        <code>{displayContent}</code>
+      </Box>
+    );
+  };
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', bgcolor: 'var(--panel)' }}>
-      {/* Header - Fixed 60px to align */}
-      <Box sx={{
-        height: '60px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        px: 2,
-        borderBottom: '1px solid rgba(255,255,255,0.03)'
-      }}>
-        {hasTabs ? (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
-            {panelTabs.map((tab) => {
-              const isActive = activePanelTab === tab.id;
-              // Choose icon based on tab type
-              let icon = <TerminalIcon sx={{ fontSize: 14 }} />;
-              if (tab.id === 'script' || tab.language === 'python') {
-                icon = <CodeIcon sx={{ fontSize: 14 }} />;
-              } else if (tab.id === 'tool_output' || tab.language === 'markdown' || tab.language === 'json') {
-                icon = <ArticleIcon sx={{ fontSize: 14 }} />;
-              }
-              return (
-                <Box
-                  key={tab.id}
-                  onClick={() => setActivePanelTab(tab.id)}
-                  sx={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 0.5,
-                    px: 1.5,
-                    py: 0.75,
-                    borderRadius: 1,
-                    cursor: 'pointer',
-                    fontSize: '0.7rem',
-                    fontWeight: 600,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em',
-                    color: isActive ? 'var(--text)' : 'var(--muted-text)',
-                    bgcolor: isActive ? 'rgba(255,255,255,0.08)' : 'transparent',
-                    border: '1px solid',
-                    borderColor: isActive ? 'rgba(255,255,255,0.1)' : 'transparent',
-                    transition: 'all 0.15s ease',
-                    '&:hover': {
-                      bgcolor: 'rgba(255,255,255,0.05)',
-                    },
-                  }}
-                >
-                  {icon}
-                  <span>{tab.title}</span>
-                  <Box
-                    component="span"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removePanelTab(tab.id);
-                    }}
-                    sx={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      ml: 0.5,
-                      width: 16,
-                      height: 16,
-                      borderRadius: '50%',
-                      fontSize: '0.65rem',
-                      opacity: 0.5,
-                      '&:hover': {
-                        opacity: 1,
-                        bgcolor: 'rgba(255,255,255,0.1)',
-                      },
-                    }}
-                  >
-                    ✕
-                  </Box>
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <Box
+        sx={{
+          height: 60,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          px: 2,
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1, minWidth: 0 }}>
+          {panelData ? (
+            <>
+              <Typography
+                variant="caption"
+                sx={{
+                  fontWeight: 600,
+                  color: 'var(--muted-text)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
+                  fontSize: '0.7rem',
+                  flexShrink: 0,
+                }}
+              >
+                {panelData.title}
+              </Typography>
+              {hasBothViews && (
+                <Box sx={{ display: 'flex', gap: 0.5, ml: 1 }}>
+                  <ViewToggle
+                    view="script"
+                    icon={<CodeIcon sx={{ fontSize: 14 }} />}
+                    label="Script"
+                    isActive={panelView === 'script'}
+                    onClick={setPanelView}
+                  />
+                  <ViewToggle
+                    view="output"
+                    icon={<ArticleIcon sx={{ fontSize: 14 }} />}
+                    label="Result"
+                    isActive={panelView === 'output'}
+                    onClick={setPanelView}
+                  />
                 </Box>
-              );
-            })}
-          </Box>
-        ) : (
-          <Typography variant="caption" sx={{ fontWeight: 600, color: 'var(--muted-text)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            {currentContent?.title || 'Code Panel'}
-          </Typography>
-        )}
-        <IconButton size="small" onClick={() => setRightPanelOpen(false)} sx={{ color: 'var(--muted-text)' }}>
-          <CloseIcon fontSize="small" />
-        </IconButton>
+              )}
+            </>
+          ) : (
+            <Typography
+              variant="caption"
+              sx={{ fontWeight: 600, color: 'var(--muted-text)', textTransform: 'uppercase', letterSpacing: '0.05em' }}
+            >
+              Code Panel
+            </Typography>
+          )}
+        </Box>
+
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          {activeSection?.content && (
+            <Tooltip title={copied ? 'Copied!' : 'Copy'} placement="top">
+              <IconButton
+                size="small"
+                onClick={handleCopy}
+                sx={{
+                  color: copied ? 'var(--accent-green)' : 'var(--muted-text)',
+                  '&:hover': { color: 'var(--accent-yellow)', bgcolor: 'var(--hover-bg)' },
+                }}
+              >
+                {copied ? <CheckIcon sx={{ fontSize: 18 }} /> : <ContentCopyIcon sx={{ fontSize: 18 }} />}
+              </IconButton>
+            </Tooltip>
+          )}
+          {isEditableScript && !isEditing && (
+            <Button
+              size="small"
+              startIcon={<EditIcon sx={{ fontSize: 14 }} />}
+              onClick={handleStartEdit}
+              sx={{
+                textTransform: 'none',
+                color: 'var(--muted-text)',
+                fontSize: '0.75rem',
+                py: 0.5,
+                '&:hover': { color: 'var(--accent-yellow)', bgcolor: 'var(--hover-bg)' },
+              }}
+            >
+              Edit
+            </Button>
+          )}
+          {isEditing && (
+            <>
+              <Button
+                size="small"
+                startIcon={<UndoIcon sx={{ fontSize: 14 }} />}
+                onClick={handleCancelEdit}
+                sx={{
+                  textTransform: 'none',
+                  color: 'var(--muted-text)',
+                  fontSize: '0.75rem',
+                  py: 0.5,
+                  '&:hover': { color: 'var(--accent-red)', bgcolor: 'var(--hover-bg)' },
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="small"
+                variant="contained"
+                onClick={handleSaveEdit}
+                disabled={!hasUnsavedChanges}
+                sx={{
+                  textTransform: 'none',
+                  fontSize: '0.75rem',
+                  py: 0.5,
+                  bgcolor: hasUnsavedChanges ? 'var(--accent-yellow)' : 'var(--hover-bg)',
+                  color: hasUnsavedChanges ? '#000' : 'var(--muted-text)',
+                  '&:hover': {
+                    bgcolor: hasUnsavedChanges ? 'var(--accent-yellow)' : 'var(--hover-bg)',
+                    opacity: 0.9,
+                  },
+                  '&.Mui-disabled': {
+                    bgcolor: 'var(--hover-bg)',
+                    color: 'var(--muted-text)',
+                    opacity: 0.5,
+                  },
+                }}
+              >
+                Save
+              </Button>
+            </>
+          )}
+          <IconButton size="small" onClick={() => setRightPanelOpen(false)} sx={{ color: 'var(--muted-text)' }}>
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </Box>
       </Box>
 
-      {/* Main Content Area */}
+      {/* ── Main content area ─────────────────────────────────── */}
       <Box sx={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        {!currentContent ? (
+        {!panelData ? (
           <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', p: 4 }}>
             <Typography variant="body2" color="text.secondary" sx={{ opacity: 0.5 }}>
               NO DATA LOADED
@@ -144,174 +469,72 @@ export default function CodePanel() {
               ref={scrollRef}
               className="code-panel"
               sx={{
-                background: '#0A0B0C',
+                bgcolor: 'var(--code-panel-bg)',
                 borderRadius: 'var(--radius-md)',
-                padding: '18px',
-                border: '1px solid rgba(255,255,255,0.03)',
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace',
+                p: '18px',
+                border: '1px solid var(--border)',
+                fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
                 fontSize: '13px',
                 lineHeight: 1.55,
                 height: '100%',
                 overflow: 'auto',
               }}
             >
-              {currentContent.content ? (
-                currentContent.language === 'python' ? (
-                  <SyntaxHighlighter
-                    language="python"
-                    style={vscDarkPlus}
-                    customStyle={{
-                      margin: 0,
-                      padding: 0,
-                      background: 'transparent',
-                      fontSize: '13px',
-                      fontFamily: 'inherit',
-                    }}
-                    wrapLines={true}
-                    wrapLongLines={true}
-                  >
-                    {displayContent}
-                  </SyntaxHighlighter>
-                ) : currentContent.language === 'json' ? (
-                  <SyntaxHighlighter
-                    language="json"
-                    style={vscDarkPlus}
-                    customStyle={{
-                      margin: 0,
-                      padding: 0,
-                      background: 'transparent',
-                      fontSize: '13px',
-                      fontFamily: 'inherit',
-                    }}
-                    wrapLines={true}
-                    wrapLongLines={true}
-                  >
-                    {displayContent}
-                  </SyntaxHighlighter>
-                ) : currentContent.language === 'markdown' ? (
-                  <Box sx={{
-                    color: 'var(--text)',
-                    fontSize: '13px',
-                    lineHeight: 1.6,
-                    '& p': { m: 0, mb: 1.5, '&:last-child': { mb: 0 } },
-                    '& pre': {
-                      bgcolor: 'rgba(0,0,0,0.4)',
-                      p: 1.5,
-                      borderRadius: 1,
-                      overflow: 'auto',
-                      fontSize: '12px',
-                      border: '1px solid rgba(255,255,255,0.05)',
-                    },
-                    '& code': {
-                      bgcolor: 'rgba(255,255,255,0.05)',
-                      px: 0.5,
-                      py: 0.25,
-                      borderRadius: 0.5,
-                      fontSize: '12px',
-                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
-                    },
-                    '& pre code': { bgcolor: 'transparent', p: 0 },
-                    '& a': {
-                      color: 'var(--accent-yellow)',
-                      textDecoration: 'none',
-                      '&:hover': { textDecoration: 'underline' },
-                    },
-                    '& ul, & ol': { pl: 2.5, my: 1 },
-                    '& li': { mb: 0.5 },
-                    '& table': {
-                      borderCollapse: 'collapse',
-                      width: '100%',
-                      my: 2,
-                      fontSize: '12px',
-                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
-                    },
-                    '& th': {
-                      borderBottom: '2px solid rgba(255,255,255,0.15)',
-                      textAlign: 'left',
-                      p: 1,
-                      fontWeight: 600,
-                    },
-                    '& td': {
-                      borderBottom: '1px solid rgba(255,255,255,0.05)',
-                      p: 1,
-                    },
-                    '& h1, & h2, & h3, & h4': {
-                      mt: 2,
-                      mb: 1,
-                      fontWeight: 600,
-                    },
-                    '& h1': { fontSize: '1.25rem' },
-                    '& h2': { fontSize: '1.1rem' },
-                    '& h3': { fontSize: '1rem' },
-                    '& blockquote': {
-                      borderLeft: '3px solid rgba(255,255,255,0.2)',
-                      pl: 2,
-                      ml: 0,
-                      color: 'var(--muted-text)',
-                    },
-                  }}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
-                  </Box>
-                ) : (
-                  <Box component="pre" sx={{
-                    m: 0,
-                    fontFamily: 'inherit',
-                    color: 'var(--text)',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-all'
-                  }}>
-                    <code>{displayContent}</code>
-                  </Box>
-                )
-              ) : (
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', opacity: 0.5 }}>
-                  <Typography variant="caption">
-                    NO CONTENT TO DISPLAY
-                  </Typography>
-                </Box>
-              )}
+              {renderContent()}
             </Box>
           </Box>
         )}
       </Box>
 
-      {/* Plan Display at Bottom */}
+      {/* ── Plan display (bottom) ─────────────────────────────── */}
       {plan && plan.length > 0 && (
-        <Box sx={{ 
-            borderTop: '1px solid rgba(255,255,255,0.03)',
-            bgcolor: 'rgba(0,0,0,0.2)',
+        <Box
+          sx={{
+            borderTop: '1px solid var(--border)',
+            bgcolor: 'var(--plan-bg)',
             maxHeight: '30%',
             display: 'flex',
-            flexDirection: 'column'
-        }}>
-            <Box sx={{ p: 1.5, borderBottom: '1px solid rgba(255,255,255,0.03)', display: 'flex', alignItems: 'center', gap: 1 }}>
-                <Typography variant="caption" sx={{ fontWeight: 600, color: 'var(--muted-text)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    CURRENT PLAN
+            flexDirection: 'column',
+          }}
+        >
+          <Box
+            sx={{
+              p: 1.5,
+              borderBottom: '1px solid var(--border)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+            }}
+          >
+            <Typography
+              variant="caption"
+              sx={{ fontWeight: 600, color: 'var(--muted-text)', textTransform: 'uppercase', letterSpacing: '0.05em' }}
+            >
+              CURRENT PLAN
+            </Typography>
+          </Box>
+
+          <Stack spacing={1} sx={{ p: 2, overflow: 'auto' }}>
+            {plan.map((item) => (
+              <Stack key={item.id} direction="row" alignItems="flex-start" spacing={1.5}>
+                <Box sx={{ mt: 0.2 }}>
+                  <PlanStatusIcon status={item.status} />
+                </Box>
+                <Typography
+                  variant="body2"
+                  sx={{
+                    fontSize: '13px',
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+                    color: item.status === 'completed' ? 'var(--muted-text)' : 'var(--text)',
+                    textDecoration: item.status === 'completed' ? 'line-through' : 'none',
+                    opacity: item.status === 'pending' ? 0.7 : 1,
+                  }}
+                >
+                  {item.content}
                 </Typography>
-            </Box>
-            <Box sx={{ p: 2, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 1 }}>
-                {plan.map((item) => (
-                    <Box key={item.id} sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.5 }}>
-                        <Box sx={{ mt: 0.2 }}>
-                            {item.status === 'completed' && <CheckCircleIcon sx={{ fontSize: 16, color: 'var(--accent-green)' }} />}
-                            {item.status === 'in_progress' && <PlayCircleOutlineIcon sx={{ fontSize: 16, color: 'var(--accent-yellow)' }} />}
-                            {item.status === 'pending' && <RadioButtonUncheckedIcon sx={{ fontSize: 16, color: 'var(--muted-text)', opacity: 0.5 }} />}
-                        </Box>
-                        <Typography 
-                            variant="body2" 
-                            sx={{ 
-                                fontSize: '13px', 
-                                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
-                                color: item.status === 'completed' ? 'var(--muted-text)' : 'var(--text)',
-                                textDecoration: item.status === 'completed' ? 'line-through' : 'none',
-                                opacity: item.status === 'pending' ? 0.7 : 1
-                            }}
-                        >
-                            {item.content}
-                        </Typography>
-                    </Box>
-                ))}
-            </Box>
+              </Stack>
+            ))}
+          </Stack>
         </Box>
       )}
     </Box>
