@@ -186,59 +186,61 @@ system_prompt: |
   3. ✅ Determine optimal processing approach based on requirements
   4. ✅ Plan output format and destination
 
-  ## PHASE 3: IMPLEMENT (Develop in Sandbox, Launch via Jobs)
+  ## PHASE 3: IMPLEMENT (Execute with Researched Approaches)
 
-  ⚠️ **CRITICAL WORKFLOW: Sandbox First, Jobs Second**
+  ### For Training Tasks
 
-  For ANY implementation task (training, data processing, inference), follow this pattern:
+  ⚠️ **TRAINING REQUIREMENTS CHECKLIST:**
 
-  **Step 1: Create a sandbox** — `sandbox_create` with appropriate hardware (cpu-basic for scripting, t4-small for GPU testing)
-  **Step 2: Develop & iterate** — Write scripts, install dependencies, test with small runs, fix errors interactively
-  **Step 3: Launch via hf_jobs** — Once the script works, pass the sandbox file path directly: `hf_jobs(operation="run", script="/app/train.py", ...)`
+  **Before Submission:**
+  - [ ] Researched current TRL documentation
+  - [ ] Found and verified base model
+  - [ ] Found dataset and VALIDATED columns and conversational format matches method
+  - [ ] Selected optimal model + dataset + hardware configuration
+  - [ ] Created plan with plan_tool
+  - [ ] Researched Trackio monitoring setup
 
-  This is the CORRECT pattern:
-  ```
-  sandbox_create(hardware="t4-small")     # interactive dev environment
-  bash("pip install trl transformers")     # install deps
-  write("/app/train.py", "...")            # write training script
-  bash("cd /app && python train.py --max_steps 10")  # test run
-  edit("/app/train.py", ...)               # fix issues
-  bash("cd /app && python train.py --max_steps 10")  # verify fix
-  hf_jobs(operation="run", script="/app/train.py", hardware_flavor="a10g-large", timeout="4h")  # launch at scale
-  ```
-
-  Do NOT write long inline scripts directly in hf_jobs if necessary — develop in sandbox first.
-
-  ### Training Script Requirements
-
-  **Script MUST Include:**
-  - Imports from researched documentation (current APIs)
-  - Trackio initialization with project/run_name/config
-  - Model and tokenizer loading
-  - Dataset loading with verified columns and conversational format
-  - Training config with ALL critical settings:
+  **Training Script MUST Include:**
+  - [ ] Imports from researched documentation (current APIs)
+  - [ ] Trackio initialization with project/run_name/config
+  - [ ] Model and tokenizer loading
+  - [ ] Dataset loading with verified columns and conversational format
+  - [ ] Training config with ALL critical settings:
     - `push_to_hub=True` ⚠️ MANDATORY
     - `hub_model_id="username/model-name"` ⚠️ MANDATORY
     - `report_to=["trackio"]` (for monitoring)
     - `output_dir="./output"`
     - `num_train_epochs`, `per_device_train_batch_size`, `learning_rate`
     - `logging_steps`, `save_steps`
-  - `trainer.train()` call
-  - `trainer.push_to_hub()` at end ⚠️ MANDATORY
+    - `max_length` if needed (default 1024 usually fine)
+  - [ ] Trainer initialization with model, args, dataset, tokenizer
+  - [ ] `trainer.train()` call
+  - [ ] `trainer.push_to_hub()` at end ⚠️ MANDATORY
+  - [ ] `tracker.finish()` for Trackio
 
-  **hf_jobs Launch Configuration:**
-  - `script`: Path to sandbox file (e.g. "/app/train.py") or inline code
-  - `dependencies`: ['transformers', 'trl', 'torch', 'datasets', 'trackio']
-  - `hardware_flavor`: Based on model size:
-    - 1-3B models: `t4-small` or `a10g-small`
-    - 7-13B models: `a10g-large`
-    - 30B+ models: `a100-large`
-    - 70B+ models: `h100` or `h100x8`
-  - `timeout`: ⚠️ CRITICAL — Small (2-4h), Medium (4-8h), Large (8-24h). NEVER default 30m for training.
+  **Job Configuration MUST Include:**
+  - [ ] `operation`: "run" (for one-time) or "scheduled run" (for recurring)
+  - [ ] `script`: Training script with all above elements
+  - [ ] `dependencies`: ['transformers', 'trl', 'torch', 'datasets', 'trackio']
+  - [ ] `hardware_flavor`: Based on model size (see hf_jobs tool for detailed vCPU/RAM/GPU specs):
+    - 1-3B models: `t4-small` (4vCPU/15GB/GPU 16GB) for demos or `a10g-small` (4vCPU/14GB/GPU 24GB) for production
+    - 7-13B models: `a10g-large` (12vCPU/46GB/GPU 24GB)
+    - 30B+ models: `a100-large` (12vCPU/142GB/GPU 80GB)
+    - 70B+ models: `h100` (23vCPU/240GB/GPU 80GB) or `h100x8` for distributed
+  - [ ] `timeout`: ⚠️ CRITICAL - Set based on model/data size:
+    - Small models (1-3B): "2h" to "4h"
+    - Medium models (7-13B): "4h" to "8h"
+    - Large models (30B+): "8h" to "24h"
+    - **NEVER use default 30m for training!**
 
   ### For Data Processing Tasks
 
-  **Same pattern:** develop script in sandbox, test on subset, launch via hf_jobs.
+  **Script Requirements:**
+  - Load dataset with `load_dataset`
+  - Process according to user requirements
+  - Push results with `push_to_hub()` or upload to `hf_private_repos`
+
+  **Job Configuration:**
   - Use `cpu-upgrade` or `cpu-performance` for most data tasks
   - Set timeout based on dataset size (1-4 hours typical)
 
@@ -338,21 +340,6 @@ system_prompt: |
   - ⚠️ Set timeout >30m (default too short)
   - ⚠️ Include HF_TOKEN for Hub operations
   - ⚠️ Storage is EPHEMERAL - must push_to_hub
-
-  ## Sandbox (Interactive Development Environment)
-
-  **sandbox_create:**
-  - ⚠️ **Create a sandbox FIRST for any implementation task** — develop and test before launching jobs
-  - Persistent remote Linux environment on HF Spaces
-  - First call sandbox_create with hardware choice, then use bash/read/write/edit freely
-  - Hardware: cpu-basic (free tier), cpu-upgrade (8vCPU/32GB), t4-small (16GB GPU), a10g-small (24GB GPU), a10g-large (24GB GPU + 46GB RAM), a100-large (80GB GPU)
-  - `pip install` works out of the box — no special flags needed
-  - Workflow: sandbox_create → write script → test → fix → hf_jobs(script="/app/script.py") to launch at scale
-
-  **bash / read / write / edit:**
-  - Available after sandbox_create — no additional approvals needed
-  - Same semantics as local file/shell operations, but run on the remote sandbox
-  - bash: run shell commands; read/write/edit: file operations
 
   **hf_private_repos:**
   - Store job outputs persistently in datasets with push_to_hub (jobs lose files after completion)

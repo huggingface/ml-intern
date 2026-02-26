@@ -9,7 +9,9 @@ import base64
 import http.client
 import os
 import re
-from typing import Any, Awaitable, Callable, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional, Callable, Awaitable
+
+import logging
 
 import httpx
 from huggingface_hub import HfApi
@@ -17,6 +19,8 @@ from huggingface_hub.utils import HfHubHTTPError
 
 from agent.core.session import Event
 from agent.tools.types import ToolResult
+
+logger = logging.getLogger(__name__)
 from agent.tools.utilities import (
     format_job_details,
     format_jobs_table,
@@ -25,33 +29,38 @@ from agent.tools.utilities import (
 )
 
 # Hardware flavors
-CPU_FLAVORS = ["cpu-basic", "cpu-upgrade"]
+CPU_FLAVORS = ["cpu-basic", "cpu-upgrade", "cpu-performance", "cpu-xl"]
 GPU_FLAVORS = [
+    "sprx8",
+    "zero-a10g",
     "t4-small",
     "t4-medium",
-    "a10g-small",
-    "a10g-large",
-    "a10g-largex2",
-    "a10g-largex4",
-    "a100-large",
-    "a100x4",
-    "a100x8",
     "l4x1",
     "l4x4",
     "l40sx1",
     "l40sx4",
     "l40sx8",
+    "a10g-small",
+    "a10g-large",
+    "a10g-largex2",
+    "a10g-largex4",
+    "a100-large",
+    "h100",
+    "h100x8",
 ]
 
 # Detailed specs for display (vCPU/RAM/GPU VRAM)
-CPU_FLAVORS_DESC = "cpu-basic(2vCPU/16GB), cpu-upgrade(8vCPU/32GB)"
+CPU_FLAVORS_DESC = (
+    "cpu-basic(2vCPU/16GB), cpu-upgrade(8vCPU/32GB), cpu-performance, cpu-xl"
+)
 GPU_FLAVORS_DESC = (
     "t4-small(4vCPU/15GB/GPU 16GB), t4-medium(8vCPU/30GB/GPU 16GB), "
-    "a10g-small(4vCPU/15GB/GPU 24GB), a10g-large(12vCPU/46GB/GPU 24GB), "
-    "a10g-largex2(24vCPU/92GB/GPU 48GB), a10g-largex4(48vCPU/184GB/GPU 96GB), "
-    "a100-large(12vCPU/142GB/GPU 80GB), a100x4(48vCPU/568GB/GPU 320GB), a100x8(96vCPU/1136GB/GPU 640GB), "
     "l4x1(8vCPU/30GB/GPU 24GB), l4x4(48vCPU/186GB/GPU 96GB), "
-    "l40sx1(8vCPU/62GB/GPU 48GB), l40sx4(48vCPU/382GB/GPU 192GB), l40sx8(192vCPU/1534GB/GPU 384GB)"
+    "l40sx1(8vCPU/62GB/GPU 48GB), l40sx4(48vCPU/382GB/GPU 192GB), l40sx8(192vCPU/1534GB/GPU 384GB), "
+    "a10g-small(4vCPU/14GB/GPU 24GB), a10g-large(12vCPU/46GB/GPU 24GB), "
+    "a10g-largex2(24vCPU/92GB/GPU 48GB), a10g-largex4(48vCPU/184GB/GPU 96GB), "
+    "a100-large(12vCPU/142GB/GPU 80GB), h100(23vCPU/240GB/GPU 80GB), h100x8(184vCPU/1920GB/GPU 640GB), "
+    "zero-a10g(dynamic alloc)"
 )
 SPECIALIZED_FLAVORS = ["inf2x6"]
 ALL_FLAVORS = CPU_FLAVORS + GPU_FLAVORS + SPECIALIZED_FLAVORS
@@ -113,23 +122,11 @@ def _filter_uv_install_output(logs: list[str]) -> list[str]:
     return logs
 
 
-_DEFAULT_ENV = {
-    "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-    "TQDM_DISABLE": "1",
-    "TRANSFORMERS_VERBOSITY": "warning",
-    "HF_HUB_ENABLE_HF_TRANSFER": "1",
-}
-
-
-def _add_default_env(params: Dict[str, Any] | None) -> Dict[str, Any]:
-    """Inject default env vars for clean, agent-friendly output."""
-    result = dict(_DEFAULT_ENV)
-    result.update(params or {})  # user-provided values override defaults
-    return result
-
-
-def _add_environment_variables(params: Dict[str, Any] | None) -> Dict[str, Any]:
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or ""
+def _add_environment_variables(
+    params: Dict[str, Any] | None, user_token: str | None = None
+) -> Dict[str, Any]:
+    # Prefer the authenticated user's OAuth token, fall back to global env var
+    token = user_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or ""
 
     # Start with user-provided env vars, then force-set token last
     result = dict(params or {})
@@ -285,10 +282,15 @@ class HfJobsTool:
         hf_token: Optional[str] = None,
         namespace: Optional[str] = None,
         log_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        session: Any = None,
+        tool_call_id: Optional[str] = None,
     ):
+        self.hf_token = hf_token
         self.api = HfApi(token=hf_token)
         self.namespace = namespace
         self.log_callback = log_callback
+        self.session = session
+        self.tool_call_id = tool_call_id
 
     async def execute(self, params: Dict[str, Any]) -> ToolResult:
         """Execute the specified operation"""
@@ -384,9 +386,7 @@ class HfJobsTool:
                 def log_producer():
                     try:
                         # fetch_job_logs is a blocking sync generator
-                        logs_gen = self.api.fetch_job_logs(
-                            job_id=job_id, namespace=namespace
-                        )
+                        logs_gen = self.api.fetch_job_logs(job_id=job_id, namespace=namespace)
                         for line in logs_gen:
                             # Push line to queue thread-safely
                             loop.call_soon_threadsafe(queue.put_nowait, line)
@@ -413,7 +413,7 @@ class HfJobsTool:
 
                     # Process log line
                     log_line = item
-                    print("\t" + log_line)
+                    logger.debug(log_line)
                     if self.log_callback:
                         await self.log_callback(log_line)
                     all_logs.append(log_line)
@@ -441,19 +441,19 @@ class HfJobsTool:
 
                     if current_status in terminal_states:
                         # Job finished, no need to retry
-                        print(f"\tJob reached terminal state: {current_status}")
+                        logger.info(f"Job reached terminal state: {current_status}")
                         break
 
                     # Job still running, retry connection
-                    print(
-                        f"\tConnection interrupted ({str(e)[:50]}...), reconnecting in {retry_delay}s..."
+                    logger.warning(
+                        f"Connection interrupted ({str(e)[:50]}...), reconnecting in {retry_delay}s..."
                     )
                     await asyncio.sleep(retry_delay)
                     continue
 
                 except (ConnectionError, TimeoutError, OSError):
                     # Can't even check job status, wait and retry
-                    print(f"\tConnection error, retrying in {retry_delay}s...")
+                    logger.warning(f"Connection error, retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
                     continue
 
@@ -509,16 +509,30 @@ class HfJobsTool:
                 self.api.run_job,
                 image=image,
                 command=command,
-                env=_add_default_env(args.get("env")),
-                secrets=_add_environment_variables(args.get("secrets")),
+                env=args.get("env"),
+                secrets=_add_environment_variables(args.get("secrets"), self.hf_token),
                 flavor=args.get("hardware_flavor", "cpu-basic"),
                 timeout=args.get("timeout", "30m"),
                 namespace=self.namespace,
             )
 
+            # Send job URL immediately after job creation (before waiting for completion)
+            if self.session and self.tool_call_id:
+                await self.session.send_event(
+                    Event(
+                        event_type="tool_state_change",
+                        data={
+                            "tool_call_id": self.tool_call_id,
+                            "tool": "hf_jobs",
+                            "state": "running",
+                            "jobUrl": job.url,
+                        },
+                    )
+                )
+
             # Wait for completion and stream logs
-            print(f"{job_type} job started: {job.url}")
-            print("Streaming logs...\n---\n")
+            logger.info(f"{job_type} job started: {job.url}")
+            logger.info("Streaming logs...")
 
             final_status, all_logs = await self._wait_for_job_completion(
                 job_id=job.id,
@@ -727,8 +741,8 @@ To verify, call this tool with `{{"operation": "inspect", "job_id": "{job_id}"}}
                 image=image,
                 command=command,
                 schedule=schedule,
-                env=_add_default_env(args.get("env")),
-                secrets=_add_environment_variables(args.get("secrets")),
+                env=args.get("env"),
+                secrets=_add_environment_variables(args.get("secrets"), self.hf_token),
                 flavor=args.get("hardware_flavor", "cpu-basic"),
                 timeout=args.get("timeout", "30m"),
                 namespace=self.namespace,
@@ -887,31 +901,56 @@ To inspect, call this tool with `{{"operation": "scheduled inspect", "scheduled_
 HF_JOBS_TOOL_SPEC = {
     "name": "hf_jobs",
     "description": (
-        "Execute Python scripts or Docker containers on HF cloud infrastructure.\n\n"
-        "Two modes (mutually exclusive): Python mode (script + dependencies) or Docker mode (command + image). "
-        "Provide exactly ONE of 'script' or 'command'.\n\n"
-        "BEFORE submitting training/fine-tuning jobs:\n"
-        "- You MUST have called github_find_examples + github_read_file to find a working reference implementation. "
-        "Scripts based on your internal knowledge WILL use outdated APIs and fail.\n"
-        "- You MUST have validated dataset format via hf_inspect_dataset or hub_repo_details.\n"
-        "- Training config MUST include push_to_hub=True and hub_model_id. "
-        "Job storage is EPHEMERAL — all files are deleted when the job ends. Without push_to_hub, trained models are lost permanently.\n"
-        "- Include trackio monitoring and provide the dashboard URL to the user.\n\n"
-        "BATCH/ABLATION JOBS: Submit ONE job first. Check logs to confirm it starts training successfully. "
-        "Only then submit the remaining jobs. Never submit all at once — if there's a bug, all jobs fail.\n\n"
-        "Operations: run, ps, logs, inspect, cancel, scheduled run/ps/inspect/delete/suspend/resume.\n\n"
-        f"Hardware: CPU: {CPU_FLAVORS_DESC}. GPU: {GPU_FLAVORS_DESC}.\n"
-        "Common picks: t4-small ($0.60/hr, 1-3B), a10g-large ($2/hr, 7-13B), a100-large ($4/hr, 30B+), h100 ($6/hr, 70B+). "
-        "Note: a10g-small and a10g-large have the SAME 24GB GPU — the difference is CPU/RAM only.\n\n"
-        "OOM RECOVERY: When a training job fails with CUDA OOM:\n"
-        "1. Reduce per_device_train_batch_size and increase gradient_accumulation_steps proportionally (keep effective batch size identical)\n"
-        "2. Enable gradient_checkpointing=True\n"
-        "3. Upgrade to larger GPU (a10g→a100→h100)\n"
-        "Do NOT switch training methods (e.g. full SFT to LoRA) or reduce max_length — those change what the user gets and require explicit approval.\n\n"
-        "Examples:\n"
-        "Training: {'operation': 'run', 'script': '/app/train.py', 'dependencies': ['transformers', 'trl', 'torch', 'datasets', 'trackio'], 'hardware_flavor': 'a100-large', 'timeout': '8h'}\n"
-        "Monitor: {'operation': 'ps'}, {'operation': 'logs', 'job_id': 'xxx'}, {'operation': 'cancel', 'job_id': 'xxx'}"
-        "Docker: {'operation': 'run', 'command': ['duckdb', '-c', 'select 1 + 2'], 'image': 'duckdb/duckdb', 'hardware_flavor': 'cpu-basic', 'timeout': '1h'}\n"
+        "Execute Python scripts or Docker containers on HF cloud infrastructure (CPUs/GPUs) in one of two modes. "
+        "\n\n"
+        "**Two Modes (mutually exclusive):**\n"
+        "1. Python mode: using 'script' arg (REQUIRED) + 'dependencies'\n"
+        "2. Docker mode: using 'command' arg (REQUIRED) + 'image'\n\n"
+        "🚨 **REQUIRED:** You MUST provide exactly ONE of: 'script' (Python code as string) OR 'command' (Docker command as array). "
+        "They are mutually exclusive - provide one or the other, never both, never neither. "
+        "Do NOT call with just {'operation': 'run'} - always include your code. Example: {'operation': 'run', 'script': 'import torch; print(torch.cuda.is_available())', 'dependencies': ['torch']} or {'operation': 'run', 'command': ['duckdb', '-c', 'select 1 + 2']', 'image': 'duckdb/duckdb'}\n\n"
+        "⚠️ CRITICAL for reliability: (1) Jobs run ASYNC - provide monitoring URL immediately, don't poll; "
+        "(2) Set timeout >30min (default too short - training needs 2-8h); "
+        "(3) HF_TOKEN auto-loaded to secrets for Hub ops (push_to_hub, private repos); "
+        "(4) Job storage EPHEMERAL - MUST push_to_hub() or ALL work is LOST. "
+        "**Use when:** User wants cloud compute, training models, data processing, batch inference, GPU workloads, scheduled tasks. "
+        "ALWAYS use this tool (✓), never bash 'hf jobs' commands (✗). Pass script content inline (✓), don't save to files unless requested (✗). "
+        "\n\n"
+        "**Operations:** run, ps, logs, inspect, cancel, scheduled run, scheduled ps, scheduled inspect, scheduled delete, scheduled suspend, scheduled resume. "
+        "**Available Hardware (vCPU/RAM/GPU):**\n"
+        f"• CPU: {CPU_FLAVORS_DESC}\n"
+        f"• GPU: {GPU_FLAVORS_DESC}\n"
+        "  ◦ Common: t4-small ($0.60/hr, demos/1-3B models), a10g-small ($1/hr), a10g-large ($2/hr, production 7-13B), a100-large ($4/hr, 30B+), h100 ($6/hr, 70B+)\n\n"
+        "**After Submission Ground Rules:**\n"
+        "✓ Return immediately with job ID and monitoring URL\n"
+        "✓ Provide expected completion time and cost estimate\n"
+        "✓ For training: Include Trackio dashboard URL\n"
+        "✓ Note user can check status later\n"
+        "✗ DON'T poll logs automatically\n"
+        "✗ DON'T wait for completion\n"
+        "✗ DON'T check status unless user asks\n\n"
+        "**For Training Tasks:**\n"
+        "• ALWAYS research TRL docs first: explore_hf_docs('trl') → fetch_hf_docs(<trainer_url>)\n"
+        "• ALWAYS validate dataset format with hub_repo_details (SFT needs messages/text, DPO needs chosen/rejected)\n"
+        "• ALWAYS include Trackio monitoring in script (explore_hf_docs('trackio'))\n"
+        "• ALWAYS enable push_to_hub=True in training config\n"
+        "• Set timeout 2-8h for training (NOT default 30m)\n"
+        "• Confirm model/dataset choices with user before submitting\n\n"
+        "**Examples:**\n\n"
+        "**Training - Fine-tune LLM:**\n"
+        "{'operation': 'run', 'script': '# Training script with TRL\\nfrom trl import SFTConfig, SFTTrainer\\nfrom transformers import AutoModelForCausalLM\\nmodel = AutoModelForCausalLM.from_pretrained(\"Qwen/Qwen3-4B\")\\n# ... researched implementation from docs ...\\ntrainer.train()\\ntrainer.push_to_hub(\"user-name/my-model\")', 'dependencies': ['transformers', 'trl', 'torch', 'datasets', 'trackio'], 'hardware_flavor': 'a10g-large', 'timeout': '4h'}\n\n"
+        "**Data Processing:**\n"
+        "{'operation': 'run', 'script': 'from datasets import load_dataset\\nds = load_dataset(\"data\")\\n# process...\\nds.push_to_hub(\"user/processed\")', 'dependencies': ['datasets', 'pandas'], 'hardware_flavor': 'cpu-upgrade', 'timeout': '2h'}\n\n"
+        "**Scheduled Daily Job:**\n"
+        "{'operation': 'scheduled run', 'schedule': '@daily', 'script': 'from datasets import Dataset\\nimport pandas as pd\\n# scrape/generate data\\ndf = pd.DataFrame(data)\\nds = Dataset.from_pandas(df)\\nds.push_to_hub(\"user-name/daily-dataset\")', 'dependencies': ['datasets', 'pandas'], 'hardware_flavor': 'cpu-basic'}\n\n"
+        "**Docker Mode:**\n"
+        "{'operation': 'run', 'image': 'pytorch/pytorch:2.0.0-cuda11.7-cudnn8-runtime', 'command': ['python', 'train.py', '--epochs', '10'], 'hardware_flavor': 'a100-large'}\n\n"
+        "**Monitor Operations:**\n"
+        "{'operation': 'ps'} - List all jobs\n"
+        "{'operation': 'logs', 'job_id': 'xxx'} - Stream logs (only when user requests)\n"
+        "{'operation': 'inspect', 'job_id': 'xxx'} - Get job details\n"
+        "{'operation': 'cancel', 'job_id': 'xxx'} - Stop job\n\n"
+        "⚠️ CRITICAL: Files created during execution are DELETED when job finishes. MUST push_to_hub() all outputs (models, datasets, artifacts) in script. For logs/scripts, use hf_private_repos after completion."
     ),
     "parameters": {
         "type": "object",
@@ -931,65 +970,58 @@ HF_JOBS_TOOL_SPEC = {
                     "scheduled suspend",
                     "scheduled resume",
                 ],
-                "description": "Operation to execute.",
+                "description": (
+                    "Operation to execute. Valid values: [run, ps, logs, inspect, cancel, "
+                    "scheduled run, scheduled ps, scheduled inspect, scheduled delete, "
+                    "scheduled suspend, scheduled resume]"
+                ),
             },
+            # Python/UV specific parameters
             "script": {
                 "type": "string",
-                "description": (
-                    "Python code or sandbox file path (e.g. '/app/train.py') or URL. "
-                    "Triggers Python mode. For ML training: base this on a working example found via github_find_examples, not on internal knowledge. "
-                    "Mutually exclusive with 'command'."
-                ),
+                "description": "Python code to execute. Triggers Python mode (auto pip install). Use with 'run'/'scheduled run'. Mutually exclusive with 'command'.",
             },
             "dependencies": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": (
-                    "Pip packages to install. Include ALL required packages. "
-                    "Common training set: ['transformers', 'trl', 'torch', 'datasets', 'trackio', 'accelerate']. "
-                    "Only used with 'script'."
-                ),
+                "description": "Pip packages to install. Example: ['trl', 'torch', 'datasets', 'transformers']. Only used with 'script'.",
             },
+            # Docker specific parameters
             "image": {
                 "type": "string",
-                "description": "Docker image. Optional — auto-selected if not provided. Use with 'command'.",
+                "description": "Docker image. Example: 'pytorch/pytorch:2.0.0-cuda11.7-cudnn8-runtime'. Use with 'run'/'scheduled run'. Optional (auto-selected if not provided).",
             },
             "command": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Command to execute as list. Triggers Docker mode. Mutually exclusive with 'script'.",
+                "description": "Command to execute as list. Example: ['python', 'train.py', '--epochs', '10']. Triggers Docker mode. Use with 'run'/'scheduled run'. Mutually exclusive with 'script'.",
             },
+            # Hardware and environment
             "hardware_flavor": {
                 "type": "string",
-                "description": (
-                    "Hardware type. Sizing guide: 1-3B params → t4-small/a10g-small, "
-                    "7-13B → a10g-large, 30B+ → a100-large, 70B+ → h100/h100x8. "
-                    f"All options: CPU: {CPU_FLAVORS}. GPU: {GPU_FLAVORS}."
-                ),
+                "description": f"Hardware type. Available CPU flavors: {CPU_FLAVORS}. Available GPU flavors: {GPU_FLAVORS}. Use with 'run'/'scheduled run'.",
             },
             "timeout": {
                 "type": "string",
-                "description": (
-                    "Maximum job runtime. MUST be >2h for any training job — default 30m kills training mid-run. "
-                    "Guidelines: 1-3B models: 3-4h, 7-13B: 6-8h, 30B+: 12-24h. "
-                    "Use 30m-1h only for quick data processing or inference tasks. Default: '30m'."
-                ),
+                "description": "Max runtime. Examples: '30m', '2h', '4h'. Default: '30m'. Important for long training jobs. Use with 'run'/'scheduled run'.",
             },
             "env": {
                 "type": "object",
-                "description": "Environment variables {'KEY': 'VALUE'}. HF_TOKEN is auto-included.",
+                "description": "Environment variables. Format: {'KEY': 'VALUE'}. HF_TOKEN is automatically included from your auth. Use with 'run'/'scheduled run'.",
             },
+            # Job management parameters
             "job_id": {
                 "type": "string",
-                "description": "Job ID. Required for: logs, inspect, cancel.",
+                "description": "Job ID to operate on. Required for: 'logs', 'inspect', 'cancel'.",
             },
+            # Scheduled job parameters
             "scheduled_job_id": {
                 "type": "string",
-                "description": "Scheduled job ID. Required for: scheduled inspect/delete/suspend/resume.",
+                "description": "Scheduled job ID. Required for: 'scheduled inspect', 'scheduled delete', 'scheduled suspend', 'scheduled resume'.",
             },
             "schedule": {
                 "type": "string",
-                "description": "Cron schedule or preset (@hourly, @daily, @weekly, @monthly). Required for: scheduled run.",
+                "description": "Schedule for recurring job. Presets: '@hourly', '@daily', '@weekly', '@monthly'. Cron: '0 9 * * 1' (Mon 9am). Required for: 'scheduled run'.",
             },
         },
         "required": ["operation"],
@@ -998,7 +1030,7 @@ HF_JOBS_TOOL_SPEC = {
 
 
 async def hf_jobs_handler(
-    arguments: Dict[str, Any], session: Any = None
+    arguments: Dict[str, Any], session: Any = None, tool_call_id: str | None = None
 ) -> tuple[str, bool]:
     """Handler for agent tool router"""
     try:
@@ -1009,36 +1041,20 @@ async def hf_jobs_handler(
                     Event(event_type="tool_log", data={"tool": "hf_jobs", "log": log})
                 )
 
-        # If script is a sandbox file path, read it from the sandbox
-        script = arguments.get("script", "")
-        sandbox = getattr(session, "sandbox", None) if session else None
-        is_path = (
-            sandbox
-            and isinstance(script, str)
-            and script.strip() == script
-            and not any(c in script for c in "\r\n\0")
-            and (
-                script.startswith("/")
-                or script.startswith("./")
-                or script.startswith("../")
-            )
+        # Prefer the authenticated user's OAuth token, fall back to global env
+        hf_token = (
+            (getattr(session, "hf_token", None) if session else None)
+            or os.environ.get("HF_TOKEN")
+            or os.environ.get("HUGGINGFACE_HUB_TOKEN")
         )
-        if is_path:
-            import shlex
-
-            result = await asyncio.to_thread(sandbox.bash, f"cat {shlex.quote(script)}")
-            if not result.success:
-                return f"Failed to read {script} from sandbox: {result.error}", False
-            arguments = {**arguments, "script": result.output}
-
-        # Get token and namespace from HF token
-        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-        namespace = HfApi(token=hf_token).whoami().get("name") if hf_token else None
+        namespace = os.environ.get("HF_NAMESPACE") or (HfApi(token=hf_token).whoami().get("name") if hf_token else None)
 
         tool = HfJobsTool(
             namespace=namespace,
             hf_token=hf_token,
             log_callback=log_callback if session else None,
+            session=session,
+            tool_call_id=tool_call_id,
         )
         result = await tool.execute(arguments)
         return result["formatted"], not result.get("isError", False)

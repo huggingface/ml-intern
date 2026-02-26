@@ -3,9 +3,12 @@ Tool system for the agent
 Provides ToolSpec and ToolRouter for managing both built-in and MCP tools
 """
 
+import logging
 import warnings
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
@@ -45,7 +48,6 @@ from agent.tools.hf_repo_git_tool import (
 )
 from agent.tools.jobs_tool import HF_JOBS_TOOL_SPEC, hf_jobs_handler
 from agent.tools.plan_tool import PLAN_TOOL_SPEC, plan_tool_handler
-from agent.tools.sandbox_tool import get_sandbox_tools
 
 # NOTE: Private HF repo tool disabled - replaced by hf_repo_files and hf_repo_git
 # from agent.tools.private_hf_repo_tools import (
@@ -132,6 +134,7 @@ class ToolRouter:
         for tool in create_builtin_tools():
             self.register_tool(tool)
 
+        self.mcp_client: Client | None = None
         if mcp_servers:
             mcp_servers_payload = {}
             for name, server in mcp_servers.items():
@@ -159,7 +162,7 @@ class ToolRouter:
                     handler=None,
                 )
             )
-        print(
+        logger.info(
             f"Loaded {len(registered_names)} MCP tools: {', '.join(registered_names)} ({skipped_count} disabled)"
         )
 
@@ -180,7 +183,7 @@ class ToolRouter:
                 handler=search_openapi_handler,
             )
         )
-        print(f"Loaded OpenAPI search tool: {openapi_spec['name']}")
+        logger.info(f"Loaded OpenAPI search tool: {openapi_spec['name']}")
 
     def get_tool_specs_for_llm(self) -> list[dict[str, Any]]:
         """Get tool specifications in OpenAI format"""
@@ -209,7 +212,7 @@ class ToolRouter:
         await self.register_openapi_tool()
 
         total_tools = len(self.tools)
-        print(f"\nAgent ready with {total_tools} tools total\n")
+        logger.info(f"Agent ready with {total_tools} tools total")
 
         return self
 
@@ -220,7 +223,7 @@ class ToolRouter:
 
     @observe(name="call_tool")
     async def call_tool(
-        self, tool_name: str, arguments: dict[str, Any], session: Any = None
+        self, tool_name: str, arguments: dict[str, Any], session: Any = None, tool_call_id: str | None = None
     ) -> tuple[str, bool]:
         """
         Call a tool and return (output_string, success_bool).
@@ -236,6 +239,9 @@ class ToolRouter:
             # Check if handler accepts session argument
             sig = inspect.signature(tool.handler)
             if "session" in sig.parameters:
+                # Check if handler also accepts tool_call_id parameter
+                if "tool_call_id" in sig.parameters:
+                    return await tool.handler(arguments, session=session, tool_call_id=tool_call_id)
                 return await tool.handler(arguments, session=session)
             return await tool.handler(arguments)
 
@@ -328,10 +334,7 @@ def create_builtin_tools() -> list[ToolSpec]:
         ),
     ]
 
-    # Sandbox tools
-    tools = get_sandbox_tools() + tools
-
     tool_names = ", ".join([t.name for t in tools])
-    print(f"Loaded {len(tools)} built-in tools: {tool_names}")
+    logger.info(f"Loaded {len(tools)} built-in tools: {tool_names}")
 
     return tools

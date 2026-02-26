@@ -845,12 +845,17 @@ DOC_ENDPOINTS = [
 EXPLORE_HF_DOCS_TOOL_SPEC = {
     "name": "explore_hf_docs",
     "description": (
-        "Browse HF documentation structure — discover all available documentation with 200-char previews.\n\n"
-        "Use this to find relevant documentation and/or examples with detailed parameter docs and API reference. "
-        "To be used together with github_find_examples and github_read_file to find working examples and documentation.\n\n"
-        "Pattern: explore_hf_docs (find relevant pages) → fetch_hf_docs (get full content).\n\n"
-        "For training tasks: fetch the trainer config docs (SFTConfig, DPOConfig, GRPOConfig) to verify parameter names. "
-        "Returns top 20 results by default; set max_results (max 50) to adjust."
+        "Explore Hugging Face documentation structure and discover available pages with 200-character previews. "
+        "⚠️ MANDATORY: ALWAYS use this BEFORE implementing any ML task (training, fine-tuning, data processing, inference). "
+        "Your training data may be outdated - current documentation is the source of truth. "
+        "**Use when:** (1) Starting any implementation task, (2) User asks 'how to' questions, "
+        "(3) Before writing training/processing code, (4) Researching library capabilities, "
+        "(5) Verifying API syntax and parameters. "
+        "**Pattern:** explore (discover structure) → fetch_hf_docs (get details) → implement with researched approach. "
+        "Returns: Sidebar navigation with titles, URLs, and glimpses of all pages in the selected documentation. "
+        "**Then:** Use fetch_hf_docs with specific URLs from results to get full content. "
+        "**Critical for reliability:** Never implement based on internal knowledge without checking current docs first - APIs change frequently."
+        " By default returns the top 20 results; set max_results (max 50) to adjust."
     ),
     "parameters": {
         "type": "object",
@@ -923,10 +928,16 @@ EXPLORE_HF_DOCS_TOOL_SPEC = {
 HF_DOCS_FETCH_TOOL_SPEC = {
     "name": "fetch_hf_docs",
     "description": (
-        "Fetch full markdown content of an HF documentation page. Use after explore_hf_docs.\n\n"
-        "Critical for finding documentation e.g. current trainer configuration parameters (SFTConfig, DPOConfig, etc.) "
-        "Use for researching solutions and before writing training scripts. Your internal knowledge is outdated.\n\n"
-        "Provide the full URL from explore_hf_docs results. The .md extension is added automatically."
+        "Fetch full markdown content of a specific HF documentation page. "
+        "⚠️ CRITICAL: Use this after explore_hf_docs to get detailed implementation guidance. "
+        "**Use when:** (1) Found relevant page in explore_hf_docs results, (2) Need complete API documentation, "
+        "(3) Need training method details (SFT/DPO/GRPO), (4) Need configuration examples, "
+        "(5) Need parameter descriptions and usage patterns. "
+        "**Pattern:** explore_hf_docs (find relevant page) → fetch_hf_docs (get full content) → implement using documented approach. "
+        "Provide full URL from explore_hf_docs results (e.g., 'https://huggingface.co/docs/trl/sft_trainer'). "
+        "Returns: Complete markdown documentation with examples, parameters, and usage patterns. "
+        "**For training tasks:** ALWAYS fetch trainer docs (SFTConfig, DPOConfig, etc.) before creating training scripts. "
+        "**Critical for reliability:** This ensures you use current APIs and best practices."
     ),
     "parameters": {
         "type": "object",

@@ -388,15 +388,22 @@ def _format_parquet_files(data: dict, max_rows: int = 10) -> str | None:
 HF_INSPECT_DATASET_TOOL_SPEC = {
     "name": "hf_inspect_dataset",
     "description": (
-        "Inspect a HF dataset in one call: status, configs/splits, schema, sample rows, parquet info.\n\n"
-        "REQUIRED before any training job to verify dataset format matches training method:\n"
-        "  SFT: needs 'messages', 'text', or 'prompt'/'completion'\n"
-        "  DPO: needs 'prompt', 'chosen', 'rejected'\n"
-        "  GRPO: needs 'prompt'\n"
-        "All datasets used for training have to be in conversational ChatML format to be compatible with HF libraries.'\n"
-        "Training will fail with KeyError if columns don't match.\n\n"
-        "Also use to get example datapoints, understand column names, data types, and available splits before writing any data loading code. "
-        "Supports private/gated datasets when HF_TOKEN is set."
+        "Inspect a Hugging Face dataset comprehensively in one call.\n\n"
+        "## What you get\n"
+        "- Status check (validates dataset works without errors)\n"
+        "- All configs and splits (row counts/shares may be '?' when metadata is missing)\n"
+        "- Column names and types (schema)\n"
+        "- Sample rows to understand data format\n"
+        "- Parquet file structure and sizes\n\n"
+        "## CRITICAL\n"
+        "**Always inspect datasets before writing training code** to understand:\n"
+        "- Column names for your dataloader\n"
+        "- Data types and format\n"
+        "- Available splits (train/test/validation)\n\n"
+        "Supports private/gated datasets when HF_TOKEN is set.\n\n"
+        "## Examples\n"
+        '{"dataset": "stanfordnlp/imdb"}\n'
+        '{"dataset": "nyu-mll/glue", "config": "mrpc", "sample_rows": 5}\n'
     ),
     "parameters": {
         "type": "object",

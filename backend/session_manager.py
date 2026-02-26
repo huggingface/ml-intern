@@ -48,9 +48,26 @@ class AgentSession:
     session: Session
     tool_router: ToolRouter
     submission_queue: asyncio.Queue
+    user_id: str = "dev"  # Owner of this session
+    hf_token: str | None = None  # User's HF OAuth token for tool execution
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     is_active: bool = True
+
+
+class SessionCapacityError(Exception):
+    """Raised when no more sessions can be created."""
+
+    def __init__(self, message: str, error_type: str = "global") -> None:
+        super().__init__(message)
+        self.error_type = error_type  # "global" or "per_user"
+
+
+# ── Capacity limits ─────────────────────────────────────────────────
+# Estimated for HF Spaces cpu-basic (2 vCPU, 16 GB RAM).
+# Each session uses ~10-20 MB (context, tools, queues, task).
+MAX_SESSIONS: int = 50
+MAX_SESSIONS_PER_USER: int = 10
 
 
 class SessionManager:
@@ -61,19 +78,69 @@ class SessionManager:
         self.sessions: dict[str, AgentSession] = {}
         self._lock = asyncio.Lock()
 
-    async def create_session(self) -> str:
-        """Create a new agent session and return its ID."""
+    def _count_user_sessions(self, user_id: str) -> int:
+        """Count active sessions owned by a specific user."""
+        return sum(
+            1
+            for s in self.sessions.values()
+            if s.user_id == user_id and s.is_active
+        )
+
+    async def create_session(self, user_id: str = "dev", hf_token: str | None = None) -> str:
+        """Create a new agent session and return its ID.
+
+        Session() and ToolRouter() constructors contain blocking I/O
+        (e.g. HfApi().whoami(), litellm.get_max_tokens()) so they are
+        executed in a thread pool to avoid freezing the async event loop.
+
+        Args:
+            user_id: The ID of the user who owns this session.
+
+        Raises:
+            SessionCapacityError: If the server or user has reached the
+                maximum number of concurrent sessions.
+        """
+        # ── Capacity checks ──────────────────────────────────────────
+        async with self._lock:
+            active_count = self.active_session_count
+            if active_count >= MAX_SESSIONS:
+                raise SessionCapacityError(
+                    f"Server is at capacity ({active_count}/{MAX_SESSIONS} sessions). "
+                    "Please try again later.",
+                    error_type="global",
+                )
+            if user_id != "dev":
+                user_count = self._count_user_sessions(user_id)
+                if user_count >= MAX_SESSIONS_PER_USER:
+                    raise SessionCapacityError(
+                        f"You have reached the maximum of {MAX_SESSIONS_PER_USER} "
+                        "concurrent sessions. Please close an existing session first.",
+                        error_type="per_user",
+                    )
+
         session_id = str(uuid.uuid4())
 
         # Create queues for this session
         submission_queue: asyncio.Queue = asyncio.Queue()
         event_queue: asyncio.Queue = asyncio.Queue()
 
-        # Create tool router
-        tool_router = ToolRouter(self.config.mcpServers)
+        # Run blocking constructors in a thread to keep the event loop responsive.
+        # Without this, Session.__init__ → ContextManager → litellm.get_max_tokens()
+        # blocks all HTTP/WebSocket handling.
+        import time as _time
 
-        # Create the agent session
-        session = Session(event_queue, config=self.config, tool_router=tool_router)
+        def _create_session_sync():
+            t0 = _time.monotonic()
+            tool_router = ToolRouter(self.config.mcpServers)
+            session = Session(event_queue, config=self.config, tool_router=tool_router)
+            t1 = _time.monotonic()
+            logger.info(f"Session initialized in {t1 - t0:.2f}s")
+            return tool_router, session
+
+        tool_router, session = await asyncio.to_thread(_create_session_sync)
+
+        # Store user's HF token on the session so tools can use it
+        session.hf_token = hf_token
 
         # Create wrapper
         agent_session = AgentSession(
@@ -81,6 +148,8 @@ class SessionManager:
             session=session,
             tool_router=tool_router,
             submission_queue=submission_queue,
+            user_id=user_id,
+            hf_token=hf_token,
         )
 
         async with self._lock:
@@ -92,7 +161,7 @@ class SessionManager:
         )
         agent_session.task = task
 
-        logger.info(f"Created session {session_id}")
+        logger.info(f"Created session {session_id} for user {user_id}")
         return session_id
 
     async def _run_session(
@@ -245,6 +314,27 @@ class SessionManager:
 
         return True
 
+    def get_session_owner(self, session_id: str) -> str | None:
+        """Get the user_id that owns a session, or None if session doesn't exist."""
+        agent_session = self.sessions.get(session_id)
+        if not agent_session:
+            return None
+        return agent_session.user_id
+
+    def verify_session_access(self, session_id: str, user_id: str) -> bool:
+        """Check if a user has access to a session.
+
+        Returns True if:
+        - The session exists AND the user owns it
+        - The user_id is "dev" (dev mode bypass)
+        """
+        owner = self.get_session_owner(session_id)
+        if owner is None:
+            return False
+        if user_id == "dev" or owner == "dev":
+            return True
+        return owner == user_id
+
     def get_session_info(self, session_id: str) -> dict[str, Any] | None:
         """Get information about a session."""
         agent_session = self.sessions.get(session_id)
@@ -256,15 +346,25 @@ class SessionManager:
             "created_at": agent_session.created_at.isoformat(),
             "is_active": agent_session.is_active,
             "message_count": len(agent_session.session.context_manager.items),
+            "user_id": agent_session.user_id,
         }
 
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """List all sessions."""
-        return [
-            self.get_session_info(sid)
-            for sid in self.sessions
-            if self.get_session_info(sid)
-        ]
+    def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]:
+        """List sessions, optionally filtered by user.
+
+        Args:
+            user_id: If provided, only return sessions owned by this user.
+                     If "dev", return all sessions (dev mode).
+        """
+        results = []
+        for sid in self.sessions:
+            info = self.get_session_info(sid)
+            if not info:
+                continue
+            if user_id and user_id != "dev" and info.get("user_id") != user_id:
+                continue
+            results.append(info)
+        return results
 
     @property
     def active_session_count(self) -> int:

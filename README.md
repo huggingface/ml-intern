@@ -9,7 +9,11 @@ hf_oauth: true
 hf_oauth_scopes:
   - read-repos
   - write-repos
+  - contribute-repos
+  - manage-repos
   - inference-api
+  - jobs
+  - write-discussions
 ---
 
 # HF Agent

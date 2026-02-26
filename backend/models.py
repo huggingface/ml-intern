@@ -37,6 +37,7 @@ class ToolApproval(BaseModel):
     tool_call_id: str
     approved: bool
     feedback: str | None = None
+    edited_script: str | None = None
 
 
 class ApprovalRequest(BaseModel):
@@ -67,6 +68,7 @@ class SessionInfo(BaseModel):
     created_at: str
     is_active: bool
     message_count: int
+    user_id: str = "dev"
 
 
 class HealthResponse(BaseModel):
@@ -74,3 +76,13 @@ class HealthResponse(BaseModel):
 
     status: str = "ok"
     active_sessions: int = 0
+    max_sessions: int = 0
+
+
+class LLMHealthResponse(BaseModel):
+    """LLM provider health check response."""
+
+    status: str  # "ok" | "error"
+    model: str
+    error: str | None = None
+    error_type: str | None = None  # "auth" | "credits" | "rate_limit" | "network" | "unknown"
