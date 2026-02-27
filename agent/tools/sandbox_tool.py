@@ -66,6 +66,9 @@ async def _ensure_sandbox(
     sb = await asyncio.to_thread(Sandbox.create, **kwargs)
     session.sandbox = sb
 
+    # Inject the OAuth token into the sandbox so Hub operations work inside it
+    await asyncio.to_thread(api.add_space_secret, sb.space_id, "HF_TOKEN", token)
+
     await session.send_event(
         Event(
             event_type="tool_log",
