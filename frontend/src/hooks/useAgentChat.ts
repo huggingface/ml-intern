@@ -270,6 +270,7 @@ export function useAgentChat({ sessionId, onReady, onError, onSessionDead }: Use
   return {
     messages: chat.messages,
     sendMessage: chat.sendMessage,
+    stop: chat.stop,
     status: chat.status,
     undoLastTurn,
     approveTools,

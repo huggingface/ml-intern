@@ -110,7 +110,7 @@ export default function AppLayout() {
 
   const hasAnySessions = sessions.length > 0;
 
-  const { messages, sendMessage, undoLastTurn, approveTools } = useAgentChat({
+  const { messages, sendMessage, stop, undoLastTurn, approveTools } = useAgentChat({
     sessionId: activeSessionId,
     onReady: () => logger.log('Agent ready'),
     onError: (error) => logger.error('Agent error:', error),
@@ -345,7 +345,9 @@ export default function AppLayout() {
                 <MessageList messages={messages} isProcessing={isProcessing} approveTools={approveTools} onUndoLastTurn={undoLastTurn} />
                 <ChatInput
                   onSend={handleSendMessage}
-                  disabled={isProcessing || !isConnected || activityStatus.type === 'waiting-approval'}
+                  onStop={stop}
+                  isProcessing={isProcessing}
+                  disabled={!isConnected || activityStatus.type === 'waiting-approval'}
                   placeholder={activityStatus.type === 'waiting-approval' ? 'Approve or reject pending tools first...' : undefined}
                 />
               </>
@@ -439,7 +441,7 @@ export default function AppLayout() {
           onClose={() => setShowExpiredToast(false)}
           sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}
         >
-          Session expired — create a new session to continue.
+          Task expired — create a new task to continue.
         </Alert>
       </Snackbar>
       <Snackbar

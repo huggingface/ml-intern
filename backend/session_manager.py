@@ -265,9 +265,12 @@ class SessionManager:
         return await self.submit(session_id, operation)
 
     async def interrupt(self, session_id: str) -> bool:
-        """Interrupt a session."""
-        operation = Operation(op_type=OpType.INTERRUPT)
-        return await self.submit(session_id, operation)
+        """Interrupt a session by signalling cancellation directly (bypasses queue)."""
+        agent_session = self.sessions.get(session_id)
+        if not agent_session or not agent_session.is_active:
+            return False
+        agent_session.session.cancel()
+        return True
 
     async def undo(self, session_id: str) -> bool:
         """Undo last turn in a session."""

@@ -164,6 +164,36 @@ async def _compact_and_notify(session: Session) -> None:
         )
 
 
+def _patch_dangling_tool_calls(session: Session) -> None:
+    """Add stub tool results for any tool_calls that lack a matching result.
+
+    After cancellation the last assistant message may contain tool_calls
+    whose results were never recorded.  LLM APIs require every tool_call
+    to have a corresponding tool-result message, so we inject placeholders.
+    """
+    items = session.context_manager.items
+    if not items:
+        return
+    last = items[-1]
+    if getattr(last, "role", None) != "assistant" or not getattr(last, "tool_calls", None):
+        return
+    answered_ids = {
+        getattr(m, "tool_call_id", None)
+        for m in items
+        if getattr(m, "role", None) == "tool"
+    }
+    for tc in last.tool_calls:
+        if tc.id not in answered_ids:
+            items.append(
+                Message(
+                    role="tool",
+                    content="Cancelled by user.",
+                    tool_call_id=tc.id,
+                    name=tc.function.name,
+                )
+            )
+
+
 class Handlers:
     """Handler functions for each operation type"""
 
@@ -218,6 +248,9 @@ class Handlers:
 
             Laminar.set_trace_session_id(session_id=session.session_id)
 
+        # Clear any stale cancellation flag from a previous run
+        session.reset_cancel()
+
         # If there's a pending approval and the user sent a new message,
         # abandon the pending tools so the LLM context stays valid.
         if text and session.pending_approval:
@@ -238,6 +271,10 @@ class Handlers:
         final_response = None
 
         while iteration < max_iterations:
+            # ── Cancellation check: before LLM call ──
+            if session.is_cancelled:
+                break
+
             # Compact before calling the LLM if context is near the limit
             await _compact_and_notify(session)
 
@@ -344,6 +381,11 @@ class Handlers:
                 )
                 session.context_manager.add_message(assistant_msg, token_count)
 
+                # ── Cancellation check: before tool execution ──
+                if session.is_cancelled:
+                    _patch_dangling_tool_calls(session)
+                    break
+
                 # Separate tools into those requiring approval and those that don't
                 approval_required_tools = []
                 non_approval_tools = []
@@ -436,6 +478,10 @@ class Handlers:
                             )
                         )
 
+                # ── Cancellation check: after tool execution ──
+                if session.is_cancelled:
+                    break
+
                 # If there are tools requiring approval, ask for batch approval
                 if approval_required_tools:
                     # Prepare batch approval data
@@ -493,24 +539,21 @@ class Handlers:
                 )
                 break
 
-        await session.send_event(
-            Event(
-                event_type="turn_complete",
-                data={"history_size": len(session.context_manager.items)},
+        if session.is_cancelled:
+            await session.send_event(Event(event_type="interrupted"))
+        else:
+            await session.send_event(
+                Event(
+                    event_type="turn_complete",
+                    data={"history_size": len(session.context_manager.items)},
+                )
             )
-        )
 
         # Increment turn counter and check for auto-save
         session.increment_turn()
         await session.auto_save_if_needed()
 
         return final_response
-
-    @staticmethod
-    async def interrupt(session: Session) -> None:
-        """Handle interrupt (like interrupt in codex.rs:1266)"""
-        session.interrupt()
-        await session.send_event(Event(event_type="interrupted"))
 
     @staticmethod
     async def undo(session: Session) -> None:
@@ -769,10 +812,6 @@ async def process_submission(session: Session, submission) -> bool:
     if op.op_type == OpType.USER_INPUT:
         text = op.data.get("text", "") if op.data else ""
         await Handlers.run_agent(session, text)
-        return True
-
-    if op.op_type == OpType.INTERRUPT:
-        await Handlers.interrupt(session)
         return True
 
     if op.op_type == OpType.COMPACT:

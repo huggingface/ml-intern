@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef, KeyboardEvent } from 'react';
 import { Box, TextField, IconButton, CircularProgress, Typography, Menu, MenuItem, ListItemIcon, ListItemText, Chip } from '@mui/material';
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
+import CloseIcon from '@mui/icons-material/Close';
 import { apiFetch } from '@/utils/api';
 
 // Model configuration
@@ -58,12 +59,15 @@ const findModelByPath = (path: string): ModelOption | undefined => {
 
 interface ChatInputProps {
   onSend: (text: string) => void;
+  onStop?: () => void;
+  isProcessing?: boolean;
   disabled?: boolean;
   placeholder?: string;
 }
 
-export default function ChatInput({ onSend, disabled = false, placeholder = 'Ask anything...' }: ChatInputProps) {
+export default function ChatInput({ onSend, onStop, isProcessing = false, disabled = false, placeholder = 'Ask anything...' }: ChatInputProps) {
   const [input, setInput] = useState('');
+  const [stopHovered, setStopHovered] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [selectedModelId, setSelectedModelId] = useState<string>(() => {
     try {
@@ -92,12 +96,12 @@ export default function ChatInput({ onSend, disabled = false, placeholder = 'Ask
 
   const selectedModel = MODEL_OPTIONS.find(m => m.id === selectedModelId) || MODEL_OPTIONS[0];
 
-  // Auto-focus the textarea when the session becomes ready (disabled -> false)
+  // Auto-focus the textarea when the session becomes ready
   useEffect(() => {
-    if (!disabled && inputRef.current) {
+    if (!disabled && !isProcessing && inputRef.current) {
       inputRef.current.focus();
     }
-  }, [disabled]);
+  }, [disabled, isProcessing]);
 
   const handleSend = useCallback(() => {
     if (input.trim() && !disabled) {
@@ -173,7 +177,7 @@ export default function ChatInput({ onSend, disabled = false, placeholder = 'Ask
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={placeholder}
-            disabled={disabled}
+            disabled={disabled || isProcessing}
             variant="standard"
             inputRef={inputRef}
             InputProps={{
@@ -200,26 +204,46 @@ export default function ChatInput({ onSend, disabled = false, placeholder = 'Ask
                 }
             }}
           />
-          <IconButton
-            onClick={handleSend}
-            disabled={disabled || !input.trim()}
-            sx={{
-              mt: 1,
-              p: 1,
-              borderRadius: '10px',
-              color: 'var(--muted-text)',
-              transition: 'all 0.2s',
-              '&:hover': {
-                color: 'var(--accent-yellow)',
-                bgcolor: 'var(--hover-bg)',
-              },
-              '&.Mui-disabled': {
-                opacity: 0.3,
-              },
-            }}
-          >
-            {disabled ? <CircularProgress size={20} color="inherit" /> : <ArrowUpwardIcon fontSize="small" />}
-          </IconButton>
+          {isProcessing ? (
+            <IconButton
+              onClick={onStop}
+              onMouseEnter={() => setStopHovered(true)}
+              onMouseLeave={() => setStopHovered(false)}
+              sx={{
+                mt: 1,
+                p: 1,
+                borderRadius: '10px',
+                color: stopHovered ? 'var(--accent-yellow)' : 'var(--muted-text)',
+                transition: 'all 0.2s',
+                '&:hover': {
+                  bgcolor: 'var(--hover-bg)',
+                },
+              }}
+            >
+              {stopHovered ? <CloseIcon fontSize="small" /> : <CircularProgress size={20} color="inherit" />}
+            </IconButton>
+          ) : (
+            <IconButton
+              onClick={handleSend}
+              disabled={disabled || !input.trim()}
+              sx={{
+                mt: 1,
+                p: 1,
+                borderRadius: '10px',
+                color: 'var(--muted-text)',
+                transition: 'all 0.2s',
+                '&:hover': {
+                  color: 'var(--accent-yellow)',
+                  bgcolor: 'var(--hover-bg)',
+                },
+                '&.Mui-disabled': {
+                  opacity: 0.3,
+                },
+              }}
+            >
+              <ArrowUpwardIcon fontSize="small" />
+            </IconButton>
+          )}
         </Box>
 
         {/* Powered By Badge */}

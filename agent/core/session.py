@@ -95,7 +95,7 @@ class Session:
             model_name="anthropic/claude-sonnet-4-5-20250929",
         )
         self.is_running = True
-        self.current_task: asyncio.Task | None = None
+        self._cancelled = asyncio.Event()
         self.pending_approval: Optional[dict[str, Any]] = None
         # User's HF OAuth token — set by session_manager after construction
         self.hf_token: Optional[str] = None
@@ -120,10 +120,17 @@ class Session:
             }
         )
 
-    def interrupt(self) -> None:
-        """Interrupt current running task"""
-        if self.current_task and not self.current_task.done():
-            self.current_task.cancel()
+    def cancel(self) -> None:
+        """Signal cancellation to the running agent loop."""
+        self._cancelled.set()
+
+    def reset_cancel(self) -> None:
+        """Clear the cancellation flag before a new run."""
+        self._cancelled.clear()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled.is_set()
 
     def increment_turn(self) -> None:
         """Increment turn counter (called after each user interaction)"""
