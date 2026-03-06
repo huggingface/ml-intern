@@ -9,6 +9,7 @@ const shimmer = keyframes`
 `;
 
 const TOOL_LABELS: Record<string, string> = {
+  sandbox_create: 'Creating sandbox, this might take 1-2 minutes',
   hf_jobs: 'Running job',
   hf_repo_files: 'Uploading file',
   hf_repo_git: 'Git operation',

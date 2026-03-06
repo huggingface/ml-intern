@@ -16,6 +16,10 @@ import { isInIframe, triggerLogin } from '@/hooks/useAuth';
 /** HF brand orange */
 const HF_ORANGE = '#FF9D00';
 
+const ORG_JOIN_URL = 'https://huggingface.co/organizations/ml-agent-explorers/share/GzPMJUivoFPlfkvFtIqEouZKSytatKQSZT';
+
+type Step = 'join' | 'signin' | 'ready';
+
 interface OrgGate {
   joinUrl: string;
 }
@@ -31,6 +35,17 @@ export default function WelcomeScreen() {
   const isAuthenticated = user?.authenticated;
   const isDevUser = user?.username === 'dev';
 
+  // Determine which step to show
+  const step: Step = orgGate
+    ? 'join' // post-auth safety net: not in org
+    : (!isAuthenticated && !isDevUser)
+      ? 'join' // not logged in: start with join
+      : 'ready'; // authenticated & in org
+
+  // Track whether user has seen the join page and clicked through
+  const [joinClicked, setJoinClicked] = useState(false);
+  const showSignin = !isAuthenticated && !isDevUser && joinClicked && !orgGate;
+
   const tryCreateSession = useCallback(async () => {
     setIsCreating(true);
     setError(null);
@@ -41,6 +56,7 @@ export default function WelcomeScreen() {
         const data = await response.json();
         if (data.detail?.error === 'org_required') {
           setOrgGate({ joinUrl: data.detail.join_url });
+          setJoinClicked(false);
           return;
         }
       }
@@ -88,6 +104,24 @@ export default function WelcomeScreen() {
       : `https://smolagents-ml-agent.hf.space`
     : '';
 
+  // Shared button style
+  const primaryBtnSx = {
+    px: 5,
+    py: 1.5,
+    fontSize: '1rem',
+    fontWeight: 700,
+    textTransform: 'none' as const,
+    borderRadius: '12px',
+    bgcolor: HF_ORANGE,
+    color: '#000',
+    boxShadow: '0 4px 24px rgba(255, 157, 0, 0.3)',
+    textDecoration: 'none',
+    '&:hover': {
+      bgcolor: '#FFB340',
+      boxShadow: '0 6px 32px rgba(255, 157, 0, 0.45)',
+    },
+  };
+
   return (
     <Box
       sx={{
@@ -123,171 +157,165 @@ export default function WelcomeScreen() {
         HF Agent
       </Typography>
 
-      {/* Description */}
-      <Typography
-        variant="body1"
-        sx={{
-          color: 'var(--muted-text)',
-          maxWidth: 520,
-          mb: 5,
-          lineHeight: 1.8,
-          fontSize: '0.95rem',
-          textAlign: 'center',
-          px: 2,
-          '& strong': { color: 'var(--text)', fontWeight: 600 },
-        }}
-      >
-        A general-purpose AI agent for <strong>machine learning engineering</strong>.
-        It browses <strong>Hugging Face documentation</strong>, manages{' '}
-        <strong>repositories</strong>, launches <strong>training jobs</strong>,
-        and explores <strong>datasets</strong> — all through natural conversation.
-      </Typography>
-
-      {/* Action area — depends on context */}
-      {orgGate ? (
-        // Authenticated but not in org → join step
-        <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, maxWidth: 480, px: 2 }}>
+      {/* ── Screen: Join org ─────────────────────────────────────── */}
+      {step === 'join' && !showSignin && (
+        <>
           <Typography
-            variant="body2"
+            variant="body1"
             sx={{
               color: 'var(--muted-text)',
+              maxWidth: 480,
+              mb: 4,
+              lineHeight: 1.8,
+              fontSize: '0.95rem',
               textAlign: 'center',
-              lineHeight: 1.7,
-              fontSize: '0.88rem',
+              px: 2,
               '& strong': { color: 'var(--text)', fontWeight: 600 },
             }}
           >
-            Under the hood, this agent uses GPUs, inference APIs, and other paid Hub goodies — but we made them all free for you.
-            Just join <strong>ML Agent Explorers</strong> and you're in!
+            {orgGate
+              ? <>Looks like you're not in <strong>ML Agent Explorers</strong> yet. Join the org and sign in again so permissions are granted correctly.</>
+              : <>Under the hood, this agent uses GPUs, inference APIs, and other paid Hub goodies — but we made them all free for you. Just join <strong>ML Agent Explorers</strong> to get started!</>
+            }
           </Typography>
+
           <Button
             variant="contained"
             size="large"
             component="a"
-            href={orgGate.joinUrl}
+            href={orgGate?.joinUrl || ORG_JOIN_URL}
             target="_blank"
             rel="noopener noreferrer"
             startIcon={<GroupAddIcon />}
-            sx={{
-              px: 5,
-              py: 1.5,
-              fontSize: '1rem',
-              fontWeight: 700,
-              textTransform: 'none',
-              borderRadius: '12px',
-              bgcolor: HF_ORANGE,
-              color: '#000',
-              boxShadow: '0 4px 24px rgba(255, 157, 0, 0.3)',
-              textDecoration: 'none',
-              '&:hover': {
-                bgcolor: '#FFB340',
-                boxShadow: '0 6px 32px rgba(255, 157, 0, 0.45)',
-              },
-            }}
+            sx={primaryBtnSx}
           >
             Join ML Agent Explorers
           </Button>
+
           <Button
             variant="text"
             size="small"
-            onClick={tryCreateSession}
-            disabled={isCreating}
-            startIcon={isCreating ? <CircularProgress size={16} color="inherit" /> : null}
+            onClick={() => {
+              if (orgGate) {
+                // Post-auth safety net: need to re-auth to get org permissions
+                triggerLogin();
+              } else {
+                setJoinClicked(true);
+              }
+            }}
             sx={{
+              mt: 2,
               color: 'var(--muted-text)',
               textTransform: 'none',
               fontSize: '0.85rem',
               '&:hover': { color: 'var(--text)' },
             }}
           >
-            {isCreating ? 'Checking...' : "I've joined — let's go"}
+            {orgGate ? "I've joined — sign in again" : "I've joined →"}
           </Button>
-        </Box>
-      ) : inIframe && !isAuthenticated && !isDevUser ? (
-        // In iframe + not logged in → link to open Space directly
-        <Button
-          variant="contained"
-          size="large"
-          component="a"
-          href={spaceHost}
-          target="_blank"
-          rel="noopener noreferrer"
-          endIcon={<OpenInNewIcon />}
-          sx={{
-            px: 5,
-            py: 1.5,
-            fontSize: '1rem',
-            fontWeight: 700,
-            textTransform: 'none',
-            borderRadius: '12px',
-            bgcolor: HF_ORANGE,
-            color: '#000',
-            boxShadow: '0 4px 24px rgba(255, 157, 0, 0.3)',
-            textDecoration: 'none',
-            '&:hover': {
-              bgcolor: '#FFB340',
-              boxShadow: '0 6px 32px rgba(255, 157, 0, 0.45)',
-            },
-          }}
-        >
-          Open HF Agent
-        </Button>
-      ) : !isAuthenticated && !isDevUser ? (
-        // Direct access + not logged in → sign in button
-        <Button
-          variant="contained"
-          size="large"
-          onClick={() => triggerLogin()}
-          sx={{
-            px: 5,
-            py: 1.5,
-            fontSize: '1rem',
-            fontWeight: 700,
-            textTransform: 'none',
-            borderRadius: '12px',
-            bgcolor: HF_ORANGE,
-            color: '#000',
-            boxShadow: '0 4px 24px rgba(255, 157, 0, 0.3)',
-            '&:hover': {
-              bgcolor: '#FFB340',
-              boxShadow: '0 6px 32px rgba(255, 157, 0, 0.45)',
-            },
-          }}
-        >
-          Sign in with Hugging Face
-        </Button>
-      ) : (
-        // Authenticated or dev → start session
-        <Button
-          variant="contained"
-          size="large"
-          onClick={handleStart}
-          disabled={isCreating}
-          startIcon={
-            isCreating ? <CircularProgress size={20} color="inherit" /> : null
-          }
-          sx={{
-            px: 5,
-            py: 1.5,
-            fontSize: '1rem',
-            fontWeight: 700,
-            textTransform: 'none',
-            borderRadius: '12px',
-            bgcolor: HF_ORANGE,
-            color: '#000',
-            boxShadow: '0 4px 24px rgba(255, 157, 0, 0.3)',
-            '&:hover': {
-              bgcolor: '#FFB340',
-              boxShadow: '0 6px 32px rgba(255, 157, 0, 0.45)',
-            },
-            '&.Mui-disabled': {
-              bgcolor: 'rgba(255, 157, 0, 0.35)',
-              color: 'rgba(0,0,0,0.45)',
-            },
-          }}
-        >
-          {isCreating ? 'Initializing...' : 'Start Session'}
-        </Button>
+        </>
+      )}
+
+      {/* ── Screen: Sign in ──────────────────────────────────────── */}
+      {showSignin && (
+        <>
+          <Typography
+            variant="body1"
+            sx={{
+              color: 'var(--muted-text)',
+              maxWidth: 480,
+              mb: 4,
+              lineHeight: 1.8,
+              fontSize: '0.95rem',
+              textAlign: 'center',
+              px: 2,
+            }}
+          >
+            Great! Now sign in with your Hugging Face account to get started.
+          </Typography>
+
+          {inIframe ? (
+            <Button
+              variant="contained"
+              size="large"
+              component="a"
+              href={spaceHost}
+              target="_blank"
+              rel="noopener noreferrer"
+              endIcon={<OpenInNewIcon />}
+              sx={primaryBtnSx}
+            >
+              Open & Sign in
+            </Button>
+          ) : (
+            <Button
+              variant="contained"
+              size="large"
+              onClick={() => triggerLogin()}
+              sx={primaryBtnSx}
+            >
+              Sign in with Hugging Face
+            </Button>
+          )}
+
+          <Button
+            variant="text"
+            size="small"
+            onClick={() => setJoinClicked(false)}
+            sx={{
+              mt: 2,
+              color: 'var(--muted-text)',
+              textTransform: 'none',
+              fontSize: '0.85rem',
+              '&:hover': { color: 'var(--text)' },
+            }}
+          >
+            ← Back
+          </Button>
+        </>
+      )}
+
+      {/* ── Screen: Start session ────────────────────────────────── */}
+      {step === 'ready' && (
+        <>
+          <Typography
+            variant="body1"
+            sx={{
+              color: 'var(--muted-text)',
+              maxWidth: 520,
+              mb: 5,
+              lineHeight: 1.8,
+              fontSize: '0.95rem',
+              textAlign: 'center',
+              px: 2,
+              '& strong': { color: 'var(--text)', fontWeight: 600 },
+            }}
+          >
+            A general-purpose AI agent for <strong>machine learning engineering</strong>.
+            It browses <strong>Hugging Face documentation</strong>, manages{' '}
+            <strong>repositories</strong>, launches <strong>training jobs</strong>,
+            and explores <strong>datasets</strong> — all through natural conversation.
+          </Typography>
+
+          <Button
+            variant="contained"
+            size="large"
+            onClick={handleStart}
+            disabled={isCreating}
+            startIcon={
+              isCreating ? <CircularProgress size={20} color="inherit" /> : null
+            }
+            sx={{
+              ...primaryBtnSx,
+              '&.Mui-disabled': {
+                bgcolor: 'rgba(255, 157, 0, 0.35)',
+                color: 'rgba(0,0,0,0.45)',
+              },
+            }}
+          >
+            {isCreating ? 'Initializing...' : 'Start Session'}
+          </Button>
+        </>
       )}
 
       {/* Error */}
