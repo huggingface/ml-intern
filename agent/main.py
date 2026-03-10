@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import litellm
-from lmnr import Laminar, LaminarLiteLLMCallback
 from prompt_toolkit import PromptSession
 
 from agent.config import load_config
@@ -40,15 +39,6 @@ def _safe_get_args(arguments: dict) -> dict:
         return {}
     return args if isinstance(args, dict) else {}
 
-
-lmnr_api_key = os.environ.get("LMNR_API_KEY")
-if lmnr_api_key:
-    try:
-        Laminar.initialize(project_api_key=lmnr_api_key)
-        litellm.callbacks = [LaminarLiteLLMCallback()]
-        print("Laminar initialized")
-    except Exception as e:
-        print(f"Failed to initialize Laminar: {e}")
 
 
 @dataclass

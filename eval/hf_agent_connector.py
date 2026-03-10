@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from lmnr import observe
 
 from agent.config import Config, load_config
 from agent.core.agent_loop import Handlers
@@ -40,7 +39,6 @@ class AgentResponseGenerator:
         """Expose the agent model name for downstream logging."""
         return self.config.model_name
 
-    @observe(name="eval_run")
     async def run(self, prompt: str) -> str:
         """
         Execute the agent loop for a single prompt and return the assistant reply.

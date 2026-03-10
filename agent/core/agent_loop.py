@@ -9,7 +9,6 @@ import os
 
 from litellm import ChatCompletionMessageToolCall, Message, acompletion
 from litellm.exceptions import ContextWindowExceededError
-from lmnr import observe
 
 from agent.config import Config
 from agent.core.session import Event, OpType, Session
@@ -233,7 +232,6 @@ class Handlers:
         logger.info("Abandoned %d pending approval tool(s)", len(tool_calls))
 
     @staticmethod
-    @observe(name="run_agent")
     async def run_agent(
         session: Session, text: str, max_iterations: int = 300
     ) -> str | None:
@@ -241,12 +239,6 @@ class Handlers:
         Handle user input (like user_input_or_turn in codex.rs:1291)
         Returns the final assistant response content, if any.
         """
-        # Set session ID for this trace
-        if hasattr(session, "session_id"):
-            from lmnr import Laminar
-
-            Laminar.set_trace_session_id(session_id=session.session_id)
-
         # Clear any stale cancellation flag from a previous run
         session.reset_cancel()
 
@@ -843,7 +835,6 @@ async def process_submission(session: Session, submission) -> bool:
     return True
 
 
-@observe(name="submission_loop")
 async def submission_loop(
     submission_queue: asyncio.Queue,
     event_queue: asyncio.Queue,

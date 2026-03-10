@@ -14,7 +14,6 @@ import litellm
 from inspect_ai.model import ChatMessageAssistant, ModelOutput
 from inspect_ai.solver import Solver, solver
 from inspect_ai.solver._task_state import TaskState
-from lmnr import Laminar, LaminarLiteLLMCallback
 
 from eval.hf_agent_connector import AgentResponseGenerator
 
@@ -39,10 +38,6 @@ def hf_agent(
     config_path: str = "agent/config_mcp_example.json",
     max_iterations: int = 10,
 ) -> Solver:
-    # init lmnr for observability
-    Laminar.initialize(project_api_key=os.environ.get("LMNR_API_KEY"))
-    litellm.callbacks = [LaminarLiteLLMCallback()]
-    print("✅ Laminar initialized")
 
     runner = AgentResponseGenerator(
         config_path=config_path,

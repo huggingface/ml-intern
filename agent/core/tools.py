@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
-from lmnr import observe
 from mcp.types import EmbeddedResource, ImageContent, TextContent
 
 from agent.config import MCPServerConfig
@@ -226,7 +225,6 @@ class ToolRouter:
             await self.mcp_client.__aexit__(exc_type, exc, tb)
             self._mcp_initialized = False
 
-    @observe(name="call_tool")
     async def call_tool(
         self,
         tool_name: str,
