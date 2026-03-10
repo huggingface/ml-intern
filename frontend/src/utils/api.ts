@@ -39,9 +39,3 @@ export async function apiFetch(
 
   return response;
 }
-
-/** Build the WebSocket URL for a session. */
-export function getWebSocketUrl(sessionId: string): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}/api/ws/${sessionId}`;
-}

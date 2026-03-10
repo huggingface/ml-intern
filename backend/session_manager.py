@@ -8,8 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from websocket import manager as ws_manager
-
 from agent.config import load_config
 from agent.core.agent_loop import process_submission
 from agent.core.session import Event, OpType, Session
@@ -40,6 +38,44 @@ class Submission:
 logger = logging.getLogger(__name__)
 
 
+class EventBroadcaster:
+    """Reads from the agent's event queue and fans out to SSE subscribers.
+
+    Events that arrive when no subscribers are listening are discarded.
+    With SSE each turn is a separate request, so there is no reconnect
+    scenario that would need buffered replay.
+    """
+
+    def __init__(self, event_queue: asyncio.Queue):
+        self._source = event_queue
+        self._subscribers: dict[int, asyncio.Queue] = {}
+        self._counter = 0
+
+    def subscribe(self) -> tuple[int, asyncio.Queue]:
+        """Create a new subscriber. Returns (id, queue)."""
+        self._counter += 1
+        sub_id = self._counter
+        q: asyncio.Queue = asyncio.Queue()
+        self._subscribers[sub_id] = q
+        return sub_id, q
+
+    def unsubscribe(self, sub_id: int) -> None:
+        self._subscribers.pop(sub_id, None)
+
+    async def run(self) -> None:
+        """Main loop — reads from source queue and broadcasts."""
+        while True:
+            try:
+                event: Event = await self._source.get()
+                msg = {"event_type": event.event_type, "data": event.data}
+                for q in self._subscribers.values():
+                    await q.put(msg)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"EventBroadcaster error: {e}")
+
+
 @dataclass
 class AgentSession:
     """Wrapper for an agent session with its associated resources."""
@@ -53,6 +89,7 @@ class AgentSession:
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     is_active: bool = True
+    broadcaster: Any = None
 
 
 class SessionCapacityError(Exception):
@@ -126,7 +163,7 @@ class SessionManager:
 
         # Run blocking constructors in a thread to keep the event loop responsive.
         # Without this, Session.__init__ → ContextManager → litellm.get_max_tokens()
-        # blocks all HTTP/WebSocket handling.
+        # blocks all HTTP/SSE handling.
         import time as _time
 
         def _create_session_sync():
@@ -182,7 +219,7 @@ class SessionManager:
         event_queue: asyncio.Queue,
         tool_router: ToolRouter,
     ) -> None:
-        """Run the agent loop for a session and forward events to WebSocket."""
+        """Run the agent loop for a session and broadcast events via EventBroadcaster."""
         agent_session = self.sessions.get(session_id)
         if not agent_session:
             logger.error(f"Session {session_id} not found")
@@ -190,10 +227,10 @@ class SessionManager:
 
         session = agent_session.session
 
-        # Start event forwarder task
-        event_forwarder = asyncio.create_task(
-            self._forward_events(session_id, event_queue)
-        )
+        # Start event broadcaster task
+        broadcaster = EventBroadcaster(event_queue)
+        agent_session.broadcaster = broadcaster
+        broadcast_task = asyncio.create_task(broadcaster.run())
 
         try:
             async with tool_router:
@@ -223,9 +260,9 @@ class SessionManager:
                         )
 
         finally:
-            event_forwarder.cancel()
+            broadcast_task.cancel()
             try:
-                await event_forwarder
+                await broadcast_task
             except asyncio.CancelledError:
                 pass
 
@@ -236,19 +273,6 @@ class SessionManager:
                     self.sessions[session_id].is_active = False
 
             logger.info(f"Session {session_id} ended")
-
-    async def _forward_events(
-        self, session_id: str, event_queue: asyncio.Queue
-    ) -> None:
-        """Forward events from the agent to the WebSocket."""
-        while True:
-            try:
-                event: Event = await event_queue.get()
-                await ws_manager.send_event(session_id, event.event_type, event.data)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error forwarding event for {session_id}: {e}")
 
     async def submit(self, session_id: str, operation: Operation) -> bool:
         """Submit an operation to a session."""
@@ -319,8 +343,6 @@ class SessionManager:
 
         if not agent_session:
             return False
-
-        ws_manager.clear_buffer(session_id)
 
         # Clean up sandbox Space before cancelling the task
         await self._cleanup_sandbox(agent_session.session)

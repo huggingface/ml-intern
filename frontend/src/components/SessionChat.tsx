@@ -2,8 +2,8 @@
  * Per-session chat component.
  *
  * Each session renders its own SessionChat. The hook (useAgentChat) always
- * runs — keeping the WebSocket alive and processing events — but only the
- * active session renders visible UI (MessageList + ChatInput).
+ * runs — processing events — but only the active session renders visible
+ * UI (MessageList + ChatInput).
  */
 import { useCallback, useEffect, useRef } from 'react';
 import { useAgentChat } from '@/hooks/useAgentChat';
@@ -25,7 +25,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
   const { isConnected, isProcessing, setProcessing, activityStatus } = useAgentStore();
   const { updateSessionTitle } = useSessionStore();
 
-  const { messages, sendMessage, stop, undoLastTurn, approveTools, transport } = useAgentChat({
+  const { messages, sendMessage, stop, undoLastTurn, approveTools } = useAgentChat({
     sessionId,
     isActive,
     onReady: () => logger.log(`Session ${sessionId} ready`),
@@ -38,16 +38,10 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
   const prevActiveRef = useRef(isActive);
   useEffect(() => {
     if (isActive && !prevActiveRef.current) {
-      // Force reconnect if WS is dead (e.g. retries exhausted while on another session)
-      if (transport && !transport.isWebSocketConnected()) {
-        transport.connectToSession(sessionId);
-      }
-
       const store = useAgentStore.getState();
 
-      // Sync WebSocket connection state
-      const wsConnected = transport?.isWebSocketConnected() ?? false;
-      store.setConnected(wsConnected);
+      // SSE transport has no persistent connection — always connected
+      store.setConnected(true);
 
       // Check if this session has pending approvals in its messages
       const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
@@ -109,7 +103,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
       }
     }
     prevActiveRef.current = isActive;
-  }, [isActive, messages, transport]);
+  }, [isActive, messages]);
 
   const handleSendMessage = useCallback(
     async (text: string) => {

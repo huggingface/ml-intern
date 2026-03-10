@@ -1,6 +1,5 @@
 """Authentication dependencies for FastAPI routes.
 
-Provides auth validation for both REST and WebSocket endpoints.
 - In dev mode (OAUTH_CLIENT_ID not set): auth is bypassed, returns a default "dev" user.
 - In production: validates Bearer tokens or cookies against HF OAuth.
 """
@@ -11,7 +10,7 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import HTTPException, Request, WebSocket, status
+from fastapi import HTTPException, Request, status
 
 logger = logging.getLogger(__name__)
 
@@ -142,31 +141,3 @@ async def get_current_user(request: Request) -> dict[str, Any]:
     )
 
 
-async def get_ws_user(websocket: WebSocket) -> dict[str, Any] | None:
-    """Extract and validate user from WebSocket connection.
-
-    WebSocket doesn't support custom headers from browser, so we check:
-    1. ?token= query parameter
-    2. hf_access_token cookie (sent automatically for same-origin)
-
-    Returns user dict or None if not authenticated.
-    In dev mode, returns the default dev user.
-    """
-    if not AUTH_ENABLED:
-        return DEV_USER
-
-    # Try query param
-    token = websocket.query_params.get("token")
-    if token:
-        user = await _extract_user_from_token(token)
-        if user:
-            return user
-
-    # Try cookie (works for same-origin WebSocket)
-    token = websocket.cookies.get("hf_access_token")
-    if token:
-        user = await _extract_user_from_token(token)
-        if user:
-            return user
-
-    return None

@@ -1,6 +1,6 @@
 /**
- * Central hook wiring the Vercel AI SDK's useChat with our custom
- * WebSocketChatTransport.
+ * Central hook wiring the Vercel AI SDK's useChat with our SSE-based
+ * ChatTransport.
  *
  * In the per-session architecture, each session mounts its own instance
  * of this hook. The `isActive` flag controls whether side-channel
@@ -9,8 +9,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useChat } from '@ai-sdk/react';
-import type { UIMessage } from 'ai';
-import { WebSocketChatTransport, type SideChannelCallbacks } from '@/lib/ws-chat-transport';
+import { type UIMessage, lastAssistantMessageIsCompleteWithApprovalResponses } from 'ai';
+import { SSEChatTransport, type SideChannelCallbacks } from '@/lib/sse-chat-transport';
 import { loadMessages, saveMessages } from '@/lib/chat-message-store';
 import { llmMessagesToUIMessages } from '@/lib/convert-llm-messages';
 import { apiFetch } from '@/utils/api';
@@ -47,7 +47,6 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
   const { setSessionActive, setNeedsAttention } = useSessionStore();
 
   // -- Build side-channel callbacks (stable ref) --------------------------
-  // These check isActiveRef to decide whether to update global UI state.
   const sideChannel = useMemo<SideChannelCallbacks>(
     () => ({
       onReady: () => {
@@ -83,19 +82,9 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
         }
       },
       onUndoComplete: () => {
+        // Undo is handled client-side in undoLastTurn(). With SSE, undo_complete
+        // events are discarded (no subscriber listening between turns).
         if (isActiveRef.current) setProcessing(false);
-        // Remove the last turn (user msg + assistant response) from useChat state
-        const setMsgs = chatActionsRef.current.setMessages;
-        const msgs = chatActionsRef.current.messages;
-        if (setMsgs && msgs.length > 0) {
-          let lastUserIdx = -1;
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            if (msgs[i].role === 'user') { lastUserIdx = i; break; }
-          }
-          const updated = lastUserIdx > 0 ? msgs.slice(0, lastUserIdx) : [];
-          setMsgs(updated);
-          saveMessages(sessionId, updated);
-        }
       },
       onCompacted: (oldTokens: number, newTokens: number) => {
         logger.log(`Context compacted: ${oldTokens} -> ${newTokens} tokens`);
@@ -132,11 +121,7 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
       },
       onApprovalRequired: (tools) => {
         if (!tools.length) return;
-
-        // Always mark the session as needing attention
         setNeedsAttention(sessionId, true);
-
-        // Only update global UI if this is the active session
         if (!isActiveRef.current) return;
 
         setActivityStatus({ type: 'waiting-approval' });
@@ -199,29 +184,20 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
         if (isActiveRef.current) setActivityStatus({ type: 'tool', toolName, description });
       },
     }),
-    // sessionId is the only real dependency — Zustand setters are stable
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sessionId],
   );
 
   // -- Create transport (one per session, stable for lifetime) ------------
-  const transportRef = useRef<WebSocketChatTransport | null>(null);
+  const transportRef = useRef<SSEChatTransport | null>(null);
   if (!transportRef.current) {
-    transportRef.current = new WebSocketChatTransport({ sideChannel });
+    transportRef.current = new SSEChatTransport(sessionId, sideChannel);
   }
 
-  // Keep side-channel callbacks in sync (they capture isActiveRef)
+  // Keep side-channel callbacks in sync
   useEffect(() => {
     transportRef.current?.updateSideChannel(sideChannel);
   }, [sideChannel]);
-
-  // Connect WebSocket on mount, disconnect on unmount
-  useEffect(() => {
-    transportRef.current?.connectToSession(sessionId);
-    return () => {
-      transportRef.current?.connectToSession(null);
-    };
-  }, [sessionId]);
 
   // Destroy transport on unmount
   useEffect(() => {
@@ -249,6 +225,10 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
     messages: initialMessages,
     transport: transportRef.current!,
     experimental_throttle: 80,
+    // After all approval responses are set, auto-send to continue the agent loop.
+    // Without this, addToolApprovalResponse only updates the UI — it won't trigger
+    // sendMessages on the transport.
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
     onError: (error) => {
       logger.error('useChat error:', error);
       if (isActiveRef.current) {
@@ -267,15 +247,12 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
     let cancelled = false;
     (async () => {
       try {
-        // Fetch messages and session info (for pending approval) in parallel
         const [msgsRes, infoRes] = await Promise.all([
           apiFetch(`/api/session/${sessionId}/messages`),
           apiFetch(`/api/session/${sessionId}`),
         ]);
-
         if (cancelled) return;
 
-        // Extract pending approval tool IDs from session info
         let pendingIds: Set<string> | undefined;
         if (infoRes.ok) {
           const info = await infoRes.json();
@@ -315,25 +292,46 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
     }
   }, [sessionId, chat.messages]);
 
-  // -- Undo last turn -----------------------------------------------------
+  // -- Undo last turn (REST call + client-side message removal) -----------
+  // With SSE there's no persistent connection to receive the undo_complete
+  // event, so we handle message removal on the frontend after a successful
+  // REST call to the backend.
   const undoLastTurn = useCallback(async () => {
     try {
       const res = await apiFetch(`/api/undo/${sessionId}`, { method: 'POST' });
       if (!res.ok) {
         logger.error('Undo API returned', res.status);
+        return;
       }
+      // Remove the last user turn + assistant response from the UI
+      const msgs = chatActionsRef.current.messages;
+      const setMsgs = chatActionsRef.current.setMessages;
+      if (setMsgs && msgs.length > 0) {
+        let lastUserIdx = -1;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role === 'user') { lastUserIdx = i; break; }
+        }
+        const updated = lastUserIdx > 0 ? msgs.slice(0, lastUserIdx) : [];
+        setMsgs(updated);
+        saveMessages(sessionId, updated);
+      }
+      if (isActiveRef.current) setProcessing(false);
     } catch (e) {
       logger.error('Undo failed:', e);
     }
-  }, [sessionId]);
+  }, [sessionId, setProcessing]);
 
-  // -- Approve tools via transport ----------------------------------------
+  // -- Approve tools ------------------------------------------------------
   const approveTools = useCallback(
     async (approvals: Array<{ tool_call_id: string; approved: boolean; feedback?: string | null; edited_script?: string | null }>) => {
-      if (!transportRef.current) return false;
+      // Store edited scripts so the transport can read them when sendMessages is called
+      for (const a of approvals) {
+        if (a.edited_script) {
+          useAgentStore.getState().setEditedScript(a.tool_call_id, a.edited_script);
+        }
+      }
 
-      // Transition SDK tool state from approval-requested → approval-responded
-      // so the approval UI disappears immediately (survives session switches).
+      // Update SDK tool state — this triggers sendMessages() via the transport
       for (const a of approvals) {
         chat.addToolApprovalResponse({
           id: `approval-${a.tool_call_id}`,
@@ -342,25 +340,26 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
         });
       }
 
-      const ok = await transportRef.current.approveTools(sessionId, approvals);
-      if (ok) {
-        // Clear needsAttention since user has responded
-        setNeedsAttention(sessionId, false);
-        const hasApproved = approvals.some(a => a.approved);
-        if (hasApproved && isActiveRef.current) setProcessing(true);
-      }
-      return ok;
+      setNeedsAttention(sessionId, false);
+      const hasApproved = approvals.some(a => a.approved);
+      if (hasApproved && isActiveRef.current) setProcessing(true);
+      return true;
     },
     [sessionId, chat, setProcessing, setNeedsAttention],
   );
 
+  // -- Stop (abort SSE stream + interrupt backend agent loop) ---------------
+  const stop = useCallback(() => {
+    chat.stop();
+    apiFetch(`/api/interrupt/${sessionId}`, { method: 'POST' }).catch(() => {});
+  }, [sessionId, chat]);
+
   return {
     messages: chat.messages,
     sendMessage: chat.sendMessage,
-    stop: chat.stop,
+    stop,
     status: chat.status,
     undoLastTurn,
     approveTools,
-    transport: transportRef.current,
   };
 }

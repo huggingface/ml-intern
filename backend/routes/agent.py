@@ -1,25 +1,22 @@
-"""Agent API routes - WebSocket and REST endpoints.
+"""Agent API routes — REST + SSE endpoints.
 
 All routes (except /health) require authentication via the get_current_user
 dependency. In dev mode (no OAUTH_CLIENT_ID), auth is bypassed automatically.
 """
 
+import json
 import logging
-import os
 from typing import Any
 
-from dependencies import get_current_user, get_ws_user
+from dependencies import get_current_user
 from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
     Request,
-    WebSocket,
-    WebSocketDisconnect,
 )
+from fastapi.responses import StreamingResponse
 from litellm import acompletion
-
-from agent.core.agent_loop import _resolve_hf_router_params
 from models import (
     ApprovalRequest,
     HealthResponse,
@@ -29,7 +26,8 @@ from models import (
     SubmitRequest,
 )
 from session_manager import MAX_SESSIONS, SessionCapacityError, session_manager
-from websocket import manager as ws_manager
+
+from agent.core.agent_loop import _resolve_hf_router_params
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +284,84 @@ async def submit_approval(
     return {"status": "submitted", "session_id": request.session_id}
 
 
+@router.post("/chat/{session_id}")
+async def chat_sse(
+    session_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> StreamingResponse:
+    """SSE endpoint: submit input or approval, then stream events until turn ends."""
+    _check_session_access(session_id, user)
+
+    agent_session = session_manager.sessions.get(session_id)
+    if not agent_session or not agent_session.is_active:
+        raise HTTPException(status_code=404, detail="Session not found or inactive")
+
+    # Parse body
+    body = await request.json()
+
+    # Subscribe BEFORE submitting so we never miss events — even if the
+    # agent loop processes the submission before this coroutine continues.
+    broadcaster = agent_session.broadcaster
+    sub_id, event_queue = broadcaster.subscribe()
+
+    # Submit the operation
+    text = body.get("text")
+    approvals = body.get("approvals")
+
+    try:
+        if approvals:
+            formatted = [
+                {
+                    "tool_call_id": a["tool_call_id"],
+                    "approved": a["approved"],
+                    "feedback": a.get("feedback"),
+                    "edited_script": a.get("edited_script"),
+                }
+                for a in approvals
+            ]
+            success = await session_manager.submit_approval(session_id, formatted)
+        elif text is not None:
+            success = await session_manager.submit_user_input(session_id, text)
+        else:
+            broadcaster.unsubscribe(sub_id)
+            raise HTTPException(status_code=400, detail="Must provide 'text' or 'approvals'")
+
+        if not success:
+            broadcaster.unsubscribe(sub_id)
+            raise HTTPException(status_code=404, detail="Session not found or inactive")
+    except HTTPException:
+        raise
+    except Exception:
+        broadcaster.unsubscribe(sub_id)
+        raise
+
+    # Terminal events that end the SSE stream
+    TERMINAL_EVENTS = {"turn_complete", "approval_required", "error", "interrupted", "shutdown"}
+
+    async def event_generator():
+        try:
+            while True:
+                msg = await event_queue.get()
+                event_type = msg.get("event_type", "")
+                # Format as SSE
+                yield f"data: {json.dumps(msg)}\n\n"
+                if event_type in TERMINAL_EVENTS:
+                    break
+        finally:
+            broadcaster.unsubscribe(sub_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/interrupt/{session_id}")
 async def interrupt_session(
     session_id: str, user: dict = Depends(get_current_user)
@@ -344,77 +420,3 @@ async def shutdown_session(
     return {"status": "shutdown_requested", "session_id": session_id}
 
 
-@router.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
-    """WebSocket endpoint for real-time events.
-
-    Authentication is done via:
-    - ?token= query parameter (for browsers that can't send WS headers)
-    - Cookie (automatic for same-origin connections)
-    - Dev mode bypass (when OAUTH_CLIENT_ID is not set)
-
-    NOTE: We must accept() before close() so the browser receives our custom
-    close codes (4001, 4003, 4004).  If we close() before accept(), Starlette
-    sends HTTP 403 and the browser only sees code 1006 (abnormal closure).
-    """
-    logger.info(f"WebSocket connection request for session {session_id}")
-
-    # Authenticate the WebSocket connection
-    user = await get_ws_user(websocket)
-    if not user:
-        logger.warning(
-            f"WebSocket rejected: authentication failed for session {session_id}"
-        )
-        await websocket.accept()
-        await websocket.close(code=4001, reason="Authentication required")
-        return
-
-    # Verify session exists
-    info = session_manager.get_session_info(session_id)
-    if not info:
-        logger.warning(f"WebSocket rejected: session {session_id} not found")
-        await websocket.accept()
-        await websocket.close(code=4004, reason="Session not found")
-        return
-
-    # Verify user owns the session
-    if not session_manager.verify_session_access(session_id, user["user_id"]):
-        logger.warning(
-            f"WebSocket rejected: user {user['user_id']} denied access to session {session_id}"
-        )
-        await websocket.accept()
-        await websocket.close(code=4003, reason="Access denied")
-        return
-
-    had_buffered = await ws_manager.connect(websocket, session_id)
-
-    # Send "ready" on fresh connections so the frontend knows the session
-    # is alive.  Skip it when buffered events were flushed — those already
-    # contain the correct state and a ready would incorrectly reset
-    # isProcessing on the frontend.
-    if not had_buffered:
-        try:
-            await websocket.send_json(
-                {
-                    "event_type": "ready",
-                    "data": {"message": "Agent initialized"},
-                }
-            )
-        except Exception as e:
-            logger.error(f"Failed to send ready event for session {session_id}: {e}")
-
-    try:
-        while True:
-            # Keep connection alive, handle ping/pong
-            data = await websocket.receive_json()
-
-            # Handle client messages (e.g., ping)
-            if data.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
-
-    except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for session {session_id}")
-    except Exception as e:
-        logger.error(f"WebSocket error for session {session_id}: {e}")
-    finally:
-        ws_manager.disconnect(session_id)
