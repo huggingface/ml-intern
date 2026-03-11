@@ -142,39 +142,25 @@ class ContextManager:
         return self.items
 
     @staticmethod
-    def _tc_id(tc) -> str:
-        """Get tool_call id from either a ToolCall object or a dict."""
-        if isinstance(tc, dict):
-            return tc.get("id", "")
-        return tc.id
+    def _normalize_tool_calls(msg: Message) -> None:
+        """Ensure msg.tool_calls contains proper ToolCall objects, not dicts.
 
-    @staticmethod
-    def _tc_func_name(tc) -> str:
-        """Get function name from either a ToolCall object or a dict."""
-        if isinstance(tc, dict):
-            fn = tc.get("function", {})
-            return fn.get("name", "") if isinstance(fn, dict) else getattr(fn, "name", "")
-        return tc.function.name
+        litellm's Message has validate_assignment=False (Pydantic v2 default),
+        so direct attribute assignment (e.g. inside litellm's streaming handler)
+        can leave raw dicts.  Re-assigning via the constructor fixes this.
+        """
+        from litellm import ChatCompletionMessageToolCall as ToolCall
 
-    @staticmethod
-    def _tc_func_args(tc) -> str:
-        """Get function arguments string from either a ToolCall object or a dict."""
-        if isinstance(tc, dict):
-            fn = tc.get("function", {})
-            return fn.get("arguments", "{}") if isinstance(fn, dict) else getattr(fn, "arguments", "{}")
-        return tc.function.arguments
-
-    @staticmethod
-    def _tc_set_func_args(tc, value: str) -> None:
-        """Set function arguments on either a ToolCall object or a dict."""
-        if isinstance(tc, dict):
-            fn = tc.get("function")
-            if isinstance(fn, dict):
-                fn["arguments"] = value
-            else:
-                fn.arguments = value
-        else:
-            tc.function.arguments = value
+        tool_calls = getattr(msg, "tool_calls", None)
+        if not tool_calls:
+            return
+        needs_fix = any(isinstance(tc, dict) for tc in tool_calls)
+        if not needs_fix:
+            return
+        msg.tool_calls = [
+            tc if not isinstance(tc, dict) else ToolCall(**tc)
+            for tc in tool_calls
+        ]
 
     def _sanitize_tool_calls(self) -> None:
         """Fix malformed tool_call arguments across all assistant messages.
@@ -191,15 +177,17 @@ class ContextManager:
             tool_calls = getattr(msg, "tool_calls", None)
             if not tool_calls:
                 continue
-            for tc in tool_calls:
+            # Ensure proper ToolCall objects (litellm streaming can leave dicts)
+            self._normalize_tool_calls(msg)
+            for tc in msg.tool_calls:
                 try:
-                    json.loads(self._tc_func_args(tc))
+                    json.loads(tc.function.arguments)
                 except (json.JSONDecodeError, TypeError, ValueError):
                     logger.warning(
                         "Sanitizing malformed arguments for tool_call %s (%s)",
-                        self._tc_id(tc), self._tc_func_name(tc),
+                        tc.id, tc.function.name,
                     )
-                    self._tc_set_func_args(tc, "{}")
+                    tc.function.arguments = "{}"
 
     def _patch_dangling_tool_calls(self) -> None:
         """Add stub tool results for any tool_calls that lack a matching result.
@@ -225,20 +213,20 @@ class ContextManager:
         if not assistant_msg:
             return
 
+        self._normalize_tool_calls(assistant_msg)
         answered_ids = {
             getattr(m, "tool_call_id", None)
             for m in self.items
             if getattr(m, "role", None) == "tool"
         }
         for tc in assistant_msg.tool_calls:
-            tc_id = self._tc_id(tc)
-            if tc_id not in answered_ids:
+            if tc.id not in answered_ids:
                 self.items.append(
                     Message(
                         role="tool",
                         content="Tool was not executed (interrupted or error).",
-                        tool_call_id=tc_id,
-                        name=self._tc_func_name(tc),
+                        tool_call_id=tc.id,
+                        name=tc.function.name,
                     )
                 )
 
