@@ -349,11 +349,32 @@ class Handlers:
                 if session.is_cancelled:
                     break
 
+                # Recover any malformed tool calls (sanitize JSON + inject
+                # error results).  Returns IDs to skip during execution.
+                malformed_ids = session.context_manager.recover_malformed_tool_calls()
+                for mid in malformed_ids:
+                    await session.send_event(
+                        Event(
+                            event_type="tool_output",
+                            data={
+                                "tool": next(
+                                    (tc.function.name for tc in tool_calls if tc.id == mid),
+                                    "unknown",
+                                ),
+                                "tool_call_id": mid,
+                                "output": "Malformed tool call — see error in context.",
+                                "success": False,
+                            },
+                        )
+                    )
+
                 # Separate tools into those requiring approval and those that don't
                 approval_required_tools = []
                 non_approval_tools = []
 
                 for tc in tool_calls:
+                    if tc.id in malformed_ids:
+                        continue
                     tool_name = tc.function.name
                     try:
                         tool_args = json.loads(tc.function.arguments)

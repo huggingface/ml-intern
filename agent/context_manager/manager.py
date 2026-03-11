@@ -133,11 +133,13 @@ class ContextManager:
     def get_messages(self) -> list[Message]:
         """Get all messages for sending to LLM.
 
-        Automatically patches any dangling tool_calls (assistant messages
-        with tool_calls that have no matching tool-result message).  This
-        can happen after errors or cancellations and would cause the LLM
-        API to reject the request.
+        Automatically recovers malformed tool_call arguments and patches
+        any dangling tool_calls (assistant messages with tool_calls that
+        have no matching tool-result message).  Both can happen after
+        errors or cancellations and would cause the LLM API to reject the
+        request.
         """
+        self.recover_malformed_tool_calls()
         self._patch_dangling_tool_calls()
         return self.items
 
@@ -162,27 +164,80 @@ class ContextManager:
             for tc in tool_calls
         ]
 
-    def _sanitize_tool_calls(self) -> None:
-        """Fix malformed tool_call arguments across all assistant messages."""
+    def recover_malformed_tool_calls(self) -> set[str]:
+        """Sanitize malformed tool_call arguments and inject error results.
+
+        For every tool_call whose arguments are not valid JSON:
+        1. Replaces the arguments with ``"{}"`` so the context stays
+           valid for the LLM API.
+        2. Injects a ``tool`` result message explaining the error and
+           asking the agent to retry with smaller content.
+
+        This method is idempotent — safe to call from both the agent loop
+        (before tool execution) and from :meth:`get_messages` (safety net).
+
+        Returns:
+            Set of tool_call IDs that had malformed arguments.
+        """
         import json
 
+        malformed_ids: set[str] = set()
+
+        # 1. Find and sanitize malformed arguments
         for msg in self.items:
             if getattr(msg, "role", None) != "assistant":
                 continue
             tool_calls = getattr(msg, "tool_calls", None)
             if not tool_calls:
                 continue
-            # Ensure proper ToolCall objects (litellm streaming can leave dicts)
             self._normalize_tool_calls(msg)
             for tc in msg.tool_calls:
                 try:
                     json.loads(tc.function.arguments)
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except (json.JSONDecodeError, TypeError, ValueError) as e:
                     logger.warning(
-                        "Sanitizing malformed arguments for tool_call %s (%s)",
-                        tc.id, tc.function.name,
+                        "Malformed arguments for tool_call %s (%s): %s",
+                        tc.id, tc.function.name, e,
                     )
                     tc.function.arguments = "{}"
+                    malformed_ids.add(tc.id)
+
+        if not malformed_ids:
+            return malformed_ids
+
+        # 2. Inject error results for malformed calls that don't have one yet
+        answered_ids = {
+            getattr(m, "tool_call_id", None)
+            for m in self.items
+            if getattr(m, "role", None) == "tool"
+        }
+        for msg in self.items:
+            if getattr(msg, "role", None) != "assistant":
+                continue
+            tool_calls = getattr(msg, "tool_calls", None)
+            if not tool_calls:
+                continue
+            for tc in msg.tool_calls:
+                if tc.id in malformed_ids and tc.id not in answered_ids:
+                    self.items.append(
+                        Message(
+                            role="tool",
+                            content=(
+                                f"ERROR: Your tool call to '{tc.function.name}' had malformed "
+                                f"JSON arguments and was NOT executed. This usually happens "
+                                f"when the content is too large and gets truncated. "
+                                f"Please retry with smaller content — for 'write', split the "
+                                f"file into multiple smaller writes using 'edit' to build up "
+                                f"the file incrementally."
+                            ),
+                            tool_call_id=tc.id,
+                            name=tc.function.name,
+                        )
+                    )
+                    answered_ids.add(tc.id)
+
+        return malformed_ids
+
     def _patch_dangling_tool_calls(self) -> None:
         """Add stub tool results for any tool_calls that lack a matching result.
 
