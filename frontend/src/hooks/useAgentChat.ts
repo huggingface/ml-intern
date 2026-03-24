@@ -339,6 +339,53 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
     return () => { cancelled = true; };
   }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // -- Re-hydrate on wake from sleep (SSE stream may have died) -----------
+  const rehydratingRef = useRef(false);
+  useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (rehydratingRef.current) return;
+      rehydratingRef.current = true;
+      try {
+        const [msgsRes, infoRes] = await Promise.all([
+          apiFetch(`/api/session/${sessionId}/messages`),
+          apiFetch(`/api/session/${sessionId}`),
+        ]);
+        if (!msgsRes.ok || !infoRes.ok) return;
+        const info = await infoRes.json();
+        const data = await msgsRes.json();
+        if (!Array.isArray(data) || data.length === 0) return;
+
+        // Rebuild pending-approval set
+        let pendingIds: Set<string> | undefined;
+        if (info.pending_approval && Array.isArray(info.pending_approval)) {
+          pendingIds = new Set(
+            info.pending_approval.map((t: { tool_call_id: string }) => t.tool_call_id)
+          );
+          if (pendingIds.size > 0) setNeedsAttention(sessionId, true);
+        }
+
+        const uiMsgs = llmMessagesToUIMessages(data, pendingIds);
+        if (uiMsgs.length > 0) {
+          chat.setMessages(uiMsgs);
+          saveMessages(sessionId, uiMsgs);
+        }
+
+        // If the backend is still processing but we lost the SSE stream,
+        // mark the UI as busy so the chat input stays disabled.
+        if (info.is_processing) {
+          updateSession(sessionId, { isProcessing: true, activityStatus: { type: 'thinking' } });
+        }
+      } catch {
+        /* ignore — backend may be briefly unreachable */
+      } finally {
+        rehydratingRef.current = false;
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // -- Persist messages ---------------------------------------------------
   const prevLenRef = useRef(initialMessages.length);
   useEffect(() => {

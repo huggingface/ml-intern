@@ -4,6 +4,7 @@ All routes (except /health) require authentication via the get_current_user
 dependency. In dev mode (no OAUTH_CLIENT_ID), auth is bypassed automatically.
 """
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -336,17 +337,34 @@ async def chat_sse(
         broadcaster.unsubscribe(sub_id)
         raise
 
-    # Terminal events that end the SSE stream
-    TERMINAL_EVENTS = {"turn_complete", "approval_required", "error", "interrupted", "shutdown"}
+    return _sse_response(broadcaster, event_queue, sub_id)
+
+
+# ---------------------------------------------------------------------------
+# Shared SSE helpers
+# ---------------------------------------------------------------------------
+_TERMINAL_EVENTS = {"turn_complete", "approval_required", "error", "interrupted", "shutdown"}
+_SSE_KEEPALIVE_SECONDS = 15
+
+
+def _sse_response(broadcaster, event_queue, sub_id) -> StreamingResponse:
+    """Build a StreamingResponse that drains *event_queue* as SSE,
+    sending keepalive comments every 15 s to prevent proxy timeouts."""
 
     async def event_generator():
         try:
             while True:
-                msg = await event_queue.get()
+                try:
+                    msg = await asyncio.wait_for(
+                        event_queue.get(), timeout=_SSE_KEEPALIVE_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # SSE comment — ignored by parsers, keeps connection alive
+                    yield ": keepalive\n\n"
+                    continue
                 event_type = msg.get("event_type", "")
-                # Format as SSE
                 yield f"data: {json.dumps(msg)}\n\n"
-                if event_type in TERMINAL_EVENTS:
+                if event_type in _TERMINAL_EVENTS:
                     break
         finally:
             broadcaster.unsubscribe(sub_id)
@@ -360,6 +378,27 @@ async def chat_sse(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/events/{session_id}")
+async def subscribe_events(
+    session_id: str,
+    user: dict = Depends(get_current_user),
+) -> StreamingResponse:
+    """Subscribe to events for a running session without submitting new input.
+
+    Used by the frontend to re-attach after a connection drop (e.g. screen
+    sleep).  Returns 404 if the session isn't active or isn't processing.
+    """
+    _check_session_access(session_id, user)
+
+    agent_session = session_manager.sessions.get(session_id)
+    if not agent_session or not agent_session.is_active:
+        raise HTTPException(status_code=404, detail="Session not found or inactive")
+
+    broadcaster = agent_session.broadcaster
+    sub_id, event_queue = broadcaster.subscribe()
+    return _sse_response(broadcaster, event_queue, sub_id)
 
 
 @router.post("/interrupt/{session_id}")

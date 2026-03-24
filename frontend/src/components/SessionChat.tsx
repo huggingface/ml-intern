@@ -44,10 +44,10 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
 
   // Re-sync state when the browser tab regains focus (Chrome throttles
   // timers in background tabs which can stall the AI SDK's update flushing).
+  // Fires for ALL sessions so background sessions also recover after sleep.
   useEffect(() => {
-    if (!isActive) return;
     const onVisible = () => {
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'visible' && isActive) {
         useAgentStore.getState().switchActiveSession(sessionId);
       }
     };

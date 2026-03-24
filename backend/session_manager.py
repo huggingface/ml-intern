@@ -89,6 +89,7 @@ class AgentSession:
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     is_active: bool = True
+    is_processing: bool = False  # True while a submission is being executed
     broadcaster: Any = None
 
 
@@ -245,7 +246,11 @@ class SessionManager:
                         submission = await asyncio.wait_for(
                             submission_queue.get(), timeout=1.0
                         )
-                        should_continue = await process_submission(session, submission)
+                        agent_session.is_processing = True
+                        try:
+                            should_continue = await process_submission(session, submission)
+                        finally:
+                            agent_session.is_processing = False
                         if not should_continue:
                             break
                     except asyncio.TimeoutError:
@@ -405,6 +410,7 @@ class SessionManager:
             "session_id": session_id,
             "created_at": agent_session.created_at.isoformat(),
             "is_active": agent_session.is_active,
+            "is_processing": agent_session.is_processing,
             "message_count": len(agent_session.session.context_manager.items),
             "user_id": agent_session.user_id,
             "pending_approval": pending_approval,

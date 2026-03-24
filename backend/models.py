@@ -75,6 +75,7 @@ class SessionInfo(BaseModel):
     session_id: str
     created_at: str
     is_active: bool
+    is_processing: bool = False
     message_count: int
     user_id: str = "dev"
     pending_approval: list[PendingApprovalTool] | None = None

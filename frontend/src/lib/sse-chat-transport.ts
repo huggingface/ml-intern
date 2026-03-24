@@ -360,7 +360,29 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
   }
 
   async reconnectToStream(): Promise<ReadableStream<UIMessageChunk> | null> {
-    // Not needed — each turn is a separate request
-    return null;
+    // Check if the backend session is still processing a turn.
+    // If so, subscribe to its event stream so we can resume live updates
+    // (e.g. after page refresh or wake-from-sleep reconnection).
+    try {
+      const infoRes = await apiFetch(`/api/session/${this.sessionId}`);
+      if (!infoRes.ok) return null;
+      const info = await infoRes.json();
+      if (!info.is_processing) return null;
+
+      // Session is mid-turn — subscribe to its event broadcast.
+      const response = await apiFetch(`/api/events/${this.sessionId}`, {
+        headers: { 'Accept': 'text/event-stream' },
+      });
+      if (!response.ok || !response.body) return null;
+
+      this.sideChannel.onProcessing();
+
+      return response.body
+        .pipeThrough(new TextDecoderStream())
+        .pipeThrough(createSSEParserStream())
+        .pipeThrough(createEventToChunkStream(this.sideChannel));
+    } catch {
+      return null;
+    }
   }
 }
