@@ -287,6 +287,9 @@ class Sandbox:
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
+    class Cancelled(Exception):
+        """Raised when sandbox creation is cancelled by the user."""
+
     @classmethod
     def create(
         cls,
@@ -300,6 +303,7 @@ class Sandbox:
         token: str | None = None,
         wait_timeout: int = WAIT_TIMEOUT,
         log: "Callable[[str], object] | None" = None,
+        cancel_event: "Any | None" = None,
     ) -> Sandbox:
         """
         Create a new sandbox by duplicating the template Space.
@@ -317,12 +321,25 @@ class Sandbox:
             sleep_time: Auto-sleep after N seconds of inactivity.
             token: HF API token (from user's OAuth session).
             wait_timeout: Max seconds to wait for Space to start (default: 300).
+            cancel_event: A threading.Event (or compatible) checked during
+                          polling loops.  When set, the Space is deleted and
+                          Sandbox.Cancelled is raised.
 
         Returns:
             A Sandbox instance connected to the running Space.
         """
         _log = log or print
         api = HfApi(token=token)
+
+        def _check_cancel():
+            if cancel_event and cancel_event.is_set():
+                _log("Sandbox creation cancelled by user, cleaning up...")
+                try:
+                    api.delete_repo(space_id, repo_type="space")
+                    _log(f"Deleted Space {space_id}")
+                except Exception:
+                    pass
+                raise cls.Cancelled(f"Sandbox creation cancelled: {space_id}")
 
         base = name or "sandbox"
         suffix = uuid.uuid4().hex[:8]
@@ -342,13 +359,18 @@ class Sandbox:
         api.duplicate_space(**kwargs)
         _log(f"Space created: https://huggingface.co/spaces/{space_id}")
 
+        _check_cancel()
+
         # Upload sandbox server and Dockerfile (triggers rebuild)
         cls._setup_server(space_id, api, log=_log)
+
+        _check_cancel()
 
         # Wait for it to come online (rebuild + start)
         _log(f"Waiting for Space to start (timeout: {wait_timeout}s)...")
         deadline = time.time() + wait_timeout
         while time.time() < deadline:
+            _check_cancel()
             runtime = api.get_space_runtime(space_id)
             if runtime.stage == "RUNNING":
                 _log(f"Space is running (hardware: {runtime.hardware})")
@@ -365,6 +387,8 @@ class Sandbox:
                 f"Space did not start within {wait_timeout}s. "
                 f"Check https://huggingface.co/spaces/{space_id}"
             )
+
+        _check_cancel()
 
         # Wait for the API server to be responsive (non-fatal)
         sb = cls(space_id=space_id, token=token, _owns_space=True)

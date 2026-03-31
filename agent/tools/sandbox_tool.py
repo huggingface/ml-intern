@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import threading
 from typing import Any
 
 from huggingface_hub import HfApi, SpaceHardware
@@ -103,16 +104,33 @@ async def _ensure_sandbox(
             Event(event_type="tool_log", data={"tool": "sandbox", "log": msg}),
         )
 
+    # Bridge asyncio cancel event to a threading.Event for the blocking create call.
+    # We poll session._cancelled from the main loop in a background task and set
+    # a threading.Event that Sandbox.create checks during its polling loops.
+    cancel_flag = threading.Event()
+
+    async def _watch_cancel():
+        await session._cancelled.wait()
+        cancel_flag.set()
+
+    watcher_task = asyncio.create_task(_watch_cancel())
+
     kwargs = {
         "owner": owner,
         "hardware": hardware,
         "token": token,
         "log": _log,
+        "cancel_event": cancel_flag,
         **create_kwargs,
     }
     if hardware != "cpu-basic":
         kwargs["sleep_time"] = 2700
-    sb = await asyncio.to_thread(Sandbox.create, **kwargs)
+    try:
+        sb = await asyncio.to_thread(Sandbox.create, **kwargs)
+    except Sandbox.Cancelled:
+        return None, "Sandbox creation cancelled by user."
+    finally:
+        watcher_task.cancel()
     session.sandbox = sb
 
     # Set a descriptive title (template title is inherited on duplicate)
