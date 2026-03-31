@@ -27,11 +27,17 @@ def _looks_like_path(script: str) -> bool:
         isinstance(script, str)
         and script.strip() == script
         and not any(c in script for c in "\r\n\0")
-        and (script.startswith("/") or script.startswith("./") or script.startswith("../"))
+        and (
+            script.startswith("/")
+            or script.startswith("./")
+            or script.startswith("../")
+        )
     )
 
 
-async def resolve_sandbox_script(sandbox: Any, script: str) -> tuple[str | None, str | None]:
+async def resolve_sandbox_script(
+    sandbox: Any, script: str
+) -> tuple[str | None, str | None]:
     """Read a file from the sandbox if *script* looks like a path.
 
     Returns:
@@ -42,14 +48,13 @@ async def resolve_sandbox_script(sandbox: Any, script: str) -> tuple[str | None,
     if not sandbox or not _looks_like_path(script):
         return None, None
     try:
-        result = await asyncio.to_thread(
-            sandbox.bash, f"cat {shlex.quote(script)}"
-        )
+        result = await asyncio.to_thread(sandbox.bash, f"cat {shlex.quote(script)}")
         if result.success and result.output:
             return result.output, None
         return None, f"Failed to read {script} from sandbox: {result.error}"
     except Exception as e:
         return None, f"Failed to read {script} from sandbox: {e}"
+
 
 # ── Tool name mapping (short agent names → Sandbox client names) ──────
 
@@ -98,11 +103,29 @@ async def _ensure_sandbox(
             Event(event_type="tool_log", data={"tool": "sandbox", "log": msg}),
         )
 
-    kwargs = {"owner": owner, "hardware": hardware, "token": token, "log": _log, **create_kwargs}
+    kwargs = {
+        "owner": owner,
+        "hardware": hardware,
+        "token": token,
+        "log": _log,
+        **create_kwargs,
+    }
     if hardware != "cpu-basic":
         kwargs["sleep_time"] = 2700
     sb = await asyncio.to_thread(Sandbox.create, **kwargs)
     session.sandbox = sb
+
+    # Set a descriptive title (template title is inherited on duplicate)
+    from huggingface_hub import metadata_update
+
+    await asyncio.to_thread(
+        metadata_update,
+        sb.space_id,
+        {"title": "ml-agent sandbox"},
+        repo_type="space",
+        overwrite=True,
+        token=token,
+    )
 
     # Inject the OAuth token into the sandbox so Hub operations work inside it
     await asyncio.to_thread(api.add_space_secret, sb.space_id, "HF_TOKEN", token)

@@ -531,6 +531,10 @@ class HfJobsTool:
                 namespace=self.namespace,
             )
 
+            # Track job ID for cancellation on interrupt
+            if self.session:
+                self.session._running_job_ids.add(job.id)
+
             # Send job URL immediately after job creation (before waiting for completion)
             if self.session and self.tool_call_id:
                 await self.session.send_event(
@@ -553,6 +557,10 @@ class HfJobsTool:
                 job_id=job.id,
                 namespace=self.namespace,
             )
+
+            # Untrack job ID (completed or failed, no longer needs cancellation)
+            if self.session:
+                self.session._running_job_ids.discard(job.id)
 
             # Notify frontend of final status
             if self.session and self.tool_call_id:

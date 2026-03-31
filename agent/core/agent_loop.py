@@ -146,6 +146,27 @@ def _needs_approval(
     return False
 
 
+# -- LLM retry constants --------------------------------------------------
+_MAX_LLM_RETRIES = 3
+_LLM_RETRY_DELAYS = [5, 15, 30]  # seconds between retries
+
+
+def _is_transient_error(error: Exception) -> bool:
+    """Return True for errors that are likely transient and worth retrying."""
+    err_str = str(error).lower()
+    transient_patterns = [
+        "timeout", "timed out",
+        "429", "rate limit", "rate_limit",
+        "503", "service unavailable",
+        "502", "bad gateway",
+        "500", "internal server error",
+        "overloaded", "capacity",
+        "connection reset", "connection refused", "connection error",
+        "eof", "broken pipe",
+    ]
+    return any(pattern in err_str for pattern in transient_patterns)
+
+
 async def _compact_and_notify(session: Session) -> None:
     """Run compaction and send event if context was reduced."""
     old_length = session.context_manager.context_length
@@ -162,6 +183,32 @@ async def _compact_and_notify(session: Session) -> None:
                 data={"old_tokens": old_length, "new_tokens": new_length},
             )
         )
+
+
+async def _cleanup_on_cancel(session: Session) -> None:
+    """Kill sandbox processes and cancel HF jobs when the user interrupts."""
+    # Kill active sandbox processes
+    sandbox = getattr(session, "sandbox", None)
+    if sandbox:
+        try:
+            await asyncio.to_thread(sandbox.kill_all)
+            logger.info("Killed sandbox processes on cancel")
+        except Exception as e:
+            logger.warning("Failed to kill sandbox processes: %s", e)
+
+    # Cancel running HF jobs
+    job_ids = list(session._running_job_ids)
+    if job_ids:
+        from huggingface_hub import HfApi
+
+        api = HfApi(token=session.hf_token)
+        for job_id in job_ids:
+            try:
+                await asyncio.to_thread(api.cancel_job, job_id=job_id)
+                logger.info("Cancelled HF job %s on interrupt", job_id)
+            except Exception as e:
+                logger.warning("Failed to cancel HF job %s: %s", job_id, e)
+        session._running_job_ids.clear()
 
 
 class Handlers:
@@ -247,17 +294,37 @@ class Handlers:
             messages = session.context_manager.get_messages()
             tools = session.tool_router.get_tool_specs_for_llm()
             try:
-                # ── Stream the LLM response ──────────────────────────
+                # ── Stream the LLM response (with retry for transient errors) ──
                 llm_params = _resolve_hf_router_params(session.config.model_name)
-                response = await acompletion(
-                    messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    stream=True,
-                    stream_options={"include_usage": True},
-                    timeout=600,       # 10 min — long tool-use turns can take a while
-                    **llm_params,
-                )
+                response = None
+                for _llm_attempt in range(_MAX_LLM_RETRIES):
+                    try:
+                        response = await acompletion(
+                            messages=messages,
+                            tools=tools,
+                            tool_choice="auto",
+                            stream=True,
+                            stream_options={"include_usage": True},
+                            timeout=600,
+                            **llm_params,
+                        )
+                        break
+                    except ContextWindowExceededError:
+                        raise
+                    except Exception as e:
+                        if _llm_attempt < _MAX_LLM_RETRIES - 1 and _is_transient_error(e):
+                            _delay = _LLM_RETRY_DELAYS[_llm_attempt]
+                            logger.warning(
+                                "Transient LLM error (attempt %d/%d): %s — retrying in %ds",
+                                _llm_attempt + 1, _MAX_LLM_RETRIES, e, _delay,
+                            )
+                            await session.send_event(Event(
+                                event_type="tool_log",
+                                data={"tool": "system", "log": f"LLM connection error, retrying in {_delay}s..."},
+                            ))
+                            await asyncio.sleep(_delay)
+                            continue
+                        raise
 
                 full_content = ""
                 tool_calls_acc: dict[int, dict] = {}
@@ -355,8 +422,8 @@ class Handlers:
                     )
                     await session.send_event(
                         Event(
-                            event_type="error",
-                            data={"error": f"Output truncated — retrying with smaller content ({dropped_names})"},
+                            event_type="tool_log",
+                            data={"tool": "system", "log": f"Output truncated — retrying with smaller content ({dropped_names})"},
                         )
                     )
                     iteration += 1
@@ -510,6 +577,7 @@ class Handlers:
                             await gather_task
                         except asyncio.CancelledError:
                             pass
+                        await _cleanup_on_cancel(session)
                         break
 
                     cancel_task.cancel()
@@ -593,6 +661,7 @@ class Handlers:
                 break
 
         if session.is_cancelled:
+            await _cleanup_on_cancel(session)
             await session.send_event(Event(event_type="interrupted"))
         elif not errored:
             await session.send_event(
@@ -743,15 +812,36 @@ class Handlers:
 
             return (tc, tool_name, output, success, was_edited)
 
-        # Execute all approved tools concurrently and wait for ALL to complete
+        # Execute all approved tools concurrently (cancellable)
         if approved_tasks:
-            results = await asyncio.gather(
+            gather_task = asyncio.ensure_future(asyncio.gather(
                 *[
                     execute_tool(tc, tool_name, tool_args, was_edited)
                     for tc, tool_name, tool_args, was_edited in approved_tasks
                 ],
                 return_exceptions=True,
+            ))
+            cancel_task = asyncio.ensure_future(session._cancelled.wait())
+
+            done, _ = await asyncio.wait(
+                [gather_task, cancel_task],
+                return_when=asyncio.FIRST_COMPLETED,
             )
+
+            if cancel_task in done:
+                gather_task.cancel()
+                try:
+                    await gather_task
+                except asyncio.CancelledError:
+                    pass
+                await _cleanup_on_cancel(session)
+                await session.send_event(Event(event_type="interrupted"))
+                session.increment_turn()
+                await session.auto_save_if_needed()
+                return
+
+            cancel_task.cancel()
+            results = gather_task.result()
 
             # Process results and add to context
             for result in results:

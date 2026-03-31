@@ -97,13 +97,17 @@ CMD ["python", "sandbox_server.py"]
 
 _SANDBOX_SERVER = '''\
 """Minimal FastAPI server for sandbox operations."""
-import os, subprocess, pathlib
+import os, subprocess, pathlib, signal, threading
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
 import uvicorn
 
 app = FastAPI()
+
+# Track active bash processes so they can be killed on cancel
+_active_procs = {}  # pid -> subprocess.Popen
+_proc_lock = threading.Lock()
 
 class BashReq(BaseModel):
     command: str
@@ -135,18 +139,48 @@ def health():
 @app.post("/api/bash")
 def bash(req: BashReq):
     try:
-        r = subprocess.run(
-            req.command, shell=True, capture_output=True, text=True,
-            cwd=req.work_dir, timeout=req.timeout,
+        proc = subprocess.Popen(
+            req.command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=req.work_dir, start_new_session=True,
         )
-        output = r.stdout + r.stderr
-        if len(output) > 30000:
-            output = output[:30000] + "\\n... (truncated)"
-        return {"success": r.returncode == 0, "output": output, "error": "" if r.returncode == 0 else f"Exit code {r.returncode}"}
-    except subprocess.TimeoutExpired:
-        return {"success": False, "output": "", "error": f"Timeout after {req.timeout}s"}
+        with _proc_lock:
+            _active_procs[proc.pid] = proc
+        try:
+            stdout, stderr = proc.communicate(timeout=req.timeout)
+            output = stdout + stderr
+            if len(output) > 30000:
+                output = output[:30000] + "\\n... (truncated)"
+            return {"success": proc.returncode == 0, "output": output, "error": "" if proc.returncode == 0 else f"Exit code {proc.returncode}"}
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.wait()
+            return {"success": False, "output": "", "error": f"Timeout after {req.timeout}s"}
+        finally:
+            with _proc_lock:
+                _active_procs.pop(proc.pid, None)
     except Exception as e:
         return {"success": False, "output": "", "error": str(e)}
+
+@app.post("/api/kill")
+def kill_all():
+    """Kill all active bash processes. Called when user cancels."""
+    with _proc_lock:
+        pids = list(_active_procs.keys())
+    killed = []
+    for pid in pids:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            killed.append(pid)
+        except OSError:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed.append(pid)
+            except OSError:
+                pass
+    return {"success": True, "output": f"Killed {len(killed)} process(es): {killed}", "error": ""}
 
 @app.post("/api/read")
 def read(req: ReadReq):
@@ -565,6 +599,10 @@ class Sandbox:
                 "replace_all": replace_all,
             },
         )
+
+    def kill_all(self) -> ToolResult:
+        """Kill all active bash processes on the sandbox. Used on cancellation."""
+        return self._call("kill", {})
 
     # ── Tool schemas & dispatch ───────────────────────────────────
 
