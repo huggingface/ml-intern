@@ -99,6 +99,9 @@ function ResearchSteps({ steps, isRunning }: { steps: string[]; isRunning: boole
   );
 }
 
+// Stable reference to avoid infinite re-renders from Zustand selectors
+const EMPTY_STEPS: string[] = [];
+
 // ---------------------------------------------------------------------------
 // Hardware pricing ($/hr) — from HF Spaces & Jobs pricing
 // ---------------------------------------------------------------------------
@@ -397,8 +400,8 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
   const { setPanel, lockPanel, getJobUrl, getEditedScript } = useAgentStore();
   const researchSteps = useAgentStore(s => {
     const activeId = s.activeSessionId;
-    return activeId ? (s.sessionStates[activeId]?.researchSteps ?? []) : [];
-  });
+    return activeId ? (s.sessionStates[activeId]?.researchSteps) : undefined;
+  }) ?? EMPTY_STEPS;
   const { setRightPanelOpen, setLeftSidebarOpen } = useLayoutStore();
 
   // ── Batch approval state ──────────────────────────────────────────
