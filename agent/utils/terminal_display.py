@@ -65,18 +65,16 @@ def print_tool_output(output: str, success: bool, truncate: bool = True) -> None
 
 
 class SubAgentDisplay:
-    """Rolling 2-line gray display of the last 2 sub-agent tool calls, truncated to 20 chars."""
+    """Rolling 2-line gray display of the last 2 sub-agent tool calls."""
 
     _MAX_VISIBLE = 2
-    _MAX_CHARS = 20
 
     def __init__(self):
         self._calls: list[str] = []
         self._lines_on_screen = 0
 
     def update(self, tool_desc: str) -> None:
-        truncated = tool_desc[:self._MAX_CHARS] + ("…" if len(tool_desc) > self._MAX_CHARS else "")
-        self._calls.append(truncated)
+        self._calls.append(tool_desc)
         visible = self._calls[-self._MAX_VISIBLE:]
         self._redraw(visible)
 
