@@ -222,7 +222,7 @@ class ContextManager:
         return False
 
     # Tools whose outputs should never be pruned (too valuable to summarise)
-    _PRUNE_SKIP_TOOLS: set[str] = {"research"}
+    _PRUNE_SKIP_TOOLS: set[str] = {"research", "plan_tool"}
 
     def prune_old_tool_outputs(self) -> None:
         """Stage 1 compaction: deterministically truncate old tool outputs.
