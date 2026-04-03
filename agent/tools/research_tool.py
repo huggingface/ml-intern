@@ -170,11 +170,9 @@ def _resolve_llm_params(model_name: str) -> dict:
 
 def _get_research_model(main_model: str) -> str:
     """Pick a cheaper model for research based on the main model."""
-    if "opus" in main_model:
-        return "anthropic/claude-sonnet-4-5-20250929"
-    if "sonnet" in main_model:
+    if "anthropic/" in main_model:
         return "anthropic/claude-haiku-3-5-20241022"
-    # For HF router models, use the same model
+    # For non-Anthropic models (HF router etc.), use the same model
     return main_model
 
 
