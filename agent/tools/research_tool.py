@@ -221,7 +221,25 @@ async def research_handler(
         except Exception:
             pass
 
-    await _log("Starting research sub-agent...")
+    import time as _time
+
+    _start = _time.monotonic()
+    _tool_uses = 0
+    _total_tokens = 0
+
+    def _format_stats() -> str:
+        elapsed = _time.monotonic() - _start
+        if elapsed < 60:
+            time_str = f"{elapsed:.0f}s"
+        else:
+            time_str = f"{elapsed / 60:.0f}m {elapsed % 60:.0f}s"
+        if _total_tokens >= 1000:
+            tok_str = f"{_total_tokens / 1000:.1f}k"
+        else:
+            tok_str = str(_total_tokens)
+        return f"{_tool_uses} tool uses · {tok_str} tokens · {time_str}"
+
+    await _log("stats:" + _format_stats())
 
     # Run the research loop (max 20 iterations — research should be focused)
     max_iterations = 20
@@ -239,11 +257,16 @@ async def research_handler(
             logger.error("Research sub-agent LLM error: %s", e)
             return f"Research agent LLM error: {e}", False
 
+        # Track tokens
+        if response.usage:
+            _total_tokens += response.usage.total_tokens
+
         choice = response.choices[0]
         msg = choice.message
 
         # If no tool calls, we have our final answer
         if not msg.tool_calls:
+            await _log("stats:" + _format_stats())
             await _log("Research complete.")
             content = msg.content or "Research completed but no summary generated."
             return content, True
@@ -285,6 +308,8 @@ async def research_handler(
                 output, _success = await session.tool_router.call_tool(
                     tool_name, tool_args, session=session
                 )
+                _tool_uses += 1
+                await _log("stats:" + _format_stats())
                 # Truncate tool output for the research context
                 if len(output) > 8000:
                     output = output[:4800] + "\n...(truncated)...\n" + output[-3200:]

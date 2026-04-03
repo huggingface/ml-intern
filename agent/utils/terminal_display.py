@@ -65,37 +65,55 @@ def print_tool_output(output: str, success: bool, truncate: bool = True) -> None
 
 
 class SubAgentDisplay:
-    """Rolling 2-line gray display of the last 2 sub-agent tool calls."""
+    """Live-updating display: header with stats + rolling 2-line tool calls."""
 
     _MAX_VISIBLE = 2
 
     def __init__(self):
         self._calls: list[str] = []
+        self._stats: str = ""
         self._lines_on_screen = 0
 
-    def update(self, tool_desc: str) -> None:
+    def set_stats(self, stats: str) -> None:
+        """Update the stats line and redraw."""
+        self._stats = stats
+        self._redraw()
+
+    def add_call(self, tool_desc: str) -> None:
+        """Add a tool call and redraw."""
         self._calls.append(tool_desc)
-        visible = self._calls[-self._MAX_VISIBLE:]
-        self._redraw(visible)
+        self._redraw()
 
     def clear(self) -> None:
+        self._erase()
+        self._lines_on_screen = 0
+        self._calls = []
+        self._stats = ""
+
+    def _erase(self) -> None:
         if self._lines_on_screen > 0:
             f = _console.file
             for _ in range(self._lines_on_screen):
                 f.write("\033[A\033[K")
             f.flush()
-        self._lines_on_screen = 0
-        self._calls = []
 
-    def _redraw(self, visible: list[str]) -> None:
+    def _redraw(self) -> None:
         f = _console.file
-        if self._lines_on_screen > 0:
-            for _ in range(self._lines_on_screen):
-                f.write("\033[A\033[K")
+        self._erase()
+        lines = []
+        # Header: ▸ research (stats)
+        header = f"{_I}\033[1;36m▸ research\033[0m"
+        if self._stats:
+            header += f"  \033[2m({self._stats})\033[0m"
+        lines.append(header)
+        # Last 2 tool calls, gray
+        visible = self._calls[-self._MAX_VISIBLE:]
         for desc in visible:
-            f.write(f"{_I}  \033[2m{desc}\033[0m\n")
+            lines.append(f"{_I}  \033[2m{desc}\033[0m")
+        for line in lines:
+            f.write(line + "\n")
         f.flush()
-        self._lines_on_screen = len(visible)
+        self._lines_on_screen = len(lines)
 
 
 _subagent_display = SubAgentDisplay()
@@ -104,13 +122,12 @@ _subagent_display = SubAgentDisplay()
 def print_tool_log(tool: str, log: str) -> None:
     """Handle tool log events — sub-agent calls get the rolling display."""
     if tool == "research":
-        if log == "Starting research sub-agent...":
-            _subagent_display.clear()
-            _console.print(f"{_I}[tool.name]▸ research[/tool.name]")
+        if log.startswith("stats:"):
+            _subagent_display.set_stats(log[6:])
         elif log == "Research complete.":
             _subagent_display.clear()
         else:
-            _subagent_display.update(log)
+            _subagent_display.add_call(log)
     else:
         _console.print(f"{_I}[dim]{tool}: {log}[/dim]")
 
