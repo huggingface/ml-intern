@@ -9,6 +9,7 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/ptb_%j.out
 #SBATCH --error=logs/ptb_%j.err
+#SBATCH --export=ALL
 
 # Usage: cd /fsx/aksel/hf_agent && sbatch posttrain-bench/slurm/submit.sbatch gsm8k hf_agent Qwen/Qwen3-1.7B-Base 1 claude-opus-4-6
 # Must be submitted from the hf_agent repo root.
