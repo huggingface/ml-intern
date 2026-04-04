@@ -254,6 +254,15 @@ class ContextManager:
             self.items[0] if self.items and self.items[0].role == "system" else None
         )
 
+        # Preserve the first user message (task prompt) — never summarize it
+        first_user_msg = None
+        first_user_idx = 1
+        for i in range(1, len(self.items)):
+            if getattr(self.items[i], "role", None) == "user":
+                first_user_msg = self.items[i]
+                first_user_idx = i
+                break
+
         # Don't summarize a certain number of just-preceding messages
         # Walk back to find a user message to make sure we keep an assistant -> user ->
         # assistant general conversation structure
@@ -262,7 +271,7 @@ class ContextManager:
             idx -= 1
 
         recent_messages = self.items[idx:]
-        messages_to_summarize = self.items[1:idx]
+        messages_to_summarize = self.items[first_user_idx + 1:idx]
 
         # improbable, messages would have to very long
         if not messages_to_summarize:
@@ -289,11 +298,11 @@ class ContextManager:
             role="assistant", content=response.choices[0].message.content
         )
 
-        # Reconstruct: system + summary + recent messages (includes tools)
-        if system_msg:
-            self.items = [system_msg, summarized_message] + recent_messages
-        else:
-            self.items = [summarized_message] + recent_messages
+        # Reconstruct: system + first user msg + summary + recent messages
+        head = [system_msg] if system_msg else []
+        if first_user_msg:
+            head.append(first_user_msg)
+        self.items = head + [summarized_message] + recent_messages
 
         self.context_length = (
             len(self.system_prompt) // 4 + response.usage.completion_tokens
