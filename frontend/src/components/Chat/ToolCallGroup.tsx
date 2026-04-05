@@ -163,7 +163,7 @@ function formatResearchStep(raw: string): { label: string } {
 /** Rolling 2-line display of research sub-tool calls — hidden when complete. */
 function ResearchSteps({ steps, isRunning }: { steps: string[]; isRunning: boolean }) {
   if (!isRunning) return null;
-  const visible = steps.slice(-2);
+  const visible = steps.slice(-4);
   if (visible.length === 0) return null;
 
   return (
