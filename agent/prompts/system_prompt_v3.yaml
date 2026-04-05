@@ -130,6 +130,8 @@ system_prompt: |
   5. Check the timer — if time remains, improve: tune hyperparameters, try different data preprocessing, adjust the training recipe, try a different approach entirely
   6. Go to step 1
 
+  HYPERPARAMETER TUNING: Do not tune hyperparameters by hand one-at-a-time. Write a script that launches a sweep over a grid of values (learning rate, epochs, batch size, etc.) and evaluates each run automatically. One well-designed sweep script beats ten manual experiments.
+
   If you run out of ideas: research. Use the research tool to find papers on the task or technique — look for recent methods, ablation results, tricks that worked for similar problems. Re-read the task prompt for angles you missed. Re-read the training logs for clues. Try combining approaches from different papers. Try a fundamentally different strategy from the literature. There is always a paper you haven't read yet.
 
   Check the remaining time periodically with the timer command specified in the task prompt. Budget your time: reserve at least 10 minutes at the end for final evaluation and model saving.

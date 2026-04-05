@@ -55,14 +55,28 @@ if [ -d "${POSTTRAINBENCH_DIR}/src/eval/tasks/${EVALUATION_TASK}/task_context" ]
     cp -r "${POSTTRAINBENCH_DIR}/src/eval/tasks/${EVALUATION_TASK}/task_context"/* "${JOB_DIR}/task/"
 fi
 
-# Generate prompt (runs on host, before container)
-# get_prompt.py uses relative paths, so must run from PostTrainBench root
+# Generate prompt from our template (not PTB's get_prompt.py)
 BENCHMARK=$(cat "${POSTTRAINBENCH_DIR}/src/eval/tasks/${EVALUATION_TASK}/benchmark.txt")
-PROMPT=$(cd "${POSTTRAINBENCH_DIR}" && python3 src/eval/general/get_prompt.py \
-    --model-to-train "$MODEL_TO_TRAIN" \
-    --benchmark-id "$EVALUATION_TASK" \
-    --num-hours "$NUM_HOURS" \
-    --agent "${AGENT}")
+PROMPT_TEMPLATE=$(cat "${REPO_DIR}/posttrain-bench/prompt.txt")
+
+# Substitute template variables
+PROMPT="${PROMPT_TEMPLATE//\{model\}/$MODEL_TO_TRAIN}"
+PROMPT="${PROMPT//\{benchmark\}/$BENCHMARK}"
+PROMPT="${PROMPT//\{num_hours\}/$NUM_HOURS}"
+
+# Add inspect-ai note for tasks that use it
+INSPECT_EVALS="aime2025 bfcl gpqamain gsm8k humaneval humanevalplus"
+if echo "$INSPECT_EVALS" | grep -qw "$EVALUATION_TASK"; then
+    PROMPT="${PROMPT//\{setup_other\}/- A final note: the evaluate.py script sometimes outputs ERROR warnings. Do not be alarmed by this, this is normal behavior for inspect-ai. Also if you run into issues with the evaluate.py script, this is likely due to memory constraints on the GPU. In this case please decrease --max-connections or --max-tokens.
+}"
+else
+    PROMPT="${PROMPT//\{setup_other\}/}"
+fi
+
+# Append non-interactive mode note
+PROMPT="$PROMPT
+You are running in a non-interactive mode. So make sure every process you are running finishes before you write your last message."
+
 echo "$PROMPT" > "${EVAL_DIR}/prompt.txt"
 
 # Generate timer
