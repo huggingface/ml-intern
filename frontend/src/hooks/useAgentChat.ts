@@ -626,6 +626,11 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
       if (hasApproved) {
         updateSession(sessionId, { isProcessing: true });
       }
+
+      // Persist updated tool states so a page refresh during execution
+      // won't restore stale approval-requested state from localStorage.
+      saveMessages(sessionId, chatActionsRef.current.messages);
+
       return true;
     },
     [sessionId, chat, updateSession, setNeedsAttention],
