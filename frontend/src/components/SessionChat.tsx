@@ -5,7 +5,7 @@
  * runs — processing events — but only the active session renders visible
  * UI (MessageList + ChatInput).
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect } from 'react';
 import { useAgentChat } from '@/hooks/useAgentChat';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
@@ -23,8 +23,6 @@ interface SessionChatProps {
 export default function SessionChat({ sessionId, isActive, onSessionDead }: SessionChatProps) {
   const { isConnected, isProcessing, activityStatus, updateSession } = useAgentStore();
   const { updateSessionTitle } = useSessionStore();
-
-  const [wasCancelled, setWasCancelled] = useState(false);
 
   const { messages, sendMessage, stop, status, undoLastTurn, approveTools } = useAgentChat({
     sessionId,
@@ -57,11 +55,11 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [isActive, sessionId]);
 
-  // Wrap stop to track cancellation
+  // Wrap stop to show cancelled shimmer
   const handleStop = useCallback(() => {
     stop();
-    setWasCancelled(true);
-  }, [stop]);
+    updateSession(sessionId, { activityStatus: { type: 'cancelled' } });
+  }, [stop, updateSession, sessionId]);
 
   // SDK status is the ground truth — if it's streaming/submitted, agent is busy
   const sdkBusy = status === 'streaming' || status === 'submitted';
@@ -71,8 +69,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
     async (text: string) => {
       if (!text.trim() || busy) return;
 
-      setWasCancelled(false);
-      updateSession(sessionId, { isProcessing: true });
+      updateSession(sessionId, { isProcessing: true, activityStatus: { type: 'thinking' } });
       sendMessage({ text: text.trim(), metadata: { createdAt: new Date().toISOString() } });
 
       // Auto-title the session from the first user message
@@ -114,9 +111,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
         placeholder={
           activityStatus.type === 'waiting-approval'
             ? 'Approve or reject pending tools first...'
-            : wasCancelled
-              ? 'What should the agent do instead?'
-              : undefined
+            : undefined
         }
       />
     </>

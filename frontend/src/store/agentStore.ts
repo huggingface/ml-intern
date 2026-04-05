@@ -50,7 +50,8 @@ export type ActivityStatus =
   | { type: 'thinking' }
   | { type: 'tool'; toolName: string; description?: string }
   | { type: 'waiting-approval' }
-  | { type: 'streaming' };
+  | { type: 'streaming' }
+  | { type: 'cancelled' };
 
 /** State that is tracked per-session (each session has its own copy). */
 export interface PerSessionState {
@@ -189,7 +190,7 @@ export const useAgentStore = create<AgentStore>()((set, get) => ({
     // Apply the processing→idle side effect
     const processingCleared = 'isProcessing' in updates && !updates.isProcessing;
     if (processingCleared) {
-      if (updated.activityStatus.type !== 'waiting-approval') {
+      if (updated.activityStatus.type !== 'waiting-approval' && updated.activityStatus.type !== 'cancelled') {
         updated.activityStatus = { type: 'idle' };
       }
     }
@@ -267,7 +268,7 @@ export const useAgentStore = create<AgentStore>()((set, get) => ({
 
   setProcessing: (isProcessing) => {
     const current = get().activityStatus;
-    const preserveStatus = current.type === 'waiting-approval';
+    const preserveStatus = current.type === 'waiting-approval' || current.type === 'cancelled';
     set({ isProcessing, ...(!isProcessing && !preserveStatus ? { activityStatus: { type: 'idle' } } : {}) });
   },
   setConnected: (isConnected) => set({ isConnected }),
