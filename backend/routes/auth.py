@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlencode
 
 import httpx
-from dependencies import AUTH_ENABLED, get_current_user
+from dependencies import AUTH_ENABLED, check_org_membership, get_current_user
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
@@ -169,3 +169,20 @@ async def get_me(user: dict = Depends(get_current_user)) -> dict:
     Uses the shared auth dependency which handles cookie + Bearer token.
     """
     return user
+
+
+ORG_NAME = "ml-agent-explorers"
+
+
+@router.get("/org-membership")
+async def org_membership(
+    request: Request, user: dict = Depends(get_current_user)
+) -> dict:
+    """Check if the authenticated user belongs to the ml-agent-explorers org."""
+    if not AUTH_ENABLED:
+        return {"is_member": True}
+    token = request.cookies.get("hf_access_token") or ""
+    if not token:
+        return {"is_member": False}
+    is_member = await check_org_membership(token, ORG_NAME)
+    return {"is_member": is_member}
