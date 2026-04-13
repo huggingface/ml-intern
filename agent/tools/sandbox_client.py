@@ -519,6 +519,7 @@ class Sandbox:
         private: bool = False,
         sleep_time: int | None = None,
         token: str | None = None,
+        secrets: dict[str, str] | None = None,
         wait_timeout: int = WAIT_TIMEOUT,
         log: "Callable[[str], object] | None" = None,
         cancel_event: "Any | None" = None,
@@ -578,6 +579,13 @@ class Sandbox:
         _log(f"Space created: https://huggingface.co/spaces/{space_id}")
 
         _check_cancel()
+
+        # Inject secrets BEFORE uploading server files (which triggers rebuild).
+        # Secrets added after a Space is running aren't available until restart,
+        # so they must be set before the build/start cycle.
+        if secrets:
+            for key, val in secrets.items():
+                api.add_space_secret(space_id, key, val)
 
         # Upload sandbox server and Dockerfile (triggers rebuild)
         cls._setup_server(space_id, api, log=_log)

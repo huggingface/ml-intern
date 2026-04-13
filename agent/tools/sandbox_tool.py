@@ -124,6 +124,7 @@ async def _ensure_sandbox(
         "owner": owner,
         "hardware": hardware,
         "token": token,
+        "secrets": {"HF_TOKEN": token},
         "log": _log,
         "cancel_event": cancel_flag,
         **create_kwargs,
@@ -149,9 +150,6 @@ async def _ensure_sandbox(
         overwrite=True,
         token=token,
     )
-
-    # Inject the OAuth token into the sandbox so Hub operations work inside it
-    await asyncio.to_thread(api.add_space_secret, sb.space_id, "HF_TOKEN", token)
 
     await session.send_event(
         Event(
