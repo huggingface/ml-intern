@@ -883,13 +883,12 @@ def _check_reprompt_timer(timer_script: str, min_remaining_minutes: int) -> tupl
             return False, 0, 0
 
         import re
-        hours_match = re.search(r"^(\d+):", output)
-        mins_match = re.search(r":(\d+)", output)
-        if not hours_match or not mins_match:
+        match = re.search(r"^(\d+):(\d+)$", output, re.MULTILINE)
+        if not match:
             return False, 0, 0
 
-        hours = int(hours_match.group(1))
-        mins = int(mins_match.group(1))
+        hours = int(match.group(1))
+        mins = int(match.group(2))
         total_mins = hours * 60 + mins
         if total_mins < min_remaining_minutes:
             return False, hours, mins
@@ -1068,9 +1067,7 @@ async def headless_main(
                     reprompt_count += 1
                     continuation = (
                         f"You still have {hours}h {mins}m remaining. "
-                        f"Continue improving your result — check eval scores, "
-                        f"try different hyperparameters or data, and maximize "
-                        f"performance. Do not stop early."
+                        f"Please continue improving your result and maximize performance."
                     )
                     print(f"\n=== REPROMPT #{reprompt_count} ({hours}h {mins}m remaining) ===", file=sys.stderr)
                     sub_id += 1
