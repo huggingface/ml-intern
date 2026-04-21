@@ -78,63 +78,19 @@ export default function UserMessage({
 
   return (
     <Stack
-      direction="row"
-      spacing={1.5}
-      justifyContent="flex-end"
-      alignItems="flex-start"
+      direction="column"
+      alignItems="flex-end"
+      spacing={0.5}
       sx={{
-        '& .action-btn': {
+        '& .action-btn-row': {
           opacity: 0,
           transition: 'opacity 0.15s ease',
         },
-        '&:hover .action-btn': {
+        '&:hover .action-btn-row': {
           opacity: 1,
         },
       }}
     >
-      {!isEditing && (showUndo || showEdit) && (
-        <Stack className="action-btn" direction="row" spacing={0.25} sx={{ mt: 0.75 }}>
-          {showEdit && (
-            <Tooltip title="Edit & regenerate" placement="left">
-              <IconButton
-                onClick={handleStartEdit}
-                size="small"
-                sx={{
-                  width: 24,
-                  height: 24,
-                  color: 'var(--muted-text)',
-                  '&:hover': {
-                    color: 'var(--accent-yellow)',
-                    bgcolor: 'rgba(255,157,0,0.08)',
-                  },
-                }}
-              >
-                <EditIcon sx={{ fontSize: 14 }} />
-              </IconButton>
-            </Tooltip>
-          )}
-          {showUndo && (
-            <Tooltip title="Remove this turn" placement="left">
-              <IconButton
-                onClick={onUndoTurn}
-                size="small"
-                sx={{
-                  width: 24,
-                  height: 24,
-                  color: 'var(--muted-text)',
-                  '&:hover': {
-                    color: 'var(--accent-red)',
-                    bgcolor: 'rgba(244,67,54,0.08)',
-                  },
-                }}
-              >
-                <CloseIcon sx={{ fontSize: 14 }} />
-              </IconButton>
-            </Tooltip>
-          )}
-        </Stack>
-      )}
-
       <Box
         sx={{
           maxWidth: { xs: '88%', md: '72%' },
@@ -214,6 +170,58 @@ export default function UserMessage({
           </Typography>
         )}
       </Box>
+
+      {!isEditing && (showUndo || showEdit) && (
+        <Stack
+          className="action-btn-row"
+          direction="row"
+          spacing={0.25}
+          sx={{ pr: 0.25 }}
+        >
+          {showEdit && (
+            <Tooltip title="Edit & regenerate" placement="bottom">
+              <IconButton
+                onClick={handleStartEdit}
+                size="small"
+                aria-label="Edit and regenerate"
+                sx={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 1,
+                  color: 'var(--muted-text)',
+                  '&:hover': {
+                    color: 'var(--accent-yellow)',
+                    bgcolor: 'var(--hover-bg)',
+                  },
+                }}
+              >
+                <EditIcon sx={{ fontSize: 15 }} />
+              </IconButton>
+            </Tooltip>
+          )}
+          {showUndo && (
+            <Tooltip title="Remove this turn" placement="bottom">
+              <IconButton
+                onClick={onUndoTurn}
+                size="small"
+                aria-label="Remove this turn"
+                sx={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 1,
+                  color: 'var(--muted-text)',
+                  '&:hover': {
+                    color: 'var(--accent-red)',
+                    bgcolor: 'var(--hover-bg)',
+                  },
+                }}
+              >
+                <CloseIcon sx={{ fontSize: 15 }} />
+              </IconButton>
+            </Tooltip>
+          )}
+        </Stack>
+      )}
     </Stack>
   );
 }
