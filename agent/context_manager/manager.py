@@ -263,7 +263,10 @@ class ContextManager:
         return False
 
     async def compact(
-        self, model_name: str, tool_specs: list[dict] | None = None
+        self,
+        model_name: str,
+        tool_specs: list[dict] | None = None,
+        hf_token: str | None = None,
     ) -> None:
         """Remove old messages to keep history under target size"""
         if (self.context_length <= self.max_context) or not self.items:
@@ -303,7 +306,11 @@ class ContextManager:
             )
         )
 
-        hf_key = os.environ.get("INFERENCE_TOKEN")
+        hf_key = (
+            os.environ.get("INFERENCE_TOKEN")
+            or hf_token
+            or os.environ.get("HF_TOKEN")
+        )
         response = await acompletion(
             model=model_name,
             messages=messages_to_summarize,

@@ -20,11 +20,11 @@ from agent.tools.jobs_tool import CPU_FLAVORS
 logger = logging.getLogger(__name__)
 
 ToolCall = ChatCompletionMessageToolCall
-# Explicit inference token for LLM API calls (separate from user OAuth tokens).
-_INFERENCE_API_KEY = os.environ.get("INFERENCE_TOKEN")
 
 
-def _resolve_hf_router_params(model_name: str) -> dict:
+def _resolve_hf_router_params(
+    model_name: str, session_hf_token: str | None = None
+) -> dict:
     """
     Build LiteLLM kwargs for HuggingFace Router models.
 
@@ -35,6 +35,13 @@ def _resolve_hf_router_params(model_name: str) -> dict:
 
     Input format:  huggingface/<router_provider>/<org>/<model>
     Example:       huggingface/novita/moonshotai/kimi-k2.5
+
+    Token resolution (first non-empty wins):
+      1. INFERENCE_TOKEN env — shared key on the hosted Space so inference
+         is free for users and billed to the Space owner.
+      2. session.hf_token — the user's own token (CLI or self-hosted),
+         resolved from env / huggingface-cli login / cached token file.
+      3. HF_TOKEN env — belt-and-suspenders fallback for CLI users.
     """
     if not model_name.startswith("huggingface/"):
         return {"model": model_name}
@@ -47,7 +54,11 @@ def _resolve_hf_router_params(model_name: str) -> dict:
 
     router_provider = parts[1]
     actual_model = parts[2]
-    api_key = _INFERENCE_API_KEY
+    api_key = (
+        os.environ.get("INFERENCE_TOKEN")
+        or session_hf_token
+        or os.environ.get("HF_TOKEN")
+    )
 
     return {
         "model": f"openai/{actual_model}",
@@ -205,6 +216,7 @@ async def _compact_and_notify(session: Session) -> None:
     await session.context_manager.compact(
         model_name=session.config.model_name,
         tool_specs=tool_specs,
+        hf_token=session.hf_token,
     )
     new_length = session.context_manager.context_length
     if new_length != old_length:
@@ -506,7 +518,9 @@ class Handlers:
             tools = session.tool_router.get_tool_specs_for_llm()
             try:
                 # ── Call the LLM (streaming or non-streaming) ──
-                llm_params = _resolve_hf_router_params(session.config.model_name)
+                llm_params = _resolve_hf_router_params(
+                    session.config.model_name, session.hf_token
+                )
                 if session.stream:
                     llm_result = await _call_llm_streaming(session, messages, tools, llm_params)
                 else:

@@ -213,7 +213,9 @@ RESEARCH_TOOL_SPEC = {
 }
 
 
-def _resolve_llm_params(model_name: str) -> dict:
+def _resolve_llm_params(
+    model_name: str, session_hf_token: str | None = None
+) -> dict:
     """Build LiteLLM kwargs, reusing the HF router logic from agent_loop."""
     if not model_name.startswith("huggingface/"):
         return {"model": model_name}
@@ -224,10 +226,16 @@ def _resolve_llm_params(model_name: str) -> dict:
 
     provider = parts[1]
     model_id = parts[2]
+    api_key = (
+        os.environ.get("INFERENCE_TOKEN")
+        or session_hf_token
+        or os.environ.get("HF_TOKEN")
+        or ""
+    )
     return {
         "model": f"openai/{model_id}",
         "api_base": f"https://router.huggingface.co/{provider}/v3/openai",
-        "api_key": os.environ.get("INFERENCE_TOKEN", ""),
+        "api_key": api_key,
     }
 
 
@@ -264,7 +272,7 @@ async def research_handler(
     # Use a cheaper/faster model for research
     main_model = session.config.model_name
     research_model = _get_research_model(main_model)
-    llm_params = _resolve_llm_params(research_model)
+    llm_params = _resolve_llm_params(research_model, getattr(session, "hf_token", None))
 
     # Get read-only tool specs from the session's tool router
     tool_specs = [
