@@ -61,6 +61,33 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
     updateSession(sessionId, { activityStatus: { type: 'cancelled' } });
   }, [stop, updateSession, sessionId]);
 
+  // Regenerate an assistant response by re-sending the preceding user message.
+  // Implemented via editAndRegenerate: truncate at the preceding user message
+  // and send its text again (same transport as a normal submit).
+  const handleRegenerateAssistant = useCallback(
+    async (assistantMessageId: string) => {
+      const idx = messages.findIndex((m) => m.id === assistantMessageId);
+      if (idx <= 0) return;
+      let userMsg: typeof messages[number] | null = null;
+      for (let i = idx - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          userMsg = messages[i];
+          break;
+        }
+      }
+      if (!userMsg) return;
+      const text = userMsg.parts
+        .filter((p): p is Extract<typeof userMsg.parts[number], { type: 'text' }> => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n\n')
+        .trim();
+      if (!text) return;
+      updateSession(sessionId, { isProcessing: true, activityStatus: { type: 'thinking' } });
+      await editAndRegenerate(userMsg.id, text);
+    },
+    [messages, editAndRegenerate, sessionId, updateSession],
+  );
+
   // SDK status is the ground truth — if it's streaming/submitted, agent is busy
   const sdkBusy = status === 'streaming' || status === 'submitted';
   const busy = isProcessing || sdkBusy;
@@ -103,6 +130,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
         approveTools={approveTools}
         onUndoLastTurn={undoLastTurn}
         onEditAndRegenerate={editAndRegenerate}
+        onRegenerateAssistant={handleRegenerateAssistant}
       />
       <ChatInput
         onSend={handleSendMessage}
@@ -111,7 +139,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
         disabled={!isConnected || activityStatus.type === 'waiting-approval'}
         placeholder={
           activityStatus.type === 'waiting-approval'
-            ? 'Approve or reject pending tools first...'
+            ? 'Review pending tool actions to continue.'
             : undefined
         }
       />

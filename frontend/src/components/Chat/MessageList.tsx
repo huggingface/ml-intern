@@ -11,6 +11,7 @@ interface MessageListProps {
   approveTools: (approvals: Array<{ tool_call_id: string; approved: boolean; feedback?: string | null }>) => Promise<boolean>;
   onUndoLastTurn: () => void | Promise<void>;
   onEditAndRegenerate?: (messageId: string, newText: string) => void | Promise<void>;
+  onRegenerateAssistant?: (assistantMessageId: string) => void | Promise<void>;
 }
 
 function getGreeting(): string {
@@ -57,7 +58,7 @@ function WelcomeGreeting() {
   );
 }
 
-export default function MessageList({ messages, isProcessing, approveTools, onUndoLastTurn, onEditAndRegenerate }: MessageListProps) {
+export default function MessageList({ messages, isProcessing, approveTools, onUndoLastTurn, onEditAndRegenerate, onRegenerateAssistant }: MessageListProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
@@ -135,8 +136,10 @@ export default function MessageList({ messages, isProcessing, approveTools, onUn
               key={msg.id}
               message={msg}
               isLastTurn={msg.id === lastUserMsgId}
+              isLastAssistant={msg.id === lastAssistantId}
               onUndoTurn={onUndoLastTurn}
               onEditAndRegenerate={onEditAndRegenerate}
+              onRegenerateAssistant={onRegenerateAssistant}
               isProcessing={isProcessing}
               isStreaming={isProcessing && msg.id === lastAssistantId}
               approveTools={approveTools}

@@ -301,7 +301,7 @@ export default function AppLayout() {
               flexDirection: 'column',
               overflow: 'hidden',
               background: 'var(--body-gradient)',
-              p: { xs: 1.5, sm: 2, md: 3 },
+              p: { xs: 1.5, sm: 2.5, md: 3.5 },
               minWidth: 0,
             }}
           >
@@ -329,10 +329,10 @@ export default function AppLayout() {
                 }}
               >
                 <Typography variant="h5" color="text.secondary" sx={{ fontFamily: 'monospace', fontSize: { xs: '1rem', md: '1.5rem' } }}>
-                  NO SESSION SELECTED
+                  No conversation selected
                 </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ fontFamily: 'monospace', fontSize: { xs: '0.75rem', md: '0.875rem' } }}>
-                  Initialize a session via the sidebar
+                <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: '0.82rem', md: '0.9rem' }, maxWidth: '64ch', textAlign: 'center' }}>
+                  Start a new session from the left sidebar, then send your first instruction.
                 </Typography>
               </Box>
             )}
@@ -404,9 +404,9 @@ export default function AppLayout() {
           severity="warning"
           variant="filled"
           onClose={() => setShowExpiredToast(false)}
-          sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}
+          sx={{ fontSize: '0.82rem' }}
         >
-          Task expired — create a new task to continue.
+          This task expired. Create a new task to continue.
         </Alert>
       </Snackbar>
       <Snackbar

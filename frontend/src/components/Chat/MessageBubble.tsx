@@ -5,8 +5,10 @@ import type { UIMessage } from 'ai';
 interface MessageBubbleProps {
   message: UIMessage;
   isLastTurn?: boolean;
+  isLastAssistant?: boolean;
   onUndoTurn?: () => void;
   onEditAndRegenerate?: (messageId: string, newText: string) => void | Promise<void>;
+  onRegenerateAssistant?: (assistantMessageId: string) => void | Promise<void>;
   isProcessing?: boolean;
   isStreaming?: boolean;
   approveTools: (approvals: Array<{ tool_call_id: string; approved: boolean; feedback?: string | null }>) => Promise<boolean>;
@@ -15,8 +17,10 @@ interface MessageBubbleProps {
 export default function MessageBubble({
   message,
   isLastTurn = false,
+  isLastAssistant = false,
   onUndoTurn,
   onEditAndRegenerate,
+  onRegenerateAssistant,
   isProcessing = false,
   isStreaming = false,
   approveTools,
@@ -38,6 +42,8 @@ export default function MessageBubble({
       <AssistantMessage
         message={message}
         isStreaming={isStreaming}
+        canRegenerate={isLastAssistant && !isProcessing}
+        onRegenerate={onRegenerateAssistant}
         approveTools={approveTools}
       />
     );

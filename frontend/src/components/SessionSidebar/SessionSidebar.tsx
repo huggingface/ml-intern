@@ -12,10 +12,17 @@ import {
   Typography,
   CircularProgress,
   Divider,
+  Menu,
+  MenuItem,
+  ListItemIcon,
+  ListItemText,
+  TextField,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
+import MoreVertIcon from '@mui/icons-material/MoreVert';
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import { useSessionStore } from '@/store/sessionStore';
 import { useAgentStore } from '@/store/agentStore';
 import { apiFetch } from '@/utils/api';
@@ -25,7 +32,7 @@ interface SessionSidebarProps {
 }
 
 export default function SessionSidebar({ onClose }: SessionSidebarProps) {
-  const { sessions, activeSessionId, createSession, deleteSession, switchSession } =
+  const { sessions, activeSessionId, createSession, deleteSession, switchSession, updateSessionTitle } =
     useSessionStore();
   const { setPlan, clearPanel } =
     useAgentStore();
@@ -60,14 +67,49 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
   // -- Delete with dialog confirmation ------------------------------------
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [menuAnchorEl, setMenuAnchorEl] = useState<null | HTMLElement>(null);
+  const [menuSessionId, setMenuSessionId] = useState<string | null>(null);
+  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
 
   const handleDeleteClick = useCallback(
-    (sessionId: string, e: React.MouseEvent) => {
-      e.stopPropagation();
+    (sessionId: string, e?: React.MouseEvent) => {
+      e?.stopPropagation();
+      setMenuAnchorEl(null);
+      setMenuSessionId(null);
       setConfirmDeleteId(sessionId);
     },
     [],
   );
+
+  const handleMenuOpen = useCallback((sessionId: string, e: React.MouseEvent<HTMLElement>) => {
+    e.stopPropagation();
+    setMenuAnchorEl(e.currentTarget);
+    setMenuSessionId(sessionId);
+  }, []);
+
+  const handleMenuClose = useCallback(() => {
+    setMenuAnchorEl(null);
+    setMenuSessionId(null);
+  }, []);
+
+  const openRenameDialog = useCallback(() => {
+    if (!menuSessionId) return;
+    const session = sessions.find((s) => s.id === menuSessionId);
+    setRenameSessionId(menuSessionId);
+    setRenameValue((session?.title || '').trim());
+    handleMenuClose();
+  }, [menuSessionId, sessions, handleMenuClose]);
+
+  const handleRenameSave = useCallback(() => {
+    if (!renameSessionId) return;
+    const trimmed = renameValue.trim();
+    if (!trimmed) return;
+    const clean = trimmed.length > 60 ? `${trimmed.slice(0, 60).trimEnd()}…` : trimmed;
+    updateSessionTitle(renameSessionId, clean);
+    setRenameSessionId(null);
+    setRenameValue('');
+  }, [renameSessionId, renameValue, updateSessionTitle]);
 
   const handleDeleteConfirm = useCallback(async () => {
     if (!confirmDeleteId || isDeleting) return;
@@ -133,10 +175,10 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
           variant="caption"
           sx={{
             color: 'var(--muted-text)',
-            fontSize: '0.65rem',
+            fontSize: '0.68rem',
             fontWeight: 600,
             textTransform: 'uppercase',
-            letterSpacing: '0.08em',
+            letterSpacing: '0.1em',
           }}
         >
           Recent chats
@@ -151,7 +193,7 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
           onClose={() => setCapacityError(null)}
           sx={{
             m: 1,
-            fontSize: '0.7rem',
+            fontSize: '0.76rem',
             py: 0.25,
             '& .MuiAlert-message': { py: 0 },
             borderColor: '#FF9D00',
@@ -233,7 +275,11 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
                     opacity: 0,
                     transition: 'opacity 0.12s',
                   },
-                  '&:hover .delete-btn': {
+                  '& .more-btn': {
+                    opacity: 0,
+                    transition: 'opacity 0.12s',
+                  },
+                  '&:hover .more-btn': {
                     opacity: 1,
                   },
                 }}
@@ -293,18 +339,18 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
                 )}
 
                 <IconButton
-                  className="delete-btn"
+                  className="more-btn"
                   size="small"
-                  onClick={(e) => handleDeleteClick(session.id, e)}
+                  onClick={(e) => handleMenuOpen(session.id, e)}
                   sx={{
                     color: 'var(--muted-text)',
                     width: 26,
                     height: 26,
                     flexShrink: 0,
-                    '&:hover': { color: 'var(--accent-red)', bgcolor: 'rgba(244,67,54,0.08)' },
+                    '&:hover': { color: 'var(--text)', bgcolor: 'var(--hover-bg)' },
                   }}
                 >
-                  <DeleteOutlineIcon sx={{ fontSize: 15 }} />
+                  <MoreVertIcon sx={{ fontSize: 15 }} />
                 </IconButton>
               </Box>
             );
@@ -337,15 +383,16 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
             px: 1.5,
             py: 1.25,
             border: 'none',
-            borderRadius: '10px',
+            borderRadius: '12px',
             bgcolor: '#FF9D00',
             color: '#000',
-            fontSize: '0.85rem',
+            fontSize: '0.88rem',
             fontWeight: 700,
             cursor: 'pointer',
-            transition: 'all 0.12s ease',
+            transition: 'transform 0.16s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.16s ease',
             '&:hover': {
               bgcolor: '#FFB340',
+              transform: 'translateY(-1px)',
             },
             '&:disabled': {
               opacity: 0.5,
@@ -356,7 +403,7 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
           {isCreatingSession ? (
             <>
               <CircularProgress size={12} sx={{ color: '#000' }} />
-              Creating...
+              Creating session...
             </>
           ) : (
             <>
@@ -405,7 +452,7 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
               lineHeight: 1.6,
             }}
           >
-            This will permanently remove this conversation and its history.
+            This permanently removes this conversation and all related history.
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
@@ -450,6 +497,117 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
           </Button>
         </DialogActions>
       </Dialog>
+      <Dialog
+        open={!!renameSessionId}
+        onClose={() => setRenameSessionId(null)}
+        PaperProps={{
+          sx: {
+            bgcolor: 'var(--panel)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            boxShadow: 'var(--shadow-1)',
+            maxWidth: 420,
+            mx: 2,
+          },
+        }}
+      >
+        <DialogTitle
+          sx={{
+            color: 'var(--text)',
+            fontWeight: 700,
+            fontSize: '0.95rem',
+            pb: 0.5,
+            pt: 2.5,
+            px: 3,
+          }}
+        >
+          Rename conversation
+        </DialogTitle>
+        <DialogContent sx={{ px: 3, pt: 1 }}>
+          <TextField
+            autoFocus
+            fullWidth
+            size="small"
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleRenameSave();
+              }
+            }}
+            placeholder="Enter a new title"
+          />
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
+          <Button
+            onClick={() => setRenameSessionId(null)}
+            size="small"
+            sx={{
+              color: 'var(--muted-text)',
+              fontSize: '0.82rem',
+              px: 2,
+              '&:hover': { bgcolor: 'var(--hover-bg)' },
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleRenameSave}
+            variant="contained"
+            size="small"
+            disabled={!renameValue.trim()}
+            sx={{
+              fontSize: '0.82rem',
+              px: 2.5,
+              bgcolor: 'var(--accent-yellow)',
+              color: '#1b1b1b',
+              boxShadow: 'none',
+              '&:hover': {
+                bgcolor: 'var(--accent-yellow)',
+                filter: 'brightness(1.08)',
+                boxShadow: 'none',
+              },
+            }}
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Menu
+        anchorEl={menuAnchorEl}
+        open={Boolean(menuAnchorEl)}
+        onClose={handleMenuClose}
+        slotProps={{
+          paper: {
+            sx: {
+              bgcolor: 'var(--panel)',
+              border: '1px solid var(--border)',
+              minWidth: 170,
+            },
+          },
+        }}
+      >
+        <MenuItem onClick={openRenameDialog}>
+          <ListItemIcon>
+            <EditOutlinedIcon sx={{ fontSize: 16, color: 'var(--muted-text)' }} />
+          </ListItemIcon>
+          <ListItemText primary="Rename" />
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (menuSessionId) handleDeleteClick(menuSessionId);
+          }}
+        >
+          <ListItemIcon>
+            <DeleteOutlineIcon sx={{ fontSize: 16, color: 'var(--accent-red)' }} />
+          </ListItemIcon>
+          <ListItemText
+            primary="Delete"
+            primaryTypographyProps={{ sx: { color: 'var(--accent-red)' } }}
+          />
+        </MenuItem>
+      </Menu>
     </Box>
   );
 }

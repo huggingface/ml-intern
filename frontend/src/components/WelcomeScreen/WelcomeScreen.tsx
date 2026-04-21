@@ -17,7 +17,7 @@ import { apiFetch } from '@/utils/api';
 import { isInIframe, triggerLogin } from '@/hooks/useAuth';
 import { useOrgMembership } from '@/hooks/useOrgMembership';
 
-const HF_ORANGE = '#FF9D00';
+const HF_ORANGE = 'var(--accent-yellow)';
 const ORG_JOIN_URL =
   'https://huggingface.co/organizations/ml-agent-explorers/share/GzPMJUivoFPlfkvFtIqEouZKSytatKQSZT';
 
@@ -57,7 +57,7 @@ function StepIndicator({ status, stepNumber }: { status: StepStatus; stepNumber:
         fontSize: '0.8rem',
         fontWeight: 700,
         ...(status === 'active'
-          ? { bgcolor: HF_ORANGE, color: '#000' }
+          ? { bgcolor: HF_ORANGE, color: '#1b1b1b' }
           : { bgcolor: 'transparent', border: '2px solid var(--border)', color: 'var(--muted-text)' }),
       }}
     >
@@ -91,7 +91,7 @@ function ChecklistStep({
     ...(status === 'active'
       ? {
           bgcolor: HF_ORANGE,
-          color: '#000',
+          color: '#1b1b1b',
           boxShadow: '0 2px 12px rgba(255, 157, 0, 0.25)',
           '&:hover': { bgcolor: '#FFB340', boxShadow: '0 4px 20px rgba(255, 157, 0, 0.4)' },
         }
@@ -110,16 +110,20 @@ function ChecklistStep({
         gap: 2,
         px: 3,
         py: 2.5,
-        borderLeft: '3px solid',
-        borderLeftColor:
-          status === 'completed'
-            ? 'var(--accent-green)'
-            : status === 'active'
-              ? HF_ORANGE
+        border: '1px solid var(--border)',
+        borderRadius: 2,
+        background:
+          status === 'active'
+            ? 'color-mix(in oklch, var(--accent-yellow) 8%, transparent)'
+            : status === 'completed'
+              ? 'color-mix(in oklch, var(--accent-green) 8%, transparent)'
               : 'transparent',
         ...(!isLast && { borderBottom: '1px solid var(--border)' }),
         opacity: status === 'locked' ? 0.55 : 1,
-        transition: 'opacity 0.2s, border-color 0.2s',
+        transition: 'opacity 0.2s, border-color 0.2s, transform 0.2s',
+        '&:hover': {
+          transform: status === 'locked' ? 'none' : 'translateY(-1px)',
+        },
       }}
     >
       <StepIndicator status={status} stepNumber={stepNumber} />
@@ -322,7 +326,7 @@ export default function WelcomeScreen() {
           maxWidth: 480,
           mb: 4,
           lineHeight: 1.7,
-          fontSize: '0.9rem',
+          fontSize: '0.92rem',
           textAlign: 'center',
           px: 2,
           '& strong': { color: 'var(--text)', fontWeight: 600 },
@@ -338,9 +342,10 @@ export default function WelcomeScreen() {
           maxWidth: 520,
           bgcolor: 'var(--surface)',
           border: '1px solid var(--border)',
-          borderRadius: '12px',
+          borderRadius: '16px',
           overflow: 'hidden',
           mx: 2,
+          boxShadow: 'var(--shadow-1)',
         }}
       >
         {isDevUser ? (
@@ -422,9 +427,9 @@ export default function WelcomeScreen() {
       {isAuthenticated && !isOrgMember && !isDevUser && !inIframe && (
         <Typography
           variant="caption"
-          sx={{ mt: 2, color: 'var(--muted-text)', fontSize: '0.75rem', textAlign: 'center' }}
+          sx={{ mt: 2, color: 'var(--muted-text)', fontSize: '0.75rem', textAlign: 'center', maxWidth: 52 * 8 }}
         >
-          This page updates automatically when you join the organization.
+          This page refreshes your membership status automatically after you join the organization.
         </Typography>
       )}
 
@@ -449,9 +454,9 @@ export default function WelcomeScreen() {
       {/* Footnote */}
       <Typography
         variant="caption"
-        sx={{ mt: 4, color: 'var(--muted-text)', opacity: 0.5, fontSize: '0.7rem' }}
+        sx={{ mt: 4, color: 'var(--muted-text)', opacity: 0.65, fontSize: '0.72rem' }}
       >
-        Conversations are stored locally in your browser.
+        Conversations are stored locally in your browser for faster resume.
       </Typography>
     </Box>
   );

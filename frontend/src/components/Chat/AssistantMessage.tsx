@@ -1,5 +1,8 @@
-import { useMemo } from 'react';
-import { Box, Stack, Typography } from '@mui/material';
+import { useMemo, useState } from 'react';
+import { Box, IconButton, Stack, Tooltip, Typography } from '@mui/material';
+import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded';
+import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
+import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import MarkdownContent from './MarkdownContent';
 import ToolCallGroup from './ToolCallGroup';
 import type { UIMessage } from 'ai';
@@ -8,6 +11,8 @@ import type { MessageMeta } from '@/types/agent';
 interface AssistantMessageProps {
   message: UIMessage;
   isStreaming?: boolean;
+  canRegenerate?: boolean;
+  onRegenerate?: (assistantMessageId: string) => void | Promise<void>;
   approveTools: (approvals: Array<{ tool_call_id: string; approved: boolean; feedback?: string | null }>) => Promise<boolean>;
 }
 
@@ -43,8 +48,42 @@ function groupParts(parts: UIMessage['parts']) {
   return groups;
 }
 
-export default function AssistantMessage({ message, isStreaming = false, approveTools }: AssistantMessageProps) {
+export default function AssistantMessage({
+  message,
+  isStreaming = false,
+  canRegenerate = false,
+  onRegenerate,
+  approveTools,
+}: AssistantMessageProps) {
   const groups = useMemo(() => groupParts(message.parts), [message.parts]);
+  const [copied, setCopied] = useState(false);
+
+  const copyText = useMemo(() => {
+    return message.parts
+      .filter((p): p is Extract<UIMessage['parts'][number], { type: 'text' }> => p.type === 'text')
+      .map((p) => p.text)
+      .join('\n\n')
+      .trim();
+  }, [message.parts]);
+
+  const hasText = copyText.length > 0;
+  const showActions = !isStreaming && hasText;
+
+  const handleCopy = async () => {
+    if (!copyText) return;
+    try {
+      await navigator.clipboard.writeText(copyText);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard API may be unavailable; fail silently
+    }
+  };
+
+  const handleRegenerate = () => {
+    if (!onRegenerate) return;
+    onRegenerate(message.id);
+  };
 
   // Find the last text group index for streaming cursor
   let lastTextIdx = -1;
@@ -114,6 +153,66 @@ export default function AssistantMessage({ message, isStreaming = false, approve
           return null;
         })}
       </Box>
+
+      {showActions && (
+        <Stack
+          direction="row"
+          spacing={0.25}
+          sx={{
+            mt: 0.75,
+            ml: 0.25,
+            opacity: 0.75,
+            transition: 'opacity 0.15s ease',
+            '&:hover': { opacity: 1 },
+          }}
+        >
+          <Tooltip title={copied ? 'Copied' : 'Copy message'} placement="bottom">
+            <IconButton
+              size="small"
+              onClick={handleCopy}
+              aria-label="Copy message"
+              sx={{
+                color: copied ? 'var(--accent-yellow)' : 'var(--muted-text)',
+                width: 28,
+                height: 28,
+                borderRadius: 1,
+                '&:hover': {
+                  color: 'var(--text)',
+                  bgcolor: 'var(--hover-bg)',
+                },
+              }}
+            >
+              {copied ? (
+                <CheckRoundedIcon sx={{ fontSize: 15 }} />
+              ) : (
+                <ContentCopyRoundedIcon sx={{ fontSize: 15 }} />
+              )}
+            </IconButton>
+          </Tooltip>
+
+          {canRegenerate && onRegenerate && (
+            <Tooltip title="Regenerate response" placement="bottom">
+              <IconButton
+                size="small"
+                onClick={handleRegenerate}
+                aria-label="Regenerate response"
+                sx={{
+                  color: 'var(--muted-text)',
+                  width: 28,
+                  height: 28,
+                  borderRadius: 1,
+                  '&:hover': {
+                    color: 'var(--text)',
+                    bgcolor: 'var(--hover-bg)',
+                  },
+                }}
+              >
+                <RefreshRoundedIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
+          )}
+        </Stack>
+      )}
     </Box>
   );
 }
