@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 OPENID_PROVIDER_URL = os.environ.get("OPENID_PROVIDER_URL", "https://huggingface.co")
 AUTH_ENABLED = bool(os.environ.get("OAUTH_CLIENT_ID", ""))
+HF_EMPLOYEE_ORG = os.environ.get("HF_EMPLOYEE_ORG", "huggingface")
 
 # Simple in-memory token cache: token -> (user_info, expiry_time)
 _token_cache: dict[str, tuple[dict[str, Any], float]] = {}
@@ -140,4 +141,47 @@ async def get_current_user(request: Request) -> dict[str, Any]:
         headers={"WWW-Authenticate": "Bearer"},
     )
 
+
+def _extract_token(request: Request) -> str | None:
+    """Pull the HF access token from the Authorization header or cookie.
+
+    Mirrors the lookup order used by ``get_current_user``.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:]
+    return request.cookies.get("hf_access_token")
+
+
+async def require_huggingface_member(request: Request) -> dict[str, Any]:
+    """FastAPI dependency: require that the caller belongs to the ``huggingface`` org.
+
+    Used on endpoints that can push a session onto a model billed to the
+    Space's server-side API key (e.g. ``anthropic/claude-opus-4-6`` via
+    ``ANTHROPIC_API_KEY``). Non-HF users keep the default HF Router model,
+    which is billed via ``X-HF-Bill-To``.
+
+    In dev mode (``AUTH_ENABLED=False``), returns the dev user unchanged.
+    """
+    user = await get_current_user(request)
+    if not AUTH_ENABLED:
+        return user
+
+    token = _extract_token(request)
+    if not token:
+        # Defensive: get_current_user would have raised already.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not await check_org_membership(token, HF_EMPLOYEE_ORG):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Switching model requires membership of the '{HF_EMPLOYEE_ORG}' org."
+            ),
+        )
+    return user
 

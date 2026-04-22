@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Any
 
-from dependencies import get_current_user
+from dependencies import get_current_user, require_huggingface_member
 from fastapi import (
     APIRouter,
     Depends,
@@ -144,8 +144,13 @@ async def get_model() -> dict:
 
 
 @router.post("/config/model")
-async def set_model(body: dict, user: dict = Depends(get_current_user)) -> dict:
-    """Set the LLM model. Applies to new conversations."""
+async def set_model(body: dict, user: dict = Depends(require_huggingface_member)) -> dict:
+    """Set the LLM model. Applies to new conversations.
+
+    Restricted to HF org members — switching the default to an Anthropic-billed
+    model would otherwise let any authenticated user drive spend on the Space's
+    ``ANTHROPIC_API_KEY``.
+    """
     model_id = body.get("model")
     if not model_id:
         raise HTTPException(status_code=400, detail="Missing 'model' field")
@@ -302,12 +307,18 @@ async def get_session(
 
 @router.post("/session/{session_id}/model")
 async def set_session_model(
-    session_id: str, body: dict, user: dict = Depends(get_current_user)
+    session_id: str,
+    body: dict,
+    user: dict = Depends(require_huggingface_member),
 ) -> dict:
     """Switch the active model for a single session (tab-scoped).
 
     Takes effect on the next LLM call in that session — other sessions
     (including other browser tabs) are unaffected.
+
+    Restricted to HF org members — this endpoint can push a session onto an
+    Anthropic-billed model (``anthropic/claude-opus-4-6``) that is paid for by
+    the Space's ``ANTHROPIC_API_KEY`` rather than the caller's HF token.
     """
     _check_session_access(session_id, user)
     model_id = body.get("model")
