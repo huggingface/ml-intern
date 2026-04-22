@@ -1,7 +1,7 @@
 [project]
-name = "hf-agent"
+name = "ml-intern"
 version = "0.1.0"
-description = "Add your description here"
+description = "ML Intern — an AI agent for machine learning engineering on Hugging Face"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -44,7 +44,7 @@ dev = [
 
 # All dependencies (eval + dev)
 all = [
-    "hf-agent[eval,dev]",
+    "ml-intern[eval,dev]",
 ]
 
 [project.scripts]
