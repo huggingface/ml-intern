@@ -28,8 +28,9 @@ Create a `.env` file in the project root (or export these in your shell):
 ```bash
 ANTHROPIC_API_KEY=<your-anthropic-api-key> # if using anthropic models
 HF_TOKEN=<your-hugging-face-token>
-GITHUB_TOKEN=<github-personal-access-token> 
+GITHUB_TOKEN=<github-personal-access-token>
 ```
+
 If no `HF_TOKEN` is set, the CLI will prompt you to paste one on first launch. To get a GITHUB_TOKEN follow the tutorial [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token).
 
 ### Usage
