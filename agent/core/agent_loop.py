@@ -9,7 +9,7 @@ import os
 import time
 from dataclasses import dataclass, field
 
-from litellm import ChatCompletionMessageToolCall, Message, acompletion
+from litellm import ChatCompletionMessageToolCall, Message, acompletion, stream_chunk_builder
 from litellm.exceptions import ContextWindowExceededError
 
 from agent.config import Config
@@ -396,6 +396,11 @@ class LLMResult:
     token_count: int
     finish_reason: str | None
     usage: dict = field(default_factory=dict)
+    # Extended-thinking state. Must be threaded back into the next assistant
+    # Message for Anthropic models, otherwise LiteLLM strips the `thinking`
+    # param on tool-continuation turns and we lose extended thinking.
+    thinking_blocks: list | None = None
+    reasoning_content: str | None = None
 
 
 async def _call_llm_streaming(session: Session, messages, tools, llm_params) -> LLMResult:
@@ -448,11 +453,16 @@ async def _call_llm_streaming(session: Session, messages, tools, llm_params) -> 
     token_count = 0
     finish_reason = None
     final_usage_chunk = None
+    # Keep the raw chunks around so we can reassemble thinking_blocks /
+    # reasoning_content at the end via litellm.stream_chunk_builder. We do
+    # our own content/tool_call accumulation for backwards compatibility.
+    chunks: list = []
 
     async for chunk in response:
         if session.is_cancelled:
             tool_calls_acc.clear()
             break
+        chunks.append(chunk)
 
         choice = chunk.choices[0] if chunk.choices else None
         if not choice:
@@ -499,12 +509,30 @@ async def _call_llm_streaming(session: Session, messages, tools, llm_params) -> 
         finish_reason=finish_reason,
     )
 
+    # Reassemble thinking state. Best-effort: if stream_chunk_builder fails
+    # (unfamiliar provider, malformed chunks), swallow and continue without
+    # thinking — the loop still works, just without extended thinking on
+    # continuation turns.
+    thinking_blocks = None
+    reasoning_content = None
+    if chunks:
+        try:
+            reassembled = stream_chunk_builder(chunks)
+            if reassembled and reassembled.choices:
+                msg = reassembled.choices[0].message
+                thinking_blocks = getattr(msg, "thinking_blocks", None) or None
+                reasoning_content = getattr(msg, "reasoning_content", None) or None
+        except Exception as e:
+            logger.debug("stream_chunk_builder failed, no thinking reassembly: %s", e)
+
     return LLMResult(
         content=full_content or None,
         tool_calls_acc=tool_calls_acc,
         token_count=token_count,
         finish_reason=finish_reason,
         usage=usage,
+        thinking_blocks=thinking_blocks,
+        reasoning_content=reasoning_content,
     )
 
 
@@ -557,6 +585,8 @@ async def _call_llm_non_streaming(session: Session, messages, tools, llm_params)
     content = message.content or None
     finish_reason = choice.finish_reason
     token_count = response.usage.total_tokens if response.usage else 0
+    thinking_blocks = getattr(message, "thinking_blocks", None) or None
+    reasoning_content = getattr(message, "reasoning_content", None) or None
 
     # Build tool_calls_acc in the same format as streaming
     tool_calls_acc: dict[int, dict] = {}
@@ -591,6 +621,8 @@ async def _call_llm_non_streaming(session: Session, messages, tools, llm_params)
         token_count=token_count,
         finish_reason=finish_reason,
         usage=usage,
+        thinking_blocks=thinking_blocks,
+        reasoning_content=reasoning_content,
     )
 
 
@@ -737,6 +769,8 @@ class Handlers:
                 tool_calls_acc = llm_result.tool_calls_acc
                 token_count = llm_result.token_count
                 finish_reason = llm_result.finish_reason
+                thinking_blocks = llm_result.thinking_blocks
+                reasoning_content = llm_result.reasoning_content
 
                 # If output was truncated, all tool call args are garbage.
                 # Inject a system hint so the LLM retries with smaller content.
@@ -764,6 +798,10 @@ class Handlers:
                     )
                     if content:
                         assistant_msg = Message(role="assistant", content=content)
+                        if thinking_blocks:
+                            assistant_msg.thinking_blocks = thinking_blocks
+                        if reasoning_content:
+                            assistant_msg.reasoning_content = reasoning_content
                         session.context_manager.add_message(assistant_msg, token_count)
                     session.context_manager.add_message(
                         Message(role="user", content=f"[SYSTEM: {truncation_hint}]")
@@ -820,6 +858,10 @@ class Handlers:
                     )
                     if content:
                         assistant_msg = Message(role="assistant", content=content)
+                        if thinking_blocks:
+                            assistant_msg.thinking_blocks = thinking_blocks
+                        if reasoning_content:
+                            assistant_msg.reasoning_content = reasoning_content
                         session.context_manager.add_message(assistant_msg, token_count)
                         final_response = content
                     break
@@ -840,12 +882,19 @@ class Handlers:
                         tc.function.arguments = "{}"
                         bad_tools.append(tc)
 
-                # Add assistant message with all tool calls to context
+                # Add assistant message with all tool calls to context.
+                # Preserve thinking_blocks so Anthropic extended-thinking keeps
+                # working on the tool-continuation turn (otherwise LiteLLM
+                # strips the `thinking` param and we lose extended thinking).
                 assistant_msg = Message(
                     role="assistant",
                     content=content,
                     tool_calls=tool_calls,
                 )
+                if thinking_blocks:
+                    assistant_msg.thinking_blocks = thinking_blocks
+                if reasoning_content:
+                    assistant_msg.reasoning_content = reasoning_content
                 session.context_manager.add_message(assistant_msg, token_count)
 
                 # Add error results for bad tool calls so the LLM
