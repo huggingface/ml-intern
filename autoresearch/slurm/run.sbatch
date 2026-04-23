@@ -111,14 +111,27 @@ echo "$PROMPT" > "${RUN_DIR}/prompt.txt"
 # ── Generate a wall-clock timer.sh for --resume reprompting ──
 # The agent polls this with `bash timer.sh`. We set the deadline now based on
 # NUM_HOURS so the reprompt loop knows when to stop firing new prompts.
+#
+# Retry credit: rate-limit / transient errors can eat minutes of backoff.
+# agent_loop.py writes the total backoff seconds to $RETRY_CREDIT_FILE;
+# timer.sh adds that credit to REMAINING_SEC so retry time doesn't count
+# against the agent's productive budget. Capped by SLURM wall clock.
 JOB_START_EPOCH=$(date +%s)
 JOB_END_EPOCH=$((JOB_START_EPOCH + NUM_HOURS * 3600))
+RETRY_CREDIT_FILE="/workspace/retry_credit"
 cat > "${RUN_DIR}/timer.sh" <<EOF
 #!/bin/bash
 # Auto-generated timer for autoresearch run ${SLURM_JOB_ID}
 # Prints remaining time as 'H:MM' on its own line, or 'expired'.
 NOW=\$(date +%s)
 REMAINING_SEC=\$((${JOB_END_EPOCH} - NOW))
+# Credit retry-backoff time so rate-limit waits don't shrink the budget.
+CREDIT_FILE="${RETRY_CREDIT_FILE}"
+if [ -f "\$CREDIT_FILE" ]; then
+    CREDIT=\$(cat "\$CREDIT_FILE" 2>/dev/null || echo 0)
+    CREDIT=\${CREDIT:-0}
+    REMAINING_SEC=\$((REMAINING_SEC + CREDIT))
+fi
 if [ \$REMAINING_SEC -le 0 ]; then
     echo "Remaining time:"
     echo "expired"
@@ -181,6 +194,10 @@ srun \
         export ANTHROPIC_API_KEY="'"${ANTHROPIC_API_KEY:-}"'"
         export OPENAI_API_KEY="'"${OPENAI_API_KEY:-}"'"
         export HF_TOKEN="'"${HF_TOKEN:-}"'"
+        # agent_loop.py appends rate-limit / transient retry backoff seconds
+        # here; timer.sh reads the file and extends the deadline. Matches the
+        # path baked into the generated timer.sh above.
+        export RETRY_CREDIT_FILE="/workspace/retry_credit"
         unset VIRTUAL_ENV
 
         git clone --depth 1 --branch posttrain-bench \

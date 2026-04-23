@@ -138,6 +138,28 @@ def _is_rate_limit_error(error: Exception) -> bool:
     )
 
 
+def _credit_retry_time(seconds: int) -> None:
+    """Append retry-backoff seconds to ``$RETRY_CREDIT_FILE`` so an external
+    timer (e.g. autoresearch timer.sh) can extend its deadline by the time
+    we spent waiting on rate limits / transient errors. Without this, a 27
+    min rate-limit storm would eat 27 min of the agent's budget even though
+    zero productive work happened. No-op when the env var isn't set.
+    Best-effort — failures are swallowed so accounting never breaks a retry.
+    """
+    path = os.environ.get("RETRY_CREDIT_FILE")
+    if not path:
+        return
+    try:
+        current = 0
+        if os.path.exists(path):
+            with open(path) as f:
+                current = int((f.read() or "0").strip() or "0")
+        with open(path, "w") as f:
+            f.write(str(current + int(seconds)))
+    except Exception:
+        pass
+
+
 def _is_transient_error(error: Exception) -> bool:
     """Return True for errors that are likely transient and worth retrying."""
     err_str = str(error).lower()
@@ -355,6 +377,7 @@ async def _call_llm_streaming(session: Session, messages, tools, llm_params) -> 
                     data={"tool": "system", "log": f"LLM {_kind} error, retrying in {_delay}s..."},
                 ))
                 await asyncio.sleep(_delay)
+                _credit_retry_time(_delay)  # extend external timer by time we waited
                 continue
             raise
 
@@ -455,6 +478,7 @@ async def _call_llm_non_streaming(session: Session, messages, tools, llm_params)
                     data={"tool": "system", "log": f"LLM {_kind} error, retrying in {_delay}s..."},
                 ))
                 await asyncio.sleep(_delay)
+                _credit_retry_time(_delay)  # extend external timer by time we waited
                 continue
             raise
 
