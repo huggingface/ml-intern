@@ -1,4 +1,4 @@
-"""Provider adapters for runtime params and model metadata."""
+"""Provider adapters for runtime params and model-name validation."""
 
 import os
 from dataclasses import dataclass
@@ -13,30 +13,28 @@ class UnsupportedEffortError(ValueError):
     """
 
 
-@dataclass(frozen=True)
-class SuggestedModel:
-    id: str
-    label: str
-    description: str
-    provider: str
-    provider_label: str
-    avatar_url: str
-    recommended: bool = False
+def _has_model_suffix(model_name: str, prefix: str) -> bool:
+    if not model_name.startswith(prefix):
+        return False
+    tail = model_name[len(prefix) :].split(":", 1)[0]
+    return bool(tail) and all(tail.split("/"))
+
+
+def _is_hf_model_name(model_name: str) -> bool:
+    if model_name.startswith(("anthropic/", "openai/")):
+        return False
+    bare = model_name.removeprefix("huggingface/").split(":", 1)[0]
+    parts = bare.split("/")
+    return len(parts) >= 2 and all(parts)
 
 
 @dataclass(frozen=True)
 class ProviderAdapter:
     provider_id: str
-    provider_label: str
     prefixes: tuple[str, ...] = ()
-    supports_custom_model: bool = False
-    custom_model_hint: str | None = None
 
     def matches(self, model_name: str) -> bool:
         return bool(self.prefixes) and model_name.startswith(self.prefixes)
-
-    def suggested_models(self) -> tuple[SuggestedModel, ...]:
-        return ()
 
     def build_params(
         self,
@@ -49,9 +47,7 @@ class ProviderAdapter:
         raise NotImplementedError
 
     def allows_model_name(self, model_name: str) -> bool:
-        if any(model.id == model_name for model in self.suggested_models()):
-            return True
-        return self.supports_custom_model and self.matches(model_name)
+        return self.matches(model_name)
 
 
 @dataclass(frozen=True)
@@ -63,26 +59,8 @@ class AnthropicAdapter(ProviderAdapter):
         {"low", "medium", "high", "xhigh", "max"}
     )
 
-    def suggested_models(self) -> tuple[SuggestedModel, ...]:
-        return (
-            SuggestedModel(
-                id="anthropic/claude-opus-4-7",
-                label="Claude Opus 4.7",
-                description="Anthropic",
-                provider="anthropic",
-                provider_label="Anthropic",
-                avatar_url="https://huggingface.co/api/avatars/Anthropic",
-                recommended=True,
-            ),
-            SuggestedModel(
-                id="anthropic/claude-opus-4-6",
-                label="Claude Opus 4.6",
-                description="Anthropic",
-                provider="anthropic",
-                provider_label="Anthropic",
-                avatar_url="https://huggingface.co/api/avatars/Anthropic",
-            ),
-        )
+    def allows_model_name(self, model_name: str) -> bool:
+        return _has_model_suffix(model_name, "anthropic/")
 
     def build_params(
         self,
@@ -113,6 +91,9 @@ class OpenAIAdapter(ProviderAdapter):
     prefixes: tuple[str, ...] = ("openai/",)
     _EFFORTS: ClassVar[frozenset[str]] = frozenset({"minimal", "low", "medium", "high"})
 
+    def allows_model_name(self, model_name: str) -> bool:
+        return _has_model_suffix(model_name, "openai/")
+
     def build_params(
         self,
         model_name: str,
@@ -139,47 +120,11 @@ class HfRouterAdapter(ProviderAdapter):
 
     _EFFORTS: ClassVar[frozenset[str]] = frozenset({"low", "medium", "high"})
 
-    def _is_hf_model_name(self, model_name: str) -> bool:
-        if model_name.startswith(("anthropic/", "openai/")):
-            return False
-        bare = model_name.removeprefix("huggingface/").split(":", 1)[0]
-        parts = bare.split("/")
-        return len(parts) >= 2 and all(parts)
-
     def matches(self, model_name: str) -> bool:
-        return self._is_hf_model_name(model_name)
-
-    def suggested_models(self) -> tuple[SuggestedModel, ...]:
-        return (
-            SuggestedModel(
-                id="MiniMaxAI/MiniMax-M2.7",
-                label="MiniMax M2.7",
-                description="HF Router",
-                provider="huggingface",
-                provider_label="Hugging Face Router",
-                avatar_url="https://huggingface.co/api/avatars/MiniMaxAI",
-                recommended=True,
-            ),
-            SuggestedModel(
-                id="moonshotai/Kimi-K2.6",
-                label="Kimi K2.6",
-                description="HF Router",
-                provider="huggingface",
-                provider_label="Hugging Face Router",
-                avatar_url="https://huggingface.co/api/avatars/moonshotai",
-            ),
-            SuggestedModel(
-                id="zai-org/GLM-5.1",
-                label="GLM 5.1",
-                description="HF Router",
-                provider="huggingface",
-                provider_label="Hugging Face Router",
-                avatar_url="https://huggingface.co/api/avatars/zai-org",
-            ),
-        )
+        return not model_name.startswith(("anthropic/", "openai/"))
 
     def allows_model_name(self, model_name: str) -> bool:
-        return self._is_hf_model_name(model_name)
+        return _is_hf_model_name(model_name)
 
     def build_params(
         self,
@@ -217,22 +162,9 @@ class HfRouterAdapter(ProviderAdapter):
 
 
 ADAPTERS: tuple[ProviderAdapter, ...] = (
-    AnthropicAdapter(provider_id="anthropic", provider_label="Anthropic"),
-    OpenAIAdapter(
-        provider_id="openai",
-        provider_label="OpenAI",
-        supports_custom_model=True,
-        custom_model_hint="Use openai/<model>, for example openai/gpt-5",
-    ),
-    HfRouterAdapter(
-        provider_id="huggingface",
-        provider_label="Hugging Face Router",
-        supports_custom_model=True,
-        custom_model_hint=(
-            "Paste any Hugging Face model id, optionally with "
-            ":fastest, :cheapest, :preferred, or :<provider>"
-        ),
-    ),
+    AnthropicAdapter(provider_id="anthropic"),
+    OpenAIAdapter(provider_id="openai"),
+    HfRouterAdapter(provider_id="huggingface"),
 )
 
 
@@ -245,35 +177,4 @@ def resolve_adapter(model_name: str) -> ProviderAdapter | None:
 
 def is_valid_model_name(model_name: str) -> bool:
     adapter = resolve_adapter(model_name)
-    if not adapter:
-        return False
-    return adapter.allows_model_name(model_name)
-
-
-def get_available_models() -> list[dict[str, Any]]:
-    available: list[dict[str, Any]] = []
-    for adapter in ADAPTERS:
-        for model in adapter.suggested_models():
-            available.append(
-                {
-                    "id": model.id,
-                    "label": model.label,
-                    "description": model.description,
-                    "provider": model.provider,
-                    "providerLabel": model.provider_label,
-                    "avatarUrl": model.avatar_url,
-                    "recommended": model.recommended,
-                }
-            )
-    return available
-
-
-def is_suggested_model_name(model_name: str) -> bool:
-    return any(model["id"] == model_name for model in get_available_models())
-
-
-def build_model_catalog(current_model: str) -> dict[str, Any]:
-    return {
-        "current": current_model,
-        "available": get_available_models(),
-    }
+    return adapter is not None and adapter.allows_model_name(model_name)

@@ -16,11 +16,21 @@ glues it to CLI output + session state.
 from __future__ import annotations
 
 from agent.core.effort_probe import ProbeInconclusive, probe_effort
-from agent.core.provider_adapters import (
-    get_available_models,
-    is_valid_model_name,
-    resolve_adapter,
-)
+from agent.core.provider_adapters import is_valid_model_name
+
+
+# Suggested models shown by `/model` (not a gate). Users can paste any HF
+# model id (e.g. "MiniMaxAI/MiniMax-M2.7") or an `anthropic/` / `openai/`
+# prefix for direct API access. For HF ids, append ":fastest" /
+# ":cheapest" / ":preferred" / ":<provider>" to override the default
+# routing policy (auto = fastest with failover).
+SUGGESTED_MODELS = [
+    {"id": "anthropic/claude-opus-4-7", "label": "Claude Opus 4.7"},
+    {"id": "anthropic/claude-opus-4-6", "label": "Claude Opus 4.6"},
+    {"id": "MiniMaxAI/MiniMax-M2.7", "label": "MiniMax M2.7"},
+    {"id": "moonshotai/Kimi-K2.6", "label": "Kimi K2.6"},
+    {"id": "zai-org/GLM-5.1", "label": "GLM 5.1"},
+]
 
 
 _ROUTING_POLICIES = {"fastest", "cheapest", "preferred"}
@@ -29,17 +39,16 @@ _ROUTING_POLICIES = {"fastest", "cheapest", "preferred"}
 def is_valid_model_id(model_id: str) -> bool:
     """Loose format check — lets users pick any model id.
 
-    Checks the adapter registry first (covers all registered providers),
-    then falls back to the structural ``<org>/<model>[:<tag>]`` pattern
-    so unknown HF models are still accepted.
+    Accepts:
+      • anthropic/<model>
+      • openai/<model>
+      • <org>/<model>[:<tag>]            (HF router; tag = provider or policy)
+      • huggingface/<org>/<model>[:<tag>] (same, accepts legacy prefix)
+
+    Actual availability is verified against the HF router catalog on
+    switch, and by the provider on the probe's ping call.
     """
-    if is_valid_model_name(model_id):
-        return True
-    if not model_id or "/" not in model_id:
-        return False
-    head = model_id.split(":", 1)[0]
-    parts = head.split("/")
-    return len(parts) >= 2 and all(parts)
+    return is_valid_model_name(model_id)
 
 
 def _print_hf_routing_info(model_id: str, console) -> bool:
@@ -51,8 +60,7 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
     Anthropic / OpenAI ids return ``True`` without printing anything —
     the probe below covers "does this model exist".
     """
-    adapter = resolve_adapter(model_id)
-    if adapter and adapter.provider_id != "huggingface":
+    if model_id.startswith(("anthropic/", "openai/")):
         return True
 
     from agent.core import hf_router_catalog as cat
@@ -107,9 +115,7 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
         )
         ctx = f"{p.context_length:,} ctx" if p.context_length else "ctx n/a"
         tools = "tools" if p.supports_tools else "no tools"
-        console.print(
-            f"  [dim]{p.provider}: {price}, {ctx}, {tools}[/dim]"
-        )
+        console.print(f"  [dim]{p.provider}: {price}, {ctx}, {tools}[/dim]")
     return True
 
 
@@ -119,10 +125,9 @@ def print_model_listing(config, console) -> None:
     console.print("[bold]Current model:[/bold]")
     console.print(f"  {current}")
     console.print("\n[bold]Suggested:[/bold]")
-    for m in get_available_models():
+    for m in SUGGESTED_MODELS:
         marker = " [dim]<-- current[/dim]" if m["id"] == current else ""
-        provider = m.get("providerLabel") or m.get("provider") or ""
-        console.print(f"  {m['id']}  [dim]({m['label']} · {provider})[/dim]{marker}")
+        console.print(f"  {m['id']}  [dim]({m['label']})[/dim]{marker}")
     console.print(
         "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M2.7').\n"
         "Add ':fastest', ':cheapest', ':preferred', or ':<provider>' to override routing.\n"
@@ -169,7 +174,9 @@ async def probe_and_switch_model(
         # Nothing to validate with a ping that we couldn't validate on the
         # first real call just as cheaply. Skip the probe entirely.
         _commit_switch(model_id, config, session, effective=None, cache=False)
-        console.print(f"[green]Model switched to {model_id}[/green] [dim](effort: off)[/dim]")
+        console.print(
+            f"[green]Model switched to {model_id}[/green] [dim](effort: off)[/dim]"
+        )
         return
 
     console.print(f"[dim]checking {model_id} (effort: {preference})...[/dim]")
@@ -189,8 +196,11 @@ async def probe_and_switch_model(
         return
 
     _commit_switch(
-        model_id, config, session,
-        effective=outcome.effective_effort, cache=True,
+        model_id,
+        config,
+        session,
+        effective=outcome.effective_effort,
+        cache=True,
     )
     effort_label = outcome.effective_effort or "off"
     suffix = f" — {outcome.note}" if outcome.note else ""

@@ -1,4 +1,4 @@
-"""LiteLLM kwargs resolution for supported model ids."""
+"""LiteLLM kwargs resolution for the model ids this agent accepts."""
 
 from agent.core.provider_adapters import (
     UnsupportedEffortError,
@@ -12,7 +12,7 @@ def _patch_litellm_effort_validation() -> None:
     """Patch LiteLLM's Anthropic effort validation for Claude Opus 4.7."""
     try:
         from litellm.llms.anthropic.chat import transformation as _t
-    except ImportError:
+    except Exception:
         return
 
     cfg = getattr(_t, "AnthropicConfig", None)
@@ -70,8 +70,6 @@ def _resolve_llm_params(
       3. HF_TOKEN env — belt-and-suspenders fallback for CLI users.
     """
     adapter = resolve_adapter(model_name)
-    if adapter is None:
-        raise ValueError(f"Unsupported model id: {model_name}")
     return adapter.build_params(
         model_name,
         session_hf_token=session_hf_token,

@@ -28,31 +28,51 @@ from models import (
     SubmitRequest,
     TruncateRequest,
 )
-from session_manager import (
-    MAX_SESSIONS,
-    AgentSession,
-    SessionCapacityError,
-    session_manager,
-)
+from session_manager import MAX_SESSIONS, AgentSession, SessionCapacityError, session_manager
 
 import user_quotas
 
 from agent.core.llm_params import _resolve_llm_params
-from agent.core.provider_adapters import (
-    build_model_catalog,
-    is_suggested_model_name,
-)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["agent"])
+
+AVAILABLE_MODELS = [
+    {
+        "id": "moonshotai/Kimi-K2.6",
+        "label": "Kimi K2.6",
+        "provider": "huggingface",
+        "tier": "free",
+        "recommended": True,
+    },
+    {
+        "id": "anthropic/claude-opus-4-6",
+        "label": "Claude Opus 4.6",
+        "provider": "anthropic",
+        "tier": "pro",
+        "recommended": True,
+    },
+    {
+        "id": "MiniMaxAI/MiniMax-M2.7",
+        "label": "MiniMax M2.7",
+        "provider": "huggingface",
+        "tier": "free",
+    },
+    {
+        "id": "zai-org/GLM-5.1",
+        "label": "GLM 5.1",
+        "provider": "huggingface",
+        "tier": "free",
+    },
+]
 
 
 async def _require_hf_for_anthropic(request: Request, model_id: str) -> None:
     """403 if a non-``huggingface``-org user tries to select an Anthropic model.
 
     Anthropic models are billed to the Space's ``ANTHROPIC_API_KEY``; every
-    other suggested web model is routed through HF Router and
+    other model in ``AVAILABLE_MODELS`` is routed through HF Router and
     billed via ``X-HF-Bill-To``. The gate only fires for ``anthropic/*`` so
     non-HF users can still freely switch between the free models.
 
@@ -187,25 +207,10 @@ async def llm_health_check() -> LLMHealthResponse:
 @router.get("/config/model")
 async def get_model() -> dict:
     """Get current model and available models. No auth required."""
-    return build_model_catalog(session_manager.config.model_name)
-
-
-@router.post("/config/model")
-async def set_model(
-    body: dict,
-    request: Request,
-    user: dict = Depends(get_current_user),
-) -> dict:
-    """Set the LLM model. Applies to new conversations."""
-    model_id = body.get("model")
-    if not model_id:
-        raise HTTPException(status_code=400, detail="Missing 'model' field")
-    if not is_suggested_model_name(model_id):
-        raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
-    await _require_hf_for_anthropic(request, model_id)
-    session_manager.config.model_name = model_id
-    logger.info(f"Model changed to {model_id} by {user.get('username', 'unknown')}")
-    return {"model": model_id}
+    return {
+        "current": session_manager.config.model_name,
+        "available": AVAILABLE_MODELS,
+    }
 
 
 _TITLE_STRIP_CHARS = str.maketrans("", "", "`*_~#[]()")
@@ -300,7 +305,8 @@ async def create_session(
     if isinstance(body, dict):
         model = body.get("model")
 
-    if model and not is_suggested_model_name(model):
+    valid_ids = {m["id"] for m in AVAILABLE_MODELS}
+    if model and model not in valid_ids:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model}")
 
     # Opus is gated to HF staff (PR #63). Only fires when the resolved model
@@ -344,7 +350,8 @@ async def restore_session_summary(
         hf_token = os.environ.get("HF_TOKEN")
 
     model = body.get("model")
-    if model and not is_suggested_model_name(model):
+    valid_ids = {m["id"] for m in AVAILABLE_MODELS}
+    if model and model not in valid_ids:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model}")
 
     resolved_model = model or session_manager.config.model_name
@@ -402,7 +409,8 @@ async def set_session_model(
     model_id = body.get("model")
     if not model_id:
         raise HTTPException(status_code=400, detail="Missing 'model' field")
-    if not is_suggested_model_name(model_id):
+    valid_ids = {m["id"] for m in AVAILABLE_MODELS}
+    if model_id not in valid_ids:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
     await _require_hf_for_anthropic(request, model_id)
     agent_session = session_manager.sessions.get(session_id)
@@ -536,9 +544,7 @@ async def chat_sse(
             success = await session_manager.submit_user_input(session_id, text)
         else:
             broadcaster.unsubscribe(sub_id)
-            raise HTTPException(
-                status_code=400, detail="Must provide 'text' or 'approvals'"
-            )
+            raise HTTPException(status_code=400, detail="Must provide 'text' or 'approvals'")
 
         if not success:
             broadcaster.unsubscribe(sub_id)
@@ -555,13 +561,7 @@ async def chat_sse(
 # ---------------------------------------------------------------------------
 # Shared SSE helpers
 # ---------------------------------------------------------------------------
-_TERMINAL_EVENTS = {
-    "turn_complete",
-    "approval_required",
-    "error",
-    "interrupted",
-    "shutdown",
-}
+_TERMINAL_EVENTS = {"turn_complete", "approval_required", "error", "interrupted", "shutdown"}
 _SSE_KEEPALIVE_SECONDS = 15
 
 
@@ -661,10 +661,7 @@ async def truncate_session(
     _check_session_access(session_id, user)
     success = await session_manager.truncate(session_id, body.user_message_index)
     if not success:
-        raise HTTPException(
-            status_code=404,
-            detail="Session not found, inactive, or message index out of range",
-        )
+        raise HTTPException(status_code=404, detail="Session not found, inactive, or message index out of range")
     return {"status": "truncated", "session_id": session_id}
 
 
@@ -690,3 +687,5 @@ async def shutdown_session(
     if not success:
         raise HTTPException(status_code=404, detail="Session not found or inactive")
     return {"status": "shutdown_requested", "session_id": session_id}
+
+

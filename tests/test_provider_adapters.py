@@ -1,10 +1,9 @@
 import pytest
 
 from agent.core.llm_params import _resolve_llm_params
+from agent.core.model_switcher import is_valid_model_id
 from agent.core.provider_adapters import (
     UnsupportedEffortError,
-    build_model_catalog,
-    is_suggested_model_name,
     is_valid_model_name,
 )
 
@@ -100,22 +99,7 @@ def test_hf_adapter_strict_rejects_max():
         )
 
 
-# -- Catalog & validation -----------------------------------------------------
-
-
-def test_model_catalog_comes_from_adapters():
-    catalog = build_model_catalog("anthropic/claude-opus-4-6")
-
-    assert catalog["current"] == "anthropic/claude-opus-4-6"
-    assert any(model["provider"] == "anthropic" for model in catalog["available"])
-    assert any(model["provider"] == "huggingface" for model in catalog["available"])
-    assert set(catalog) == {"current", "available"}
-
-
-def test_suggested_model_validation_is_strict():
-    assert is_suggested_model_name("anthropic/claude-opus-4-6") is True
-    assert is_suggested_model_name("moonshotai/Kimi-K2.6") is True
-    assert is_suggested_model_name("moonshotai/Kimi-K2.6:fastest") is False
+# -- Validation ---------------------------------------------------------------
 
 
 def test_model_validation_accepts_free_form_hf_ids():
@@ -123,9 +107,25 @@ def test_model_validation_accepts_free_form_hf_ids():
     assert is_valid_model_name("huggingface/moonshotai/Kimi-K2.6:novita") is True
 
 
+def test_model_validation_accepts_direct_provider_ids():
+    assert is_valid_model_name("anthropic/claude-opus-4-7") is True
+    assert is_valid_model_name("openai/gpt-5") is True
+
+
 def test_model_validation_rejects_garbage():
     assert is_valid_model_name("") is False
     assert is_valid_model_name("no-slash") is False
+    assert is_valid_model_name("anthropic/") is False
+    assert is_valid_model_name("openai/") is False
+    assert is_valid_model_name("huggingface/nope") is False
+    assert is_valid_model_name("moonshotai/") is False
+
+
+def test_cli_validation_matches_provider_validation():
+    assert is_valid_model_id("openai/gpt-5") is True
+    assert is_valid_model_id("moonshotai/Kimi-K2.6:fastest") is True
+    assert is_valid_model_id("openai/") is False
+    assert is_valid_model_id("anthropic/") is False
 
 
 def test_unsupported_effort_reexport():
