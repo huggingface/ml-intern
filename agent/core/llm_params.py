@@ -60,6 +60,56 @@ def _patch_litellm_effort_validation() -> None:
     _widened._hf_agent_patched = True  # type: ignore[attr-defined]
     cfg._is_opus_4_6_model = staticmethod(_widened)
 
+    # Second patch: widen the hardcoded effort-value allowlist in
+    # ``transform_request`` (line ~1449 in litellm 1.83.x). LiteLLM rejects
+    # ``xhigh`` pre-flight because its local validation set is just
+    # ``{high, medium, low, max}``. We wrap ``transform_request`` to
+    # temporarily rename ``xhigh`` → ``max`` before calling the original
+    # (so LiteLLM's check passes), then restore ``xhigh`` in the returned
+    # request body so Anthropic's API sees the real level the user asked
+    # for. Works because ``_is_opus_4_6_model`` is already widened above
+    # to accept 4.7+, so the max-gated branch also passes.
+    original_tr = getattr(cfg, "transform_request", None)
+    if original_tr is not None and not getattr(original_tr, "_hf_agent_patched", False):
+        def _patched_transform_request(self, *args, **kwargs):
+            # optional_params lives at positional index 3 or the kwarg of
+            # the same name — handle both. We mutate the live dict; it's
+            # restored in a finally block to keep the caller's state clean.
+            opts = kwargs.get("optional_params")
+            if opts is None:
+                for a in args:
+                    if isinstance(a, dict) and "output_config" in a:
+                        opts = a
+                        break
+
+            swapped = False
+            try:
+                if (
+                    opts
+                    and isinstance(opts.get("output_config"), dict)
+                    and opts["output_config"].get("effort") == "xhigh"
+                ):
+                    opts["output_config"]["effort"] = "max"
+                    swapped = True
+                data = original_tr(self, *args, **kwargs)
+            finally:
+                if swapped and opts is not None:
+                    # Restore caller's dict so later code sees the real level
+                    opts["output_config"]["effort"] = "xhigh"
+
+            # Restore on the way out so Anthropic receives xhigh, not max
+            if (
+                swapped
+                and isinstance(data, dict)
+                and isinstance(data.get("output_config"), dict)
+                and data["output_config"].get("effort") == "max"
+            ):
+                data["output_config"]["effort"] = "xhigh"
+            return data
+
+        _patched_transform_request._hf_agent_patched = True  # type: ignore[attr-defined]
+        cfg.transform_request = _patched_transform_request
+
 
 _patch_litellm_effort_validation()
 
