@@ -54,6 +54,12 @@ AVAILABLE_MODELS = [
         "recommended": True,
     },
     {
+        "id": "gemini/gemini-2.5-pro",
+        "label": "Gemini 2.5 Pro",
+        "provider": "gemini",
+        "tier": "free",
+    },
+    {
         "id": "MiniMaxAI/MiniMax-M2.7",
         "label": "MiniMax M2.7",
         "provider": "huggingface",

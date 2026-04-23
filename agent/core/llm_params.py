@@ -67,13 +67,20 @@ _patch_litellm_effort_validation()
 # Effort levels accepted on the wire.
 #   Anthropic (4.6+):  low | medium | high | xhigh | max   (output_config.effort)
 #   OpenAI direct:     minimal | low | medium | high       (reasoning_effort top-level)
+#   Gemini:            low | medium | high                 (thinking_config.thinking_budget)
 #   HF router:         low | medium | high                 (extra_body.reasoning_effort)
 #
 # We validate *shape* here and let the probe cascade walk down on rejection;
 # we deliberately do NOT maintain a per-model capability table.
 _ANTHROPIC_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _OPENAI_EFFORTS = {"minimal", "low", "medium", "high"}
+_GEMINI_EFFORTS = {"low", "medium", "high"}
 _HF_EFFORTS = {"low", "medium", "high"}
+
+# Gemini thinking budget: tokens allocated per effort tier.
+# The Gemini API accepts thinking_config.thinking_budget (0 = disabled, -1 = dynamic).
+# We map effort strings to a fixed budget that scales with reasoning depth.
+_GEMINI_THINKING_BUDGETS = {"low": 1024, "medium": 8192, "high": 24576}
 
 
 class UnsupportedEffortError(ValueError):
@@ -109,6 +116,13 @@ def _resolve_llm_params(
     • ``openai/<model>`` — ``reasoning_effort`` forwarded as a top-level
       kwarg (GPT-5 / o-series). LiteLLM uses the user's ``OPENAI_API_KEY``.
 
+    • ``gemini/<model>`` — native Gemini API via LiteLLM's Gemini adapter.
+      Uses ``GEMINI_API_KEY`` env variable (picked up automatically by
+      LiteLLM). For thinking-capable models (e.g. ``gemini-2.5-pro``,
+      ``gemini-2.5-flash``) we pass ``thinking_config.thinking_budget`` via
+      top-level ``thinking`` kwarg; non-thinking models ignore it.
+      Effort levels map to token budgets: low=1024, medium=8192, high=24576.
+
     • Anything else is treated as a HuggingFace router id. We hit the
       auto-routing OpenAI-compatible endpoint at
       ``https://router.huggingface.co/v1``. The id can be bare or carry an
@@ -125,11 +139,15 @@ def _resolve_llm_params(
     runtime callers leave ``strict=False``, so a stale cached effort
     can't crash a turn — it just doesn't get sent.
 
-    Token precedence (first non-empty wins):
+    Token precedence for HF Router models (first non-empty wins):
       1. INFERENCE_TOKEN env — shared key on the hosted Space (inference is
          free for users, billed to the Space owner via ``X-HF-Bill-To``).
       2. session.hf_token — the user's own token (CLI / OAuth / cache file).
       3. HF_TOKEN env — belt-and-suspenders fallback for CLI users.
+
+    Gemini: GEMINI_API_KEY env (resolved automatically by LiteLLM).
+    Anthropic: ANTHROPIC_API_KEY env (resolved automatically by LiteLLM).
+    OpenAI: OPENAI_API_KEY env (resolved automatically by LiteLLM).
     """
     if model_name.startswith("anthropic/"):
         params: dict = {"model": model_name}
@@ -164,6 +182,25 @@ def _resolve_llm_params(
                     )
             else:
                 params["reasoning_effort"] = reasoning_effort
+        return params
+
+    if model_name.startswith("gemini/"):
+        # Gemini models via LiteLLM's native Gemini adapter. The GEMINI_API_KEY
+        # env variable is picked up automatically by LiteLLM when model starts
+        # with "gemini/". For thinking-capable models (e.g. gemini-2.5-pro /
+        # gemini-2.5-flash) we pass thinking_config.thinking_budget via
+        # extra_body; non-thinking models silently ignore it.
+        params = {"model": model_name}
+        if reasoning_effort:
+            level = "low" if reasoning_effort == "minimal" else reasoning_effort
+            if level not in _GEMINI_EFFORTS:
+                if strict:
+                    raise UnsupportedEffortError(
+                        f"Gemini doesn't accept effort={level!r}"
+                    )
+            else:
+                budget = _GEMINI_THINKING_BUDGETS[level]
+                params["thinking"] = {"type": "enabled", "budget_tokens": budget}
         return params
 
     hf_model = model_name.removeprefix("huggingface/")
