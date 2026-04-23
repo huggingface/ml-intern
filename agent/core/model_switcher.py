@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from agent.core.effort_probe import ProbeInconclusive, probe_effort
 from agent.core.llm_errors import render_llm_error_message
-from agent.core.provider_adapters import is_valid_model_name
+from agent.core.provider_adapters import is_valid_model_name, resolve_adapter
 
 
 # Suggested models shown by `/model` (not a gate). Users can paste any HF
@@ -61,7 +61,8 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
     Anthropic / OpenAI ids return ``True`` without printing anything —
     the probe below covers "does this model exist".
     """
-    if model_id.startswith(("anthropic/", "openai/")):
+    adapter = resolve_adapter(model_id)
+    if adapter and adapter.provider_id != "huggingface":
         return True
 
     from agent.core import hf_router_catalog as cat
@@ -132,7 +133,8 @@ def print_model_listing(config, console) -> None:
     console.print(
         "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M2.7').\n"
         "Add ':fastest', ':cheapest', ':preferred', or ':<provider>' to override routing.\n"
-        "Use 'anthropic/<model>' or 'openai/<model>' for direct API access.[/dim]"
+        "Direct prefixes: 'anthropic/', 'openai/', 'openrouter/', 'opencode/',\n"
+        "'opencode-go/', 'ollama/', 'lm_studio/', 'vllm/', 'openai-compat/'.[/dim]"
     )
 
 
@@ -142,7 +144,14 @@ def print_invalid_id(arg: str, console) -> None:
         "[dim]Expected:\n"
         "  • <org>/<model>[:tag]    (HF router — paste from huggingface.co)\n"
         "  • anthropic/<model>\n"
-        "  • openai/<model>[/dim]"
+        "  • openai/<model>\n"
+        "  • openrouter/<model>\n"
+        "  • opencode/<model>\n"
+        "  • opencode-go/<model>\n"
+        "  • ollama/<model>\n"
+        "  • lm_studio/<model>\n"
+        "  • vllm/<model>\n"
+        "  • openai-compat/<model>[/dim]"
     )
 
 

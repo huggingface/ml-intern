@@ -1,5 +1,6 @@
 import pytest
 
+import agent.core.provider_adapters as providers
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_switcher import is_valid_model_id
 from agent.core.provider_adapters import (
@@ -99,6 +100,120 @@ def test_hf_adapter_strict_rejects_max():
         )
 
 
+# -- OpenAI-compatible adapters ------------------------------------------------
+
+
+def test_ollama_adapter_builds_params(monkeypatch):
+    monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+
+    params = _resolve_llm_params("ollama/llama3.1")
+
+    assert params == {
+        "model": "openai/llama3.1",
+        "api_base": "http://localhost:11434/v1",
+        "api_key": "ollama",
+    }
+
+
+def test_ollama_adapter_normalizes_base_url(monkeypatch):
+    monkeypatch.setenv("OLLAMA_API_BASE", "http://localhost:11434")
+
+    params = _resolve_llm_params("ollama/llama3.1")
+
+    assert params["api_base"] == "http://localhost:11434/v1"
+
+
+def test_ollama_adapter_strict_rejects_effort():
+    with pytest.raises(UnsupportedEffortError):
+        _resolve_llm_params("ollama/llama3.1", reasoning_effort="high", strict=True)
+
+
+def test_lm_studio_adapter_uses_raw_model_name(monkeypatch):
+    monkeypatch.delenv("LMSTUDIO_BASE_URL", raising=False)
+    monkeypatch.delenv("LMSTUDIO_API_KEY", raising=False)
+
+    params = _resolve_llm_params("lm_studio/google/gemma-3-12b")
+
+    assert params == {
+        "model": "lm_studio/google/gemma-3-12b",
+        "api_base": "http://127.0.0.1:1234/v1",
+        "api_key": "lm-studio",
+    }
+
+
+def test_vllm_adapter_uses_env_override(monkeypatch):
+    monkeypatch.setenv("VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("VLLM_API_KEY", "secret")
+
+    params = _resolve_llm_params("vllm/Qwen3-32B")
+
+    assert params == {
+        "model": "openai/Qwen3-32B",
+        "api_base": "http://127.0.0.1:8000/v1",
+        "api_key": "secret",
+    }
+
+
+def test_openrouter_adapter_uses_api_key(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router-key")
+
+    params = _resolve_llm_params(
+        "openrouter/anthropic/claude-sonnet-4.5", reasoning_effort="medium"
+    )
+
+    assert params == {
+        "model": "openai/anthropic/claude-sonnet-4.5",
+        "api_base": "https://openrouter.ai/api/v1",
+        "api_key": "router-key",
+        "reasoning_effort": "medium",
+    }
+
+
+def test_opencode_zen_adapter_uses_api_key(monkeypatch):
+    monkeypatch.setenv("OPENCODE_ZEN_API_KEY", "zen-key")
+
+    params = _resolve_llm_params("opencode/kimi-k2.6")
+
+    assert params == {
+        "model": "openai/kimi-k2.6",
+        "api_base": "https://opencode.ai/zen/v1",
+        "api_key": "zen-key",
+    }
+
+
+def test_opencode_go_adapter_uses_api_key(monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "go-key")
+
+    params = _resolve_llm_params("opencode-go/kimi-k2.6")
+
+    assert params == {
+        "model": "openai/kimi-k2.6",
+        "api_base": "https://opencode.ai/zen/go/v1",
+        "api_key": "go-key",
+    }
+
+
+def test_openai_compat_requires_base_url(monkeypatch):
+    monkeypatch.delenv("OPENAI_COMPAT_BASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="OPENAI_COMPAT_BASE_URL"):
+        _resolve_llm_params("openai-compat/my-model")
+
+
+def test_openai_compat_uses_required_base_url(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "compat-key")
+
+    params = _resolve_llm_params("openai-compat/my-model")
+
+    assert params == {
+        "model": "openai/my-model",
+        "api_base": "http://localhost:8080/v1",
+        "api_key": "compat-key",
+    }
+
+
 # -- Validation ---------------------------------------------------------------
 
 
@@ -110,6 +225,13 @@ def test_model_validation_accepts_free_form_hf_ids():
 def test_model_validation_accepts_direct_provider_ids():
     assert is_valid_model_name("anthropic/claude-opus-4-7") is True
     assert is_valid_model_name("openai/gpt-5") is True
+    assert is_valid_model_name("ollama/llama3.1") is True
+    assert is_valid_model_name("lm_studio/google/gemma-3-12b") is True
+    assert is_valid_model_name("vllm/Qwen3-32B") is True
+    assert is_valid_model_name("openrouter/anthropic/claude-sonnet-4.5") is True
+    assert is_valid_model_name("opencode/kimi-k2.6") is True
+    assert is_valid_model_name("opencode-go/kimi-k2.6") is True
+    assert is_valid_model_name("openai-compat/my-model") is True
 
 
 def test_model_validation_rejects_garbage():
@@ -117,13 +239,30 @@ def test_model_validation_rejects_garbage():
     assert is_valid_model_name("no-slash") is False
     assert is_valid_model_name("anthropic/") is False
     assert is_valid_model_name("openai/") is False
+    assert is_valid_model_name("ollama/") is False
+    assert is_valid_model_name("lm_studio/") is False
+    assert is_valid_model_name("vllm/") is False
+    assert is_valid_model_name("openrouter/") is False
+    assert is_valid_model_name("opencode/") is False
+    assert is_valid_model_name("opencode-go/") is False
+    assert is_valid_model_name("openai-compat/") is False
     assert is_valid_model_name("huggingface/nope") is False
     assert is_valid_model_name("moonshotai/") is False
+
+
+def test_hf_validation_excludes_new_provider_prefixes():
+    hf = providers.resolve_adapter("openrouter/google/gemini-2.5-pro")
+
+    assert hf is not None
+    assert hf.provider_id == "openrouter"
 
 
 def test_cli_validation_matches_provider_validation():
     assert is_valid_model_id("openai/gpt-5") is True
     assert is_valid_model_id("moonshotai/Kimi-K2.6:fastest") is True
+    assert is_valid_model_id("ollama/llama3.1") is True
+    assert is_valid_model_id("openrouter/anthropic/claude-sonnet-4.5") is True
+    assert is_valid_model_id("openai-compat/my-model") is True
     assert is_valid_model_id("openai/") is False
     assert is_valid_model_id("anthropic/") is False
 
