@@ -54,6 +54,34 @@ ml-intern --max-iterations 100 "your prompt"
 ml-intern --no-stream "your prompt"
 ```
 
+## Evaluation
+
+Run a local baseline-vs-candidate benchmark on GLUE SST-2:
+
+```bash
+python eval.py \
+  --task glue_sst2 \
+  --baseline-model distilbert/distilbert-base-uncased-finetuned-sst-2-english \
+  --candidate-model your-org/your-sst2-model \
+  --output-dir eval_runs \
+  --limit 100
+```
+
+Optional cost metadata file:
+
+```json
+{
+  "training_cost": 12.5,
+  "eval_cost": 0.25
+}
+```
+
+Pass the file with `--cost-file path/to/costs.json`.
+Use `--split` to override the default dataset split and `--notes` to attach
+free-form context to the saved run record.
+The command writes one JSON run record and appends one row to
+`leaderboard.jsonl` in the output directory.
+
 ## Architecture
 
 ### Component Overview
