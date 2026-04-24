@@ -50,6 +50,11 @@ from agent.tools.papers_tool import HF_PAPERS_TOOL_SPEC, hf_papers_handler
 from agent.tools.plan_tool import PLAN_TOOL_SPEC, plan_tool_handler
 from agent.tools.research_tool import RESEARCH_TOOL_SPEC, research_handler
 from agent.tools.sandbox_tool import get_sandbox_tools
+from agent.tools.web_search_tool import (
+    WEB_SEARCH_TOOL_SPEC,
+    web_search_enabled,
+    web_search_handler,
+)
 
 # NOTE: Private HF repo tool disabled - replaced by hf_repo_files and hf_repo_git
 # from agent.tools.private_hf_repo_tools import (
@@ -362,6 +367,17 @@ def create_builtin_tools(local_mode: bool = False) -> list[ToolSpec]:
             handler=github_read_file_handler,
         ),
     ]
+
+    # Optional: Exa-backed general web search (enabled only when EXA_API_KEY is set)
+    if web_search_enabled():
+        tools.append(
+            ToolSpec(
+                name=WEB_SEARCH_TOOL_SPEC["name"],
+                description=WEB_SEARCH_TOOL_SPEC["description"],
+                parameters=WEB_SEARCH_TOOL_SPEC["parameters"],
+                handler=web_search_handler,
+            )
+        )
 
     # Sandbox or local tools (highest priority)
     if local_mode:

@@ -39,6 +39,7 @@ RESEARCH_TOOL_NAMES = {
     "github_read_file",
     "hf_inspect_dataset",
     "hf_repo_files",
+    "web_search",
 }
 
 RESEARCH_SYSTEM_PROMPT = """\

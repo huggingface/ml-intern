@@ -26,6 +26,8 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "httpx>=0.27.0",
     "websockets>=13.0",
+    # Optional integration: Exa web search (activated when EXA_API_KEY is set)
+    "exa-py>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +43,7 @@ eval = [
 # Development and testing dependencies
 dev = [
     "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
 ]
 
 # All dependencies (eval + dev)
