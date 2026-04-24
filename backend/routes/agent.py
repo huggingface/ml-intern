@@ -28,12 +28,7 @@ from models import (
     SubmitRequest,
     TruncateRequest,
 )
-from session_manager import (
-    MAX_SESSIONS,
-    AgentSession,
-    SessionCapacityError,
-    session_manager,
-)
+from session_manager import MAX_SESSIONS, AgentSession, SessionCapacityError, session_manager
 
 import user_quotas
 
@@ -532,9 +527,7 @@ async def chat_sse(
             success = await session_manager.submit_user_input(session_id, text)
         else:
             broadcaster.unsubscribe(sub_id)
-            raise HTTPException(
-                status_code=400, detail="Must provide 'text' or 'approvals'"
-            )
+            raise HTTPException(status_code=400, detail="Must provide 'text' or 'approvals'")
 
         if not success:
             broadcaster.unsubscribe(sub_id)
@@ -551,13 +544,7 @@ async def chat_sse(
 # ---------------------------------------------------------------------------
 # Shared SSE helpers
 # ---------------------------------------------------------------------------
-_TERMINAL_EVENTS = {
-    "turn_complete",
-    "approval_required",
-    "error",
-    "interrupted",
-    "shutdown",
-}
+_TERMINAL_EVENTS = {"turn_complete", "approval_required", "error", "interrupted", "shutdown"}
 _SSE_KEEPALIVE_SECONDS = 15
 
 
@@ -657,10 +644,7 @@ async def truncate_session(
     _check_session_access(session_id, user)
     success = await session_manager.truncate(session_id, body.user_message_index)
     if not success:
-        raise HTTPException(
-            status_code=404,
-            detail="Session not found, inactive, or message index out of range",
-        )
+        raise HTTPException(status_code=404, detail="Session not found, inactive, or message index out of range")
     return {"status": "truncated", "session_id": session_id}
 
 
@@ -686,3 +670,5 @@ async def shutdown_session(
     if not success:
         raise HTTPException(status_code=404, detail="Session not found or inactive")
     return {"status": "shutdown_requested", "session_id": session_id}
+
+

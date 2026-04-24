@@ -116,7 +116,9 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
         )
         ctx = f"{p.context_length:,} ctx" if p.context_length else "ctx n/a"
         tools = "tools" if p.supports_tools else "no tools"
-        console.print(f"  [dim]{p.provider}: {price}, {ctx}, {tools}[/dim]")
+        console.print(
+            f"  [dim]{p.provider}: {price}, {ctx}, {tools}[/dim]"
+        )
     return True
 
 
@@ -176,9 +178,7 @@ async def probe_and_switch_model(
         # Nothing to validate with a ping that we couldn't validate on the
         # first real call just as cheaply. Skip the probe entirely.
         _commit_switch(model_id, config, session, effective=None, cache=False)
-        console.print(
-            f"[green]Model switched to {model_id}[/green] [dim](effort: off)[/dim]"
-        )
+        console.print(f"[green]Model switched to {model_id}[/green] [dim](effort: off)[/dim]")
         return
 
     console.print(f"[dim]checking {model_id} (effort: {preference})...[/dim]")
@@ -194,18 +194,13 @@ async def probe_and_switch_model(
         return
     except Exception as e:
         # Hard persistent error — auth, unknown model, quota. Don't switch.
-        console.print(
-            f"[bold red]Switch failed:[/bold red] {render_llm_error_message(e)}"
-        )
+        console.print(f"[bold red]Switch failed:[/bold red] {render_llm_error_message(e)}")
         console.print(f"[dim]Keeping current model: {config.model_name}[/dim]")
         return
 
     _commit_switch(
-        model_id,
-        config,
-        session,
-        effective=outcome.effective_effort,
-        cache=True,
+        model_id, config, session,
+        effective=outcome.effective_effort, cache=True,
     )
     effort_label = outcome.effective_effort or "off"
     suffix = f" — {outcome.note}" if outcome.note else ""

@@ -126,7 +126,9 @@ class SessionManager:
     def _count_user_sessions(self, user_id: str) -> int:
         """Count active sessions owned by a specific user."""
         return sum(
-            1 for s in self.sessions.values() if s.user_id == user_id and s.is_active
+            1
+            for s in self.sessions.values()
+            if s.user_id == user_id and s.is_active
         )
 
     async def create_session(
@@ -190,9 +192,7 @@ class SessionManager:
             if model:
                 session_config.model_name = model
             session = Session(
-                event_queue,
-                config=session_config,
-                tool_router=tool_router,
+                event_queue, config=session_config, tool_router=tool_router,
                 hf_token=hf_token,
             )
             t1 = _time.monotonic()
@@ -332,9 +332,7 @@ class SessionManager:
                         )
                         agent_session.is_processing = True
                         try:
-                            should_continue = await process_submission(
-                                session, submission
-                            )
+                            should_continue = await process_submission(session, submission)
                         finally:
                             agent_session.is_processing = False
                         if not should_continue:
@@ -347,10 +345,7 @@ class SessionManager:
                     except Exception as e:
                         logger.error(f"Error in session {session_id}: {e}")
                         await session.send_event(
-                            Event(
-                                event_type="error",
-                                data={"error": render_llm_error_message(e)},
-                            )
+                            Event(event_type="error", data={"error": render_llm_error_message(e)})
                         )
 
         finally:
@@ -414,9 +409,7 @@ class SessionManager:
             agent_session = self.sessions.get(session_id)
         if not agent_session or not agent_session.is_active:
             return False
-        return agent_session.session.context_manager.truncate_to_user_message(
-            user_message_index
-        )
+        return agent_session.session.context_manager.truncate_to_user_message(user_message_index)
 
     async def compact(self, session_id: str) -> bool:
         """Compact context in a session."""
@@ -495,18 +488,15 @@ class SessionManager:
             pending_approval = []
             for tc in pa["tool_calls"]:
                 import json
-
                 try:
                     args = json.loads(tc.function.arguments)
                 except (json.JSONDecodeError, AttributeError):
                     args = {}
-                pending_approval.append(
-                    {
-                        "tool": tc.function.name,
-                        "tool_call_id": tc.id,
-                        "arguments": args,
-                    }
-                )
+                pending_approval.append({
+                    "tool": tc.function.name,
+                    "tool_call_id": tc.id,
+                    "arguments": args,
+                })
 
         return {
             "session_id": session_id,
