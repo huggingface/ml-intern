@@ -4,6 +4,20 @@ These rules override the default review guidance. Treat them as the highest-prio
 instruction block for any review of this repo. If something here contradicts a more
 generic review habit, follow these.
 
+## Default bias: merge
+
+The goal of review is to catch things that would break production or leak cost,
+not to gate every PR on a round trip. **Default bias is to merge.** Only 🔴
+Important findings read as "fix before merge." 🟡 Nit and 🟣 Pre-existing are
+informational — the author may defer them to a follow-up issue or a "fix-it" pass
+at their discretion, and the review should not frame them as required changes.
+
+If the author pushes back on a 🟡 or 🟣 without fixing it, accept the pushback —
+do not re-flag it on subsequent commits. If Claude and the author repeatedly
+disagree on the same class of finding, the signal is that REVIEW.md is missing a
+rule; note it once in the PR summary as `suggest-rule: <short description>` and
+stop.
+
 ## What "Important" means here
 
 Reserve 🔴 Important for findings that would break production behavior, leak data or
@@ -106,6 +120,17 @@ Open the review body with a single-line tally:
 - `3 important, 2 nits` if both, or
 - `No blocking issues — 2 nits` if no Important, or
 - `LGTM` if nothing at all.
+
+Then a **What I checked** bullet list — one line per major area you examined,
+regardless of whether you found anything. This gives the author visible coverage
+even on a clean review, so "LGTM" carries weight instead of looking like a skim.
+Example:
+
+> What I checked:
+> - LiteLLM/Bedrock routing in `llm_params.py`, `effort_probe.py`
+> - Auth guard on the new `/sandbox/upload` route
+> - Prompt-cache markers on the modified system prompt
+> - Frontend message-bubble contract against the new `event_queue` shape
 
 Then one paragraph of context at most. Everything else belongs in inline
 comments.
