@@ -106,6 +106,82 @@ JSON file:
 }
 ```
 
+### Model Selection
+
+In the CLI, run `/model` to list suggested models and see the active model:
+
+```text
+/model
+```
+
+Switch models by passing the model id:
+
+```text
+/model moonshotai/Kimi-K2.6
+/model bedrock/us.anthropic.claude-opus-4-6-v1
+```
+
+You can also choose a model at startup:
+
+```bash
+ml-intern --model moonshotai/Kimi-K2.6 "your prompt"
+```
+
+### Local Models
+
+Local model support uses OpenAI-compatible HTTP endpoints through LiteLLM. The agent does not load model weights directly from disk; a local inference server must already be running.
+
+Supported local model id prefixes:
+
+| Prefix | Default endpoint | Example |
+| --- | --- | --- |
+| `ollama/` | `http://localhost:11434/v1` | `ollama/llama3.1` |
+| `vllm/` | `http://localhost:8000/v1` | `vllm/Qwen3.5-2B` |
+| `llamacpp/` | `http://localhost:8001/v1` | `llamacpp/unsloth/Qwen3.5-2B` |
+| `local://` | `${LOCAL_LLM_BASE_URL}/v1` | `local://my-model` |
+
+Override endpoints with environment variables:
+
+```bash
+OLLAMA_BASE_URL=http://localhost:11434
+VLLM_BASE_URL=http://localhost:8000
+LLAMACPP_BASE_URL=http://localhost:8001
+LOCAL_LLM_BASE_URL=http://localhost:8000
+```
+
+For example, with Ollama:
+
+```bash
+ollama pull llama3.1
+ollama serve
+ml-intern
+```
+
+Then switch inside the CLI:
+
+```text
+/model ollama/llama3.1
+```
+
+For llama.cpp, start an OpenAI-compatible server first, then point the agent at it if you are not using the default port:
+
+```bash
+export LLAMACPP_BASE_URL=http://localhost:8080
+ml-intern
+```
+
+```text
+/model llamacpp/<model-id-from-/v1/models>
+```
+
+For the web UI/API, enable local model selection:
+
+```bash
+ENABLE_LOCAL_MODELS=true
+```
+
+When `ENABLE_LOCAL_MODELS=true`, the backend exposes local model presets and accepts custom local paths with the prefixes above. The web model menu also shows a custom local model path field, so you can enter values like `ollama/qwen2.5-coder` or `local://my-model`.
+
 ## Architecture
 
 ### Component Overview

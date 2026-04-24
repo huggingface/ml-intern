@@ -1,3 +1,5 @@
+import pytest
+
 from agent.core.hf_tokens import resolve_hf_request_token
 from agent.core.llm_params import (
     UnsupportedEffortError,
@@ -18,16 +20,12 @@ def test_openai_xhigh_effort_is_forwarded():
 
 
 def test_openai_max_effort_is_still_rejected():
-    try:
+    with pytest.raises(UnsupportedEffortError, match="OpenAI doesn't accept effort='max'"):
         _resolve_llm_params(
             "openai/gpt-5.4",
             reasoning_effort="max",
             strict=True,
         )
-    except UnsupportedEffortError as exc:
-        assert "OpenAI doesn't accept effort='max'" in str(exc)
-    else:
-        raise AssertionError("Expected UnsupportedEffortError for max effort")
 
 
 def test_hf_router_token_prefers_inference_token(monkeypatch):
@@ -105,3 +103,57 @@ def test_hf_request_token_does_not_use_cached_login(monkeypatch):
     monkeypatch.setattr(huggingface_hub, "get_token", lambda: "cached-token")
 
     assert resolve_hf_request_token(Request()) is None
+
+
+def test_resolve_ollama_params_from_env(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("OLLAMA_API_KEY", "sk-local")
+
+    params = _resolve_llm_params("ollama/llama3.1")
+
+    assert params["model"] == "openai/llama3.1"
+    assert params["api_base"] == "http://localhost:11434/v1"
+    assert params["api_key"] == "sk-local"
+    assert "timeout" not in params
+
+
+def test_resolve_llamacpp_params_defaults(monkeypatch):
+    monkeypatch.delenv("LLAMACPP_BASE_URL", raising=False)
+    monkeypatch.delenv("LLAMACPP_API_KEY", raising=False)
+
+    params = _resolve_llm_params("llamacpp/unsloth/Qwen3.5-2B")
+
+    assert params["model"] == "openai/unsloth/Qwen3.5-2B"
+    assert params["api_base"] == "http://localhost:8001/v1"
+    assert params["api_key"] == "sk-no-key-required"
+    assert "timeout" not in params
+
+
+def test_resolve_vllm_params_from_env(monkeypatch):
+    monkeypatch.setenv("VLLM_BASE_URL", "http://127.0.0.1:8000/")
+    monkeypatch.setenv("VLLM_API_KEY", "token")
+
+    params = _resolve_llm_params("vllm/Qwen/Qwen3-4B")
+
+    assert params["model"] == "openai/Qwen/Qwen3-4B"
+    assert params["api_base"] == "http://127.0.0.1:8000/v1"
+    assert params["api_key"] == "token"
+    assert "timeout" not in params
+
+
+def test_resolve_generic_local_params_trims_trailing_slash(monkeypatch):
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:9000/")
+
+    params = _resolve_llm_params("local://my-model")
+
+    assert params["model"] == "openai/my-model"
+    assert params["api_base"] == "http://127.0.0.1:9000/v1"
+
+
+def test_local_reasoning_effort_rejected_in_strict_mode():
+    with pytest.raises(UnsupportedEffortError, match="Local OpenAI-compatible endpoints"):
+        _resolve_llm_params(
+            "ollama/llama3.1",
+            reasoning_effort="high",
+            strict=True,
+        )

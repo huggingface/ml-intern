@@ -79,6 +79,7 @@ _patch_litellm_effort_validation()
 _ANTHROPIC_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _OPENAI_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
 _HF_EFFORTS = {"low", "medium", "high"}
+_LOCAL_DEFAULT_API_KEY = "sk-no-key-required"
 
 
 class UnsupportedEffortError(ValueError):
@@ -179,6 +180,42 @@ def _resolve_llm_params(
             else:
                 params["reasoning_effort"] = reasoning_effort
         return params
+
+    if model_name.startswith("ollama/"):
+        local_model = model_name.split("/", 1)[1]
+        api_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        return {
+            "model": f"openai/{local_model}",
+            "api_base": f"{api_base.rstrip('/')}/v1",
+            "api_key": os.environ.get("OLLAMA_API_KEY", _LOCAL_DEFAULT_API_KEY),
+        }
+
+    if model_name.startswith("vllm/"):
+        local_model = model_name.split("/", 1)[1]
+        api_base = os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
+        return {
+            "model": f"openai/{local_model}",
+            "api_base": f"{api_base.rstrip('/')}/v1",
+            "api_key": os.environ.get("VLLM_API_KEY", _LOCAL_DEFAULT_API_KEY),
+        }
+
+    if model_name.startswith("llamacpp/"):
+        local_model = model_name.split("/", 1)[1]
+        api_base = os.environ.get("LLAMACPP_BASE_URL", "http://localhost:8001")
+        return {
+            "model": f"openai/{local_model}",
+            "api_base": f"{api_base.rstrip('/')}/v1",
+            "api_key": os.environ.get("LLAMACPP_API_KEY", _LOCAL_DEFAULT_API_KEY),
+        }
+
+    if model_name.startswith("local://"):
+        local_model = model_name.split("://", 1)[1]
+        api_base = os.environ.get("LOCAL_LLM_BASE_URL", "http://localhost:8000")
+        return {
+            "model": f"openai/{local_model}",
+            "api_base": f"{api_base.rstrip('/')}/v1",
+            "api_key": os.environ.get("LOCAL_LLM_API_KEY", _LOCAL_DEFAULT_API_KEY),
+        }
 
     hf_model = model_name.removeprefix("huggingface/")
     api_key = _resolve_hf_router_token(session_hf_token)
