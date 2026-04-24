@@ -84,3 +84,19 @@ def test_write_endpoint_also_protected(tmp_path, monkeypatch):
     )
     assert r.status_code == 401
     assert not target.exists()
+
+
+def test_bash_with_valid_auth_executes(tmp_path, monkeypatch):
+    """Positive-path check: with the correct Bearer, /api/bash actually runs
+    the command and returns its output. Balances the auth-only negative tests."""
+    mod = _load_server(tmp_path, monkeypatch, "secret-xyz")
+    client = TestClient(mod.app)
+    r = client.post(
+        "/api/bash",
+        headers={"Authorization": "Bearer secret-xyz"},
+        json={"command": "echo hello-sandbox", "work_dir": str(tmp_path), "timeout": 10},
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["success"] is True
+    assert "hello-sandbox" in payload["output"]
