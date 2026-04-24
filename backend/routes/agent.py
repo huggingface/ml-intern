@@ -54,6 +54,18 @@ AVAILABLE_MODELS = [
         "recommended": True,
     },
     {
+        "id": "minimax/MiniMax-M2.7",
+        "label": "MiniMax M2.7",
+        "provider": "minimax",
+        "tier": "free",
+    },
+    {
+        "id": "minimax/MiniMax-M2.7-highspeed",
+        "label": "MiniMax M2.7 Highspeed",
+        "provider": "minimax",
+        "tier": "free",
+    },
+    {
         "id": "MiniMaxAI/MiniMax-M2.7",
         "label": "MiniMax M2.7",
         "provider": "huggingface",

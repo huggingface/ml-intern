@@ -75,6 +75,9 @@ _ANTHROPIC_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _OPENAI_EFFORTS = {"minimal", "low", "medium", "high"}
 _HF_EFFORTS = {"low", "medium", "high"}
 
+# MiniMax API base URL (OpenAI-compatible).  Override with MINIMAX_BASE_URL.
+_MINIMAX_DEFAULT_BASE_URL = "https://api.minimax.io/v1"
+
 
 class UnsupportedEffortError(ValueError):
     """The requested effort isn't valid for this provider's API surface.
@@ -108,6 +111,11 @@ def _resolve_llm_params(
 
     • ``openai/<model>`` — ``reasoning_effort`` forwarded as a top-level
       kwarg (GPT-5 / o-series). LiteLLM uses the user's ``OPENAI_API_KEY``.
+
+    • ``minimax/<model>`` — MiniMax OpenAI-compatible API at
+      ``https://api.minimax.io/v1``. Reads ``MINIMAX_API_KEY`` from the
+      environment; override the endpoint with ``MINIMAX_BASE_URL``.
+      Reasoning effort is not supported and is silently ignored.
 
     • Anything else is treated as a HuggingFace router id. We hit the
       auto-routing OpenAI-compatible endpoint at
@@ -173,6 +181,20 @@ def _resolve_llm_params(
             else:
                 params["reasoning_effort"] = reasoning_effort
         return params
+
+    if model_name.startswith("minimax/"):
+        # MiniMax OpenAI-compatible API.  Strip the "minimax/" prefix to get
+        # the bare model id (e.g. "MiniMax-M2.7"), then pass it to LiteLLM
+        # as "openai/<model>" so the OpenAI adapter is used with our custom
+        # api_base.  MiniMax doesn't support reasoning effort; ignore silently.
+        minimax_model = model_name[len("minimax/"):]
+        base_url = os.environ.get("MINIMAX_BASE_URL", _MINIMAX_DEFAULT_BASE_URL)
+        api_key = os.environ.get("MINIMAX_API_KEY")
+        return {
+            "model": f"openai/{minimax_model}",
+            "api_base": base_url,
+            "api_key": api_key,
+        }
 
     hf_model = model_name.removeprefix("huggingface/")
     api_key = (
