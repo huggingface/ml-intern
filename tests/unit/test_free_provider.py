@@ -57,12 +57,22 @@ class TestResolveOpenCode:
         from agent.core.llm_params import _resolve_llm_params
         params = _resolve_llm_params("opencode/qwen3.6-plus-free")
         assert params["api_key"] == "sk-testkey"
+        # When a real key is provided, we must NOT blank the Authorization
+        # header — the upstream needs the Bearer token to validate the key.
+        assert "extra_headers" not in params or \
+            params["extra_headers"].get("Authorization") != ""
 
     def test_api_key_absent_when_env_unset(self, monkeypatch):
+        """When ``OPENCODE_API_KEY`` isn't set we use the anonymous free tier:
+        a placeholder ``api_key`` (LiteLLM's OpenAI adapter requires one) plus
+        a blanked Authorization header so the upstream sees no credentials."""
         _clear_env(monkeypatch, "OPENCODE_API_KEY")
         from agent.core.llm_params import _resolve_llm_params
-        params = _resolve_llm_params("opencode/qwen3.6-plus-free")
-        assert params.get("api_key") is None
+        params = _resolve_llm_params("opencode/minimax-m2.5-free")
+        # api_key must be present (LiteLLM/openai SDK requires it) but a
+        # non-real placeholder. The real auth bypass is via extra_headers.
+        assert params.get("api_key") == "anonymous"
+        assert params.get("extra_headers", {}).get("Authorization") == ""
 
     def test_effort_medium_forwarded_via_extra_body(self, monkeypatch):
         _clear_env(monkeypatch, "OPENCODE_API_KEY")
@@ -379,12 +389,14 @@ class TestAutoSelectModel:
         assert DEFAULTS["opencode"].startswith("opencode/")
         assert "free" in DEFAULTS["opencode"]
 
-    def test_no_credentials_returns_none_source(self, monkeypatch):
+    def test_no_credentials_falls_back_to_anonymous_opencode(self, monkeypatch):
+        """With no credentials at all we still pick OpenCode (anonymous free
+        tier). The agent must be able to boot for first-run UX."""
         self._isolate(monkeypatch)
-        from agent.core.provider_select import auto_select_model
+        from agent.core.provider_select import auto_select_model, DEFAULTS
         mid, src = auto_select_model()
-        assert src == "none"
-        assert mid == ""
+        assert src == "opencode-anonymous"
+        assert mid == DEFAULTS["opencode"]
 
     def test_anthropic_beats_opencode(self, monkeypatch):
         """Anthropic has higher priority than OpenCode in the cascade."""
@@ -443,17 +455,18 @@ class TestApplyProviderCascade:
         assert src == "opencode"
         assert cfg.model_name == DEFAULTS["opencode"]
 
-    def test_returns_none_when_no_provider_found(self, monkeypatch):
+    def test_returns_anonymous_opencode_when_no_credentials(self, monkeypatch):
+        """With no credentials, cascade falls back to anonymous OpenCode."""
         self._isolate(monkeypatch)
 
         class _FakeConfig:
             model_name = "bedrock/original-model"
 
         cfg = _FakeConfig()
-        from agent.core.provider_select import apply_provider_cascade
+        from agent.core.provider_select import apply_provider_cascade, DEFAULTS
         src = apply_provider_cascade(cfg)
-        assert src is None
-        assert cfg.model_name == "bedrock/original-model"  # unchanged
+        assert src == "opencode-anonymous"
+        assert cfg.model_name == DEFAULTS["opencode"]
 
     def test_explicit_model_wins(self, monkeypatch):
         self._isolate(monkeypatch)

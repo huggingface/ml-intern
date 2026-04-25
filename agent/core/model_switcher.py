@@ -29,8 +29,8 @@ SUGGESTED_MODELS = [
     {"id": "bedrock/us.anthropic.claude-opus-4-7", "label": "Claude Opus 4.7 (Bedrock)"},
     {"id": "copilot/gpt-5", "label": "GPT-5 via GitHub Copilot"},
     {"id": "copilot/claude-sonnet-4.5", "label": "Claude Sonnet 4.5 via GitHub Copilot"},
-    {"id": "opencode/qwen3.6-plus-free", "label": "Qwen 3.6+ (OpenCode Zen, free)"},
     {"id": "opencode/minimax-m2.5-free", "label": "MiniMax M2.5 (OpenCode Zen, free)"},
+    {"id": "opencode/nemotron-3-super-free", "label": "Nemotron 3 Super (OpenCode Zen, free)"},
     {"id": "MiniMaxAI/MiniMax-M2.7", "label": "MiniMax M2.7 (HF router)"},
     {"id": "moonshotai/Kimi-K2.6", "label": "Kimi K2.6 (HF router)"},
 ]

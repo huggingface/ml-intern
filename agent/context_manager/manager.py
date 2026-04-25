@@ -171,7 +171,12 @@ class ContextManager:
         local_mode: bool = False,
     ):
         """Load and render the system prompt from YAML file with Jinja2"""
-        prompt_file = Path(__file__).parent.parent / "prompts" / f"{prompt_file_suffix}"
+        # Use the package-level ``resource_root`` so the path resolves to
+        # the extracted bundle dir inside a PyInstaller frozen binary
+        # (where ``__file__`` becomes a relative ``agent/...`` path), not
+        # to the process CWD.
+        from agent import resource_root
+        prompt_file = resource_root() / "agent" / "prompts" / f"{prompt_file_suffix}"
 
         with open(prompt_file, "r") as f:
             prompt_data = yaml.safe_load(f)

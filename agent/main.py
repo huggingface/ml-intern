@@ -845,7 +845,8 @@ async def main():
     ready_event = asyncio.Event()
 
     # Start agent loop in background
-    config_path = Path(__file__).parent.parent / "configs" / "main_agent_config.json"
+    from agent import resource_root
+    config_path = resource_root() / "configs" / "main_agent_config.json"
     config = load_config(config_path)
 
     # Auto-select model from available credentials (Anthropic → Copilot →
@@ -1074,7 +1075,8 @@ async def headless_main(
     if hf_token:
         print(f"HF token loaded", file=sys.stderr)
 
-    config_path = Path(__file__).parent.parent / "configs" / "main_agent_config.json"
+    from agent import resource_root
+    config_path = resource_root() / "configs" / "main_agent_config.json"
     config = load_config(config_path)
     config.yolo_mode = True  # Auto-approve everything in headless mode
 

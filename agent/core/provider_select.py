@@ -29,7 +29,7 @@ from pathlib import Path
 DEFAULTS: dict[str, str] = {
     "anthropic": "anthropic/claude-opus-4-7",
     "copilot":   "copilot/gpt-5",
-    "opencode":  "opencode/qwen3.6-plus-free",
+    "opencode":  "opencode/minimax-m2.5-free",
 }
 
 
@@ -55,7 +55,10 @@ def auto_select_model(explicit: str | None = None) -> tuple[str, str]:
     Otherwise the cascade walks Anthropic → Copilot → OpenCode and
     returns the first match. ``source`` is one of ``"explicit"``,
     ``"env:ML_INTERN_MODEL"``, ``"anthropic"``, ``"copilot"``,
-    ``"opencode"``, or ``"none"`` if no credentials were detected.
+    ``"opencode"`` (when ``OPENCODE_API_KEY`` is set), or
+    ``"opencode-anonymous"`` (when no credentials at all are present —
+    OpenCode Zen serves ``-free`` model ids without auth so the agent
+    can always boot).
     """
     if explicit:
         return explicit, "explicit"
@@ -70,10 +73,14 @@ def auto_select_model(explicit: str | None = None) -> tuple[str, str]:
     if _has_copilot_credentials():
         return DEFAULTS["copilot"], "copilot"
 
+    # OpenCode Zen's ``-free`` model ids are served anonymously, so we can
+    # always fall back to them even without ``OPENCODE_API_KEY``. A key
+    # only matters if the user has a paid OpenCode account; for the free
+    # tier the upstream blanks the Authorization header for us (see
+    # ``agent.core.llm_params._resolve_llm_params``).
     if os.environ.get("OPENCODE_API_KEY"):
         return DEFAULTS["opencode"], "opencode"
-
-    return "", "none"
+    return DEFAULTS["opencode"], "opencode-anonymous"
 
 
 def apply_provider_cascade(config, explicit: str | None = None) -> str | None:

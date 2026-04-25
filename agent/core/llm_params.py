@@ -199,11 +199,21 @@ def _resolve_llm_params(
         # custom ``api_base``.
         bare = model_name.removeprefix("opencode/")
         api_key = os.environ.get("OPENCODE_API_KEY")
-        params = {
+        params: dict = {
             "model": f"openai/{bare}",
             "api_base": "https://opencode.ai/zen/v1",
-            "api_key": api_key,
         }
+        if api_key:
+            params["api_key"] = api_key
+        else:
+            # OpenCode Zen serves the ``-free`` model ids anonymously, but
+            # LiteLLM's OpenAI adapter refuses to instantiate without an
+            # ``api_key``. We pass a placeholder and explicitly blank the
+            # ``Authorization`` header so the upstream sees no credentials
+            # and routes the request to the free anonymous tier instead of
+            # 401-ing on an "Invalid API key.".
+            params["api_key"] = "anonymous"
+            params["extra_headers"] = {"Authorization": ""}
         if reasoning_effort:
             level = "low" if reasoning_effort == "minimal" else reasoning_effort
             if level not in _OPENCODE_EFFORTS:
@@ -212,7 +222,7 @@ def _resolve_llm_params(
                         f"OpenCode doesn't accept effort={level!r}"
                     )
             else:
-                params["extra_body"] = {"reasoning_effort": level}
+                params.setdefault("extra_body", {})["reasoning_effort"] = level
         return params
 
     if model_name.startswith(("copilot/", "github_copilot/")):
