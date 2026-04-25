@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 _DESTINATION_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789._-")
-SUPPORTED_AUTO_EVENT_TYPES = {"approval_required", "error"}
+SUPPORTED_AUTO_EVENT_TYPES = {"approval_required", "error", "turn_complete"}
 
 
 class SlackDestinationConfig(BaseModel):
@@ -30,7 +30,7 @@ DestinationConfig = Annotated[SlackDestinationConfig, Field(discriminator="provi
 class MessagingConfig(BaseModel):
     enabled: bool = False
     auto_event_types: list[str] = Field(
-        default_factory=lambda: ["approval_required", "error"]
+        default_factory=lambda: ["approval_required", "error", "turn_complete"]
     )
     destinations: dict[str, DestinationConfig] = Field(default_factory=dict)
 

@@ -18,6 +18,7 @@ from agent.messaging.models import NotificationRequest
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOKENS = 200_000
+_LEGACY_AUTO_EVENT_TYPES = {"approval_required", "error"}
 
 
 def _get_max_tokens_safe(model_name: str) -> int:
@@ -166,7 +167,11 @@ class Session:
             return
         if not self.notification_destinations:
             return
-        if event.event_type not in self.config.messaging.auto_event_types:
+        configured_auto_events = set(self.config.messaging.auto_event_types)
+        auto_events = set(configured_auto_events)
+        if configured_auto_events == _LEGACY_AUTO_EVENT_TYPES:
+            auto_events.add("turn_complete")
+        if event.event_type not in auto_events:
             return
 
         requests = self._build_auto_notification_requests(event)
@@ -208,6 +213,18 @@ class Session:
             error = str(data.get("error") or "Unknown error")
             message = f"Session {self.session_id} hit an error.\n{error[:500]}"
             severity = "error"
+        elif event.event_type == "turn_complete":
+            title = "Agent task complete"
+            summary = str(data.get("final_response") or "").strip()
+            if summary:
+                summary = summary[:500]
+                message = (
+                    f"Session {self.session_id} completed successfully.\n"
+                    f"{summary}"
+                )
+            else:
+                message = f"Session {self.session_id} completed successfully."
+            severity = "success"
 
         if message is None:
             return []

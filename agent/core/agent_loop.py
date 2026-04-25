@@ -916,10 +916,16 @@ class Handlers:
             await _cleanup_on_cancel(session)
             await session.send_event(Event(event_type="interrupted"))
         elif not errored:
+            final_response_preview = (
+                final_response[:1000] if isinstance(final_response, str) else None
+            )
             await session.send_event(
                 Event(
                     event_type="turn_complete",
-                    data={"history_size": len(session.context_manager.items)},
+                    data={
+                        "history_size": len(session.context_manager.items),
+                        "final_response": final_response_preview,
+                    },
                 )
             )
 

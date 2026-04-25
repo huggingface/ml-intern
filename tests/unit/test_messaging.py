@@ -249,6 +249,80 @@ async def test_session_auto_notifications_only_send_opted_in_auto_destinations()
     assert "hf_jobs" in request.message
 
 
+@pytest.mark.asyncio
+async def test_turn_complete_auto_notification_includes_final_response_summary():
+    config = Config.model_validate(
+        {
+            "model_name": "moonshotai/Kimi-K2.6",
+            "messaging": {
+                "enabled": True,
+                "destinations": {
+                    "slack.ops": {
+                        "provider": "slack",
+                        "token": "xoxb-test",
+                        "channel": "C123",
+                        "allow_auto_events": True,
+                    }
+                },
+            },
+        }
+    )
+    gateway = RecordingGateway()
+    session = _test_session(config, gateway, session_id="sess-done")
+    session.set_notification_destinations(["slack.ops"])
+
+    await session.send_event(
+        Event(
+            event_type="turn_complete",
+            data={
+                "history_size": 12,
+                "final_response": "Evaluation finished. Accuracy: 84.2% on the validation split.",
+            },
+        )
+    )
+
+    assert len(gateway.enqueued) == 1
+    request = gateway.enqueued[0]
+    assert request.destination == "slack.ops"
+    assert request.severity == "success"
+    assert request.event_type == "turn_complete"
+    assert "completed successfully" in request.message
+    assert "Accuracy: 84.2%" in request.message
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_can_be_disabled_by_custom_auto_event_config():
+    config = Config.model_validate(
+        {
+            "model_name": "moonshotai/Kimi-K2.6",
+            "messaging": {
+                "enabled": True,
+                "auto_event_types": ["error"],
+                "destinations": {
+                    "slack.ops": {
+                        "provider": "slack",
+                        "token": "xoxb-test",
+                        "channel": "C123",
+                        "allow_auto_events": True,
+                    }
+                },
+            },
+        }
+    )
+    gateway = RecordingGateway()
+    session = _test_session(config, gateway, session_id="sess-optout")
+    session.set_notification_destinations(["slack.ops"])
+
+    await session.send_event(
+        Event(
+            event_type="turn_complete",
+            data={"final_response": "This should not notify."},
+        )
+    )
+
+    assert gateway.enqueued == []
+
+
 def test_session_manager_updates_notification_destinations_in_session_info():
     config = _config_with_messaging(allow_auto_events=True)
     manager = SessionManager(str(Path(__file__).resolve().parents[2] / "configs" / "main_agent_config.json"))
