@@ -205,6 +205,54 @@ def test_aggregate_tool_breadth_and_intensity():
     assert row["tool_calls_per_turn_p50"] == 2.0
 
 
+def test_breadth_intensity_percentiles_exclude_zero_tool_sessions():
+    """Sessions that never called a tool would otherwise crush the median."""
+    mod = _load()
+    # Two productive sessions and three idle ones (no tool calls). Without
+    # the doer-only filter, median of [0,0,0,2,4] = 0, which is useless.
+    productive_a = mod._session_metrics(_session([
+        _ev("tool_call", {"tool": "bash"}),
+        _ev("tool_call", {"tool": "research"}),
+    ], user_id="prod_a"))
+    productive_b = _session([
+        _ev("tool_call", {"tool": "bash"}),
+        _ev("tool_call", {"tool": "edit"}),
+        _ev("tool_call", {"tool": "edit"}),
+        _ev("tool_call", {"tool": "edit"}),
+    ], user_id="prod_b")
+    productive_b["messages"] = [{"role": "user"}, {"role": "user"}]
+    productive_b_metrics = mod._session_metrics(productive_b)
+    idle = [
+        mod._session_metrics(_session([], user_id="idle_a")),
+        mod._session_metrics(_session([], user_id="idle_b")),
+        mod._session_metrics(_session([], user_id="idle_c")),
+    ]
+    row = mod._aggregate([productive_a, productive_b_metrics, *idle])
+    # Median of [2 distinct, 2 distinct] = 2 (idle sessions filtered).
+    assert row["distinct_tools_per_session_p50"] == 2.0
+    # Median of [2 calls, 4 calls] = 3 (idle sessions filtered).
+    assert row["tool_calls_per_session_p50"] == 3.0
+
+
+def test_pro_clicks_and_blocked_jobs_in_aggregate():
+    """The aggregate row keeps pro_cta_clicks + hf_jobs_blocked columns
+    even if the dashboard doesn't currently chart them — they're cheap to
+    keep and downstream consumers may still depend on the schema."""
+    mod = _load()
+    s1 = mod._session_metrics(_session([
+        _ev("pro_cta_click", {"source": "hf_jobs_upgrade_dialog"}),
+        _ev("pro_cta_click", {"source": "claude_cap_dialog"}),
+        _ev("jobs_access_blocked", {}),
+    ], user_id="u1"))
+    s2 = mod._session_metrics(_session([
+        _ev("jobs_access_blocked", {}),
+        _ev("jobs_access_blocked", {}),
+    ], user_id="u2"))
+    row = mod._aggregate([s1, s2])
+    assert row["pro_cta_clicks"] == 2
+    assert row["hf_jobs_blocked"] == 3
+
+
 def test_aggregate_sessions_by_model_split():
     import json as _json
     mod = _load()
