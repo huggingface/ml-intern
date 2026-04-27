@@ -23,6 +23,13 @@ def test_github_token():
     assert out == "[REDACTED_GITHUB_TOKEN]"
 
 
+def test_google_api_key():
+    s = "GEMINI_API_KEY=AIza" + "A" * 35
+    out = scrub_string(s)
+    assert "AIza" not in out
+    assert "[REDACTED" in out
+
+
 def test_github_fine_grained_pat():
     # Fine-grained PATs: github_pat_<alphanumeric + underscore>, 36+ chars
     s = "github_pat_" + "A1B2_" * 10

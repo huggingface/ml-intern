@@ -28,9 +28,19 @@ Create a `.env` file in the project root (or export these in your shell):
 ```bash
 ANTHROPIC_API_KEY=<your-anthropic-api-key> # if using anthropic models
 OPENAI_API_KEY=<your-openai-api-key> # if using openai models
+GEMINI_API_KEY=<your-gemini-api-key> # if using Google AI Studio models (google/...)
+
+# If using Vertex AI models (google-geap/...), use Google ADC:
+VERTEXAI_PROJECT=<your-google-cloud-project>
+VERTEXAI_LOCATION=<your-google-cloud-region>
+# Optional when using a service-account JSON file instead of `gcloud auth application-default login`:
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json
+
 HF_TOKEN=<your-hugging-face-token>
 GITHUB_TOKEN=<github-personal-access-token> 
 ```
+Use either `GEMINI_API_KEY` for Google AI Studio (`google/...`) or Vertex AI credentials for `google-geap/...` models. Keep service-account JSON files outside the repo and point `GOOGLE_APPLICATION_CREDENTIALS` at that file, or authenticate locally with `gcloud auth application-default login`.
+
 If no `HF_TOKEN` is set, the CLI will prompt you to paste one on first launch. To get a GITHUB_TOKEN follow the tutorial [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token).
 
 ### Usage
@@ -52,6 +62,8 @@ ml-intern "fine-tune llama on my dataset"
 ```bash
 ml-intern --model anthropic/claude-opus-4-6 "your prompt"
 ml-intern --model openai/gpt-5.5 "your prompt"
+ml-intern --model google/gemini-3.1-pro-preview "your prompt"
+ml-intern --model google-geap/gemini-3.1-pro-preview "your prompt"
 ml-intern --max-iterations 100 "your prompt"
 ml-intern --no-stream "your prompt"
 ```

@@ -25,6 +25,31 @@ const getHfAvatarUrl = (modelId: string) => {
   return `https://huggingface.co/api/avatars/${org}`;
 };
 
+const GEMINI_AVATAR_URL =
+  'https://www.gstatic.com/lamda/images/gemini_sparkle_v002_advanced_17484d6f7a0b290e4b5b.svg';
+
+const googleAiStudioModel = (
+  id: string,
+  name: string,
+  modelPath: string,
+  recommended = false,
+): ModelOption => ({
+    id,
+    name,
+    description: 'Google AI Studio',
+    modelPath,
+    avatarUrl: GEMINI_AVATAR_URL,
+    recommended,
+  });
+
+const googleGeapModel = (id: string, name: string, modelPath: string): ModelOption => ({
+  id,
+  name,
+  description: 'Vertex AI',
+  modelPath,
+  avatarUrl: GEMINI_AVATAR_URL,
+});
+
 const MODEL_OPTIONS: ModelOption[] = [
   {
     id: 'kimi-k2.6',
@@ -42,6 +67,73 @@ const MODEL_OPTIONS: ModelOption[] = [
     avatarUrl: 'https://huggingface.co/api/avatars/Anthropic',
     recommended: true,
   },
+  googleAiStudioModel(
+    'gemini-3.1-pro-preview',
+    'Gemini 3.1 Pro Preview',
+    'google/gemini-3.1-pro-preview',
+    true,
+  ),
+  googleAiStudioModel(
+    'gemini-3-flash-preview',
+    'Gemini 3 Flash Preview',
+    'google/gemini-3-flash-preview',
+  ),
+  googleAiStudioModel(
+    'gemini-3.1-flash-lite-preview',
+    'Gemini 3.1 Flash Lite Preview',
+    'google/gemini-3.1-flash-lite-preview',
+  ),
+  googleAiStudioModel(
+    'gemini-3-pro-preview',
+    'Gemini 3 Pro Preview',
+    'google/gemini-3-pro-preview',
+  ),
+  googleAiStudioModel('gemini-2.5-pro', 'Gemini 2.5 Pro', 'google/gemini-2.5-pro'),
+  googleAiStudioModel(
+    'gemini-2.5-flash',
+    'Gemini 2.5 Flash',
+    'google/gemini-2.5-flash',
+  ),
+  googleAiStudioModel(
+    'gemini-2.5-flash-preview',
+    'Gemini 2.5 Flash Preview',
+    'google/gemini-2.5-flash-preview-09-2025',
+  ),
+  googleAiStudioModel(
+    'gemini-2.5-flash-lite-preview',
+    'Gemini 2.5 Flash Lite Preview',
+    'google/gemini-2.5-flash-lite-preview-09-2025',
+  ),
+  googleGeapModel(
+    'geap-gemini-3.1-pro-preview',
+    'Gemini 3.1 Pro Preview',
+    'google-geap/gemini-3.1-pro-preview',
+  ),
+  googleGeapModel(
+    'geap-gemini-3-flash-preview',
+    'Gemini 3 Flash Preview',
+    'google-geap/gemini-3-flash-preview',
+  ),
+  googleGeapModel(
+    'geap-gemini-3.1-flash-lite-preview',
+    'Gemini 3.1 Flash Lite Preview',
+    'google-geap/gemini-3.1-flash-lite-preview',
+  ),
+  googleGeapModel(
+    'geap-gemini-3-pro-preview',
+    'Gemini 3 Pro Preview',
+    'google-geap/gemini-3-pro-preview',
+  ),
+  googleGeapModel(
+    'geap-gemini-2.5-pro',
+    'Gemini 2.5 Pro',
+    'google-geap/gemini-2.5-pro',
+  ),
+  googleGeapModel(
+    'geap-gemini-2.5-flash',
+    'Gemini 2.5 Flash',
+    'google-geap/gemini-2.5-flash',
+  ),
   {
     id: 'minimax-m2.7',
     name: 'MiniMax M2.7',

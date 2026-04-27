@@ -192,6 +192,40 @@ class ToolRouter:
         except Exception as e:
             logger.warning("Failed to load OpenAPI search tool: %s", e)
 
+    @staticmethod
+    def _sanitize_schema(schema: dict[str, Any]) -> dict[str, Any]:
+        """Recursively patch array properties that are missing the required `items` field.
+
+        Gemini / Vertex AI rejects function declarations where a property has
+        ``"type": "array"`` but no ``"items"`` definition.  This walks the
+        entire schema tree and adds ``{"type": "string"}`` as a sensible
+        default whenever ``items`` is absent.
+        """
+        if not isinstance(schema, dict):
+            return schema
+
+        # If this node itself is an array without items, patch it
+        if schema.get("type") == "array" and "items" not in schema:
+            schema["items"] = {"type": "string"}
+
+        # Recurse into nested structures
+        if "properties" in schema and isinstance(schema["properties"], dict):
+            for prop in schema["properties"].values():
+                ToolRouter._sanitize_schema(prop)
+
+        if "items" in schema and isinstance(schema["items"], dict):
+            ToolRouter._sanitize_schema(schema["items"])
+
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            if keyword in schema and isinstance(schema[keyword], list):
+                for sub in schema[keyword]:
+                    ToolRouter._sanitize_schema(sub)
+
+        if "additionalProperties" in schema and isinstance(schema["additionalProperties"], dict):
+            ToolRouter._sanitize_schema(schema["additionalProperties"])
+
+        return schema
+
     def get_tool_specs_for_llm(self) -> list[dict[str, Any]]:
         """Get tool specifications in OpenAI format"""
         specs = []
@@ -202,7 +236,7 @@ class ToolRouter:
                     "function": {
                         "name": tool.name,
                         "description": tool.description,
-                        "parameters": tool.parameters,
+                        "parameters": self._sanitize_schema(tool.parameters),
                     },
                 }
             )

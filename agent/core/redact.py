@@ -22,6 +22,8 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"), "[REDACTED_ANTHROPIC_KEY]"),
     # OpenAI: sk-[A-Za-z0-9]{40,}  (legacy + proj keys)
     (re.compile(r"sk-(?!ant-)[A-Za-z0-9_\-]{40,}"), "[REDACTED_OPENAI_KEY]"),
+    # Google AI Studio / Gemini keys: AIza...
+    (re.compile(r"AIza[A-Za-z0-9_\-]{30,}"), "[REDACTED_GOOGLE_API_KEY]"),
     # GitHub classic PATs: ghp_, gho_, ghu_, ghs_, ghr_ followed by 36+ chars
     (re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"), "[REDACTED_GITHUB_TOKEN]"),
     # GitHub fine-grained PATs: github_pat_<alphanumeric_underscore>
@@ -37,7 +39,8 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
 # when the key looks secret-y.
 _SECRETY_NAMES = re.compile(
     r"(?i)\b(HF_TOKEN|HUGGINGFACEHUB_API_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|"
-    r"GITHUB_TOKEN|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|PASSWORD|SECRET|API_KEY)"
+    r"GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|GITHUB_TOKEN|"
+    r"AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|PASSWORD|SECRET|API_KEY)"
     r"\s*[:=]\s*([^\s\"']+)"
 )
 

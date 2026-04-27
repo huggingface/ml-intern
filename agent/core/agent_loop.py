@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 
 from litellm import ChatCompletionMessageToolCall, Message, acompletion
+from litellm.types.utils import Function
 from litellm.exceptions import ContextWindowExceededError
 
 from agent.config import Config
@@ -303,6 +304,8 @@ def _friendly_error_message(error: Exception) -> str | None:
             "To fix this, set the API key for your model provider:\n"
             "  • Anthropic:   export ANTHROPIC_API_KEY=sk-...\n"
             "  • OpenAI:      export OPENAI_API_KEY=sk-...\n"
+            "  • Gemini:      export GEMINI_API_KEY=...\n"
+            "  • Vertex AI:   export VERTEXAI_PROJECT=... VERTEXAI_LOCATION=...\n"
             "  • HF Router:   export HF_TOKEN=hf_...\n\n"
             "You can also add it to a .env file in the project root.\n"
             "To switch models, use the /model command."
@@ -388,6 +391,31 @@ async def _cleanup_on_cancel(session: Session) -> None:
         session._running_job_ids.clear()
 
 
+def _messages_to_dicts(messages: list) -> list[dict]:
+    """Serialize Message objects to plain dicts for litellm.
+
+    litellm's ``validate_and_fix_openai_messages`` mutates Message objects
+    **in-place** — its ``jsonify_tools`` converts ToolCall Pydantic models
+    to raw dicts and assigns them back via ``message["tool_calls"] = ...``.
+    On the subsequent ``model_dump()`` call, Pydantic sees dicts where it
+    expects ``ChatCompletionMessageToolCall`` and emits a
+    ``PydanticSerializationUnexpectedValue`` warning.
+
+    By passing pre-serialized dicts, we:
+    1. Prevent mutation of our stored ``ContextManager.items``.
+    2. Eliminate the serialization warning entirely.
+    """
+    out = []
+    for m in messages:
+        if isinstance(m, dict):
+            out.append(m)
+        elif hasattr(m, "model_dump"):
+            out.append(m.model_dump(exclude_none=True))
+        else:
+            out.append(m)
+    return out
+
+
 @dataclass
 class LLMResult:
     """Result from an LLM call (streaming or non-streaming)."""
@@ -403,6 +431,7 @@ async def _call_llm_streaming(session: Session, messages, tools, llm_params) -> 
     response = None
     _healed_effort = False  # one-shot safety net per call
     messages, tools = with_prompt_caching(messages, tools, llm_params.get("model"))
+    messages = _messages_to_dicts(messages)
     t_start = time.monotonic()
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
@@ -513,6 +542,7 @@ async def _call_llm_non_streaming(session: Session, messages, tools, llm_params)
     response = None
     _healed_effort = False
     messages, tools = with_prompt_caching(messages, tools, llm_params.get("model"))
+    messages = _messages_to_dicts(messages)
     t_start = time.monotonic()
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
@@ -789,10 +819,10 @@ class Handlers:
                         ToolCall(
                             id=tc_data["id"],
                             type="function",
-                            function={
-                                "name": tc_data["function"]["name"],
-                                "arguments": tc_data["function"]["arguments"],
-                            },
+                            function=Function(
+                                name=tc_data["function"]["name"],
+                                arguments=tc_data["function"]["arguments"],
+                            ),
                         )
                     )
 

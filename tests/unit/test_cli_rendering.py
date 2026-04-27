@@ -4,6 +4,7 @@ from io import StringIO
 from types import SimpleNamespace
 
 from agent.tools.research_tool import _get_research_model
+from agent.core.model_switcher import SUGGESTED_MODELS, is_valid_model_id
 from agent.utils import terminal_display
 
 
@@ -20,6 +21,25 @@ def test_bedrock_anthropic_research_model_stays_on_bedrock():
 
 def test_non_anthropic_research_model_is_unchanged():
     assert _get_research_model("openai/gpt-5.4") == "openai/gpt-5.4"
+
+
+def test_gemini_and_vertex_ai_model_ids_are_valid():
+    assert is_valid_model_id("google/gemini-3.1-pro-preview")
+    assert is_valid_model_id("google/gemini-2.5-flash-lite-preview-09-2025")
+    assert is_valid_model_id("google-geap/gemini-3-flash-preview")
+    assert is_valid_model_id("google-geap/gemini-2.5-pro")
+
+
+def test_google_preview_models_are_suggested():
+    suggested = {m["id"] for m in SUGGESTED_MODELS}
+
+    assert "google/gemini-3.1-pro-preview" in suggested
+    assert "google/gemini-3-flash-preview" in suggested
+    assert "google/gemini-3.1-flash-lite-preview" in suggested
+    assert "google-geap/gemini-3.1-pro-preview" in suggested
+    assert "google-geap/gemini-3-flash-preview" in suggested
+    assert "google/deep-research-pro-preview-12-2025" not in suggested
+    assert "google/deep-research-max-preview-04-2026" not in suggested
 
 
 def test_subagent_display_does_not_spawn_background_redraw(monkeypatch):

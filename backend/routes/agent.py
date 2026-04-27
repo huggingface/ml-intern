@@ -39,6 +39,52 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["agent"])
 
+GOOGLE_AI_STUDIO_MODELS = [
+    {
+        "id": "google/gemini-3.1-pro-preview",
+        "label": "Gemini 3.1 Pro Preview",
+        "recommended": True,
+    },
+    {
+        "id": "google/gemini-3-flash-preview",
+        "label": "Gemini 3 Flash Preview",
+    },
+    {
+        "id": "google/gemini-3.1-flash-lite-preview",
+        "label": "Gemini 3.1 Flash Lite Preview",
+    },
+    {
+        "id": "google/gemini-3-pro-preview",
+        "label": "Gemini 3 Pro Preview",
+    },
+    {"id": "google/gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+    {"id": "google/gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
+]
+
+VERTEX_AI_MODELS = [
+    {
+        "id": "google-geap/gemini-3.1-pro-preview",
+        "label": "Gemini 3.1 Pro Preview via Vertex AI",
+    },
+    {
+        "id": "google-geap/gemini-3-flash-preview",
+        "label": "Gemini 3 Flash Preview via Vertex AI",
+    },
+    {
+        "id": "google-geap/gemini-3.1-flash-lite-preview",
+        "label": "Gemini 3.1 Flash Lite Preview via Vertex AI",
+    },
+    {
+        "id": "google-geap/gemini-3-pro-preview",
+        "label": "Gemini 3 Pro Preview via Vertex AI",
+    },
+    {"id": "google-geap/gemini-2.5-pro", "label": "Gemini 2.5 Pro via Vertex AI"},
+    {
+        "id": "google-geap/gemini-2.5-flash",
+        "label": "Gemini 2.5 Flash via Vertex AI",
+    },
+]
+
 AVAILABLE_MODELS = [
     {
         "id": "moonshotai/Kimi-K2.6",
@@ -54,6 +100,14 @@ AVAILABLE_MODELS = [
         "tier": "pro",
         "recommended": True,
     },
+    *[
+        {"provider": "gemini", "tier": "direct", **model}
+        for model in GOOGLE_AI_STUDIO_MODELS
+    ],
+    *[
+        {"provider": "vertex_ai", "tier": "direct", **model}
+        for model in VERTEX_AI_MODELS
+    ],
     {
         "id": "MiniMaxAI/MiniMax-M2.7",
         "label": "MiniMax M2.7",
@@ -67,6 +121,10 @@ AVAILABLE_MODELS = [
         "tier": "free",
     },
 ]
+
+
+
+
 
 
 def _is_anthropic_model(model_id: str) -> bool:

@@ -67,13 +67,20 @@ _patch_litellm_effort_validation()
 # Effort levels accepted on the wire.
 #   Anthropic (4.6+):  low | medium | high | xhigh | max   (output_config.effort)
 #   OpenAI direct:     minimal | low | medium | high | xhigh (reasoning_effort top-level)
+#   Google AI Studio:  minimal | low | medium | high        (reasoning_effort top-level)
+#   Google Vertex AI:  minimal | low | medium | high        (reasoning_effort top-level)
 #   HF router:         low | medium | high                 (extra_body.reasoning_effort)
 #
 # We validate *shape* here and let the probe cascade walk down on rejection;
 # we deliberately do NOT maintain a per-model capability table.
 _ANTHROPIC_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _OPENAI_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
+_GEMINI_EFFORTS = {"minimal", "low", "medium", "high"}
+_VERTEX_AI_EFFORTS = {"minimal", "low", "medium", "high"}
 _HF_EFFORTS = {"low", "medium", "high"}
+
+
+
 
 
 class UnsupportedEffortError(ValueError):
@@ -109,6 +116,17 @@ def _resolve_llm_params(
     • ``openai/<model>`` — ``reasoning_effort`` forwarded as a top-level
       kwarg (GPT-5 / o-series). LiteLLM uses the user's ``OPENAI_API_KEY``.
 
+    • ``google/<model>`` — Google AI Studio's Gemini API via LiteLLM.
+      LiteLLM picks up ``GOOGLE_API_KEY`` or ``GEMINI_API_KEY`` from the
+      environment and maps ``reasoning_effort`` to Gemini thinking config
+      for models that support it.
+
+    • ``google-geap/<model>`` — Google Vertex AI through LiteLLM. LiteLLM
+      uses Google application-default credentials plus ``VERTEXAI_PROJECT``
+      and ``VERTEXAI_LOCATION``/``GOOGLE_CLOUD_LOCATION``. For Gemini models,
+      ``reasoning_effort`` is forwarded as a top-level kwarg and mapped to
+      Gemini thinking config.
+
     • Anything else is treated as a HuggingFace router id. We hit the
       auto-routing OpenAI-compatible endpoint at
       ``https://router.huggingface.co/v1``. The id can be bare or carry an
@@ -131,6 +149,8 @@ def _resolve_llm_params(
       2. session.hf_token — the user's own token (CLI / OAuth / cache file).
       3. HF_TOKEN env — belt-and-suspenders fallback for CLI users.
     """
+
+
     if model_name.startswith("anthropic/"):
         params: dict = {"model": model_name}
         if reasoning_effort:
@@ -169,6 +189,32 @@ def _resolve_llm_params(
                 if strict:
                     raise UnsupportedEffortError(
                         f"OpenAI doesn't accept effort={reasoning_effort!r}"
+                    )
+            else:
+                params["reasoning_effort"] = reasoning_effort
+        return params
+
+    if model_name.startswith("google/"):
+        litellm_model = "gemini/" + model_name.removeprefix("google/")
+        params = {"model": litellm_model}
+        if reasoning_effort:
+            if reasoning_effort not in _GEMINI_EFFORTS:
+                if strict:
+                    raise UnsupportedEffortError(
+                        f"Gemini doesn't accept effort={reasoning_effort!r}"
+                    )
+            else:
+                params["reasoning_effort"] = reasoning_effort
+        return params
+
+    if model_name.startswith("google-geap/"):
+        litellm_model = "vertex_ai/" + model_name.removeprefix("google-geap/")
+        params = {"model": litellm_model}
+        if reasoning_effort:
+            if reasoning_effort not in _VERTEX_AI_EFFORTS:
+                if strict:
+                    raise UnsupportedEffortError(
+                        f"Vertex AI doesn't accept effort={reasoning_effort!r}"
                     )
             else:
                 params["reasoning_effort"] = reasoning_effort
