@@ -807,7 +807,7 @@ async def _handle_slash_command(
     return None
 
 
-async def main(model: str | None = None):
+async def main():
     """Interactive chat with the agent"""
 
     # Clear screen
@@ -822,8 +822,6 @@ async def main(model: str | None = None):
         hf_token = await _prompt_and_save_hf_token(prompt_session)
 
     config = load_config(CLI_CONFIG_PATH)
-    if model:
-        config.model_name = model
 
     # Resolve username for banner
     hf_user = _get_hf_user(hf_token)
@@ -1223,8 +1221,6 @@ def cli():
     _configure_runtime_logging()
     # Suppress litellm pydantic deprecation warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning, module="litellm")
-    # Suppress whoosh invalid escape sequence warnings (third-party, unfixed upstream)
-    warnings.filterwarnings("ignore", category=SyntaxWarning, module="whoosh")
 
     parser = argparse.ArgumentParser(description="Hugging Face Agent CLI")
     parser.add_argument("prompt", nargs="?", default=None, help="Run headlessly with this prompt")
@@ -1242,7 +1238,7 @@ def cli():
                 max_iter = 10_000  # effectively unlimited
             asyncio.run(headless_main(args.prompt, model=args.model, max_iterations=max_iter, stream=not args.no_stream))
         else:
-            asyncio.run(main(model=args.model))
+            asyncio.run(main())
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
 

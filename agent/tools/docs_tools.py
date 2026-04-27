@@ -8,10 +8,9 @@ from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
-from whoosh.analysis import StemmingAnalyzer
-from whoosh.fields import ID, TEXT, Schema
-from whoosh.filedb.filestore import RamStorage
-from whoosh.qparser import MultifieldParser, OrGroup
+
+from agent.search import TantivyTextIndex, chunk_markdown
+from agent.search.cache import read_json, stable_key, write_json
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -53,10 +52,10 @@ COMPOSITE_ENDPOINTS: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 
 _docs_cache: dict[str, list[dict[str, str]]] = {}
-_index_cache: dict[str, tuple[Any, MultifieldParser]] = {}
+_index_cache: dict[str, TantivyTextIndex] = {}
 _cache_lock = asyncio.Lock()
 _openapi_cache: dict[str, Any] | None = None
-_openapi_index_cache: tuple[Any, MultifieldParser, list[dict[str, Any]]] | None = None
+_openapi_index_cache: tuple[TantivyTextIndex, list[dict[str, Any]]] | None = None
 
 # ---------------------------------------------------------------------------
 # Gradio Documentation
@@ -98,8 +97,13 @@ async def _fetch_gradio_docs(query: str | None = None) -> str:
 
 async def _fetch_endpoint_docs(hf_token: str, endpoint: str) -> list[dict[str, str]]:
     """Fetch all docs for an endpoint by parsing sidebar and fetching each page."""
+    cache_key = stable_key(endpoint)
+    cached = read_json("hf-docs", cache_key)
+    if isinstance(cached, list) and all(isinstance(item, dict) for item in cached):
+        return cached
+
     url = f"https://huggingface.co/docs/{endpoint}"
-    headers = {"Authorization": f"Bearer {hf_token}"}
+    headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
 
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         resp = await client.get(url, headers=headers)
@@ -137,7 +141,9 @@ async def _fetch_endpoint_docs(hf_token: str, endpoint: str) -> list[dict[str, s
                 "section": endpoint,
             }
 
-        return list(await asyncio.gather(*[fetch_page(item) for item in nav_items]))
+        docs = list(await asyncio.gather(*[fetch_page(item) for item in nav_items]))
+        write_json("hf-docs", cache_key, docs)
+        return docs
 
 
 async def _get_docs(hf_token: str, endpoint: str) -> list[dict[str, str]]:
@@ -172,74 +178,87 @@ async def _get_docs(hf_token: str, endpoint: str) -> list[dict[str, str]]:
 
 async def _build_search_index(
     endpoint: str, docs: list[dict[str, str]]
-) -> tuple[Any, MultifieldParser]:
-    """Build or retrieve cached Whoosh search index."""
+) -> TantivyTextIndex:
+    """Build or retrieve cached Tantivy passage index."""
     async with _cache_lock:
         if endpoint in _index_cache:
             return _index_cache[endpoint]
 
-    analyzer = StemmingAnalyzer()
-    schema = Schema(
-        title=TEXT(stored=True, analyzer=analyzer),
-        url=ID(stored=True, unique=True),
-        md_url=ID(stored=True),
-        section=ID(stored=True),
-        glimpse=TEXT(stored=True, analyzer=analyzer),
-        content=TEXT(stored=False, analyzer=analyzer),
+    index = TantivyTextIndex(
+        text_fields=["title", "heading", "content"],
+        stored_fields=[
+            "title",
+            "heading",
+            "url",
+            "md_url",
+            "section",
+            "glimpse",
+            "content",
+            "line_start",
+            "line_end",
+        ],
+        field_boosts={"title": 3.0, "heading": 2.0, "content": 1.0},
     )
-    storage = RamStorage()
-    index = storage.create_index(schema)
-    writer = index.writer()
-    for doc in docs:
-        writer.add_document(
-            title=doc.get("title", ""),
-            url=doc.get("url", ""),
-            md_url=doc.get("md_url", ""),
-            section=doc.get("section", endpoint),
-            glimpse=doc.get("glimpse", ""),
-            content=doc.get("content", ""),
-        )
-    writer.commit()
 
-    parser = MultifieldParser(
-        ["title", "content"],
-        schema=schema,
-        fieldboosts={"title": 2.0, "content": 1.0},
-        group=OrGroup,
-    )
+    passage_docs: list[dict[str, str]] = []
+    for doc in docs:
+        content = doc.get("content", "") or doc.get("glimpse", "")
+        passages = chunk_markdown(content)
+        for passage in passages:
+            text = passage.text.strip()
+            if not text:
+                continue
+            glimpse = text[:500] + "..." if len(text) > 500 else text
+            passage_docs.append(
+                {
+                    "title": doc.get("title", ""),
+                    "heading": passage.title,
+                    "url": doc.get("url", ""),
+                    "md_url": doc.get("md_url", ""),
+                    "section": doc.get("section", endpoint),
+                    "glimpse": glimpse,
+                    "content": text,
+                    "line_start": str(passage.line_start),
+                    "line_end": str(passage.line_end),
+                }
+            )
+    index.add_documents(passage_docs)
 
     async with _cache_lock:
-        _index_cache[endpoint] = (index, parser)
-    return index, parser
+        _index_cache[endpoint] = index
+    return index
 
 
 async def _search_docs(
     endpoint: str, docs: list[dict[str, str]], query: str, limit: int
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Search docs using Whoosh. Returns (results, fallback_message)."""
-    index, parser = await _build_search_index(endpoint, docs)
+    """Search docs using Tantivy passages. Returns (results, fallback_message)."""
+    index = await _build_search_index(endpoint, docs)
 
-    try:
-        query_obj = parser.parse(query)
-    except Exception:
-        return [], "Query contained unsupported syntax; showing default ordering."
-
-    with index.searcher() as searcher:
-        results = searcher.search(query_obj, limit=limit)
-        matches = [
+    hits, parse_errors = index.search(query, limit=limit)
+    matches = []
+    for hit in hits:
+        fields = hit.fields
+        title = fields.get("title", "")
+        heading = fields.get("heading", "")
+        display_title = f"{title} / {heading}" if heading and heading != title else title
+        matches.append(
             {
-                "title": hit["title"],
-                "url": hit["url"],
-                "md_url": hit.get("md_url", ""),
-                "section": hit.get("section", endpoint),
-                "glimpse": hit["glimpse"],
+                "title": display_title,
+                "url": fields.get("url", ""),
+                "md_url": fields.get("md_url", ""),
+                "section": fields.get("section", endpoint),
+                "glimpse": fields.get("glimpse", ""),
+                "line_start": fields.get("line_start", ""),
+                "line_end": fields.get("line_end", ""),
                 "score": round(hit.score, 2),
             }
-            for hit in results
-        ]
+        )
 
     if not matches:
         return [], "No strong matches found; showing default ordering."
+    if parse_errors:
+        return matches, "Some query syntax was ignored by the search parser."
     return matches, None
 
 
@@ -274,6 +293,8 @@ def _format_results(
         out += f"{i}. **{item['title']}**\n"
         out += f"   URL: {item['url']}\n"
         out += f"   Section: {item.get('section', endpoint)}\n"
+        if item.get("line_start") and item.get("line_end"):
+            out += f"   Lines: {item['line_start']}-{item['line_end']}\n"
         if query and "score" in item:
             out += f"   Relevance score: {item['score']:.2f}\n"
         out += f"   Glimpse: {item['glimpse']}\n\n"
@@ -317,9 +338,7 @@ async def explore_hf_docs_handler(
             return f"Error fetching Gradio docs: {str(e)}", False
 
     # HF docs
-    hf_token = session.hf_token if session else None
-    if not hf_token:
-        return "Error: No HF token available (not logged in)", False
+    hf_token = session.hf_token if session else ""
 
     try:
         max_results_int = int(max_results) if max_results is not None else None
@@ -387,18 +406,15 @@ async def hf_docs_fetch_handler(
     if not url:
         return "Error: No URL provided", False
 
-    hf_token = session.hf_token if session else None
-    if not hf_token:
-        return "Error: No HF token available (not logged in)", False
+    hf_token = session.hf_token if session else ""
 
     if not url.endswith(".md"):
         url = f"{url}.md"
 
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            resp = await client.get(
-                url, headers={"Authorization": f"Bearer {hf_token}"}
-            )
+            headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
+            resp = await client.get(url, headers=headers)
             resp.raise_for_status()
         return f"Documentation from: {url}\n\n{resp.text}", True
     except httpx.HTTPStatusError as e:
@@ -423,11 +439,17 @@ async def _fetch_openapi_spec() -> dict[str, Any]:
     if _openapi_cache is not None:
         return _openapi_cache
 
+    cached = read_json("hf-openapi", "spec")
+    if isinstance(cached, dict):
+        _openapi_cache = cached
+        return _openapi_cache
+
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         resp = await client.get("https://huggingface.co/.well-known/openapi.json")
         resp.raise_for_status()
 
     _openapi_cache = resp.json()
+    write_json("hf-openapi", "spec", _openapi_cache)
     return _openapi_cache
 
 
@@ -484,8 +506,8 @@ def _extract_all_endpoints(spec: dict[str, Any]) -> list[dict[str, Any]]:
     return endpoints
 
 
-async def _build_openapi_index() -> tuple[Any, MultifieldParser, list[dict[str, Any]]]:
-    """Build or retrieve cached Whoosh index for OpenAPI endpoints."""
+async def _build_openapi_index() -> tuple[TantivyTextIndex, list[dict[str, Any]]]:
+    """Build or retrieve cached Tantivy index for OpenAPI endpoints."""
     global _openapi_index_cache
     async with _cache_lock:
         if _openapi_index_cache is not None:
@@ -494,85 +516,78 @@ async def _build_openapi_index() -> tuple[Any, MultifieldParser, list[dict[str, 
     spec = await _fetch_openapi_spec()
     endpoints = _extract_all_endpoints(spec)
 
-    analyzer = StemmingAnalyzer()
-    schema = Schema(
-        path=ID(stored=True, unique=True),
-        method=ID(stored=True),
-        operationId=TEXT(stored=True, analyzer=analyzer),
-        summary=TEXT(stored=True, analyzer=analyzer),
-        description=TEXT(stored=True, analyzer=analyzer),
-        tags=TEXT(stored=True, analyzer=analyzer),
-        param_names=TEXT(stored=False, analyzer=analyzer),
+    index = TantivyTextIndex(
+        text_fields=[
+            "summary",
+            "description",
+            "operationId",
+            "tags",
+            "param_names",
+            "path",
+        ],
+        stored_fields=[
+            "route_key",
+            "path",
+            "method",
+            "operationId",
+            "summary",
+            "description",
+            "tags",
+            "param_names",
+        ],
+        field_boosts={
+            "summary": 3.0,
+            "operationId": 2.5,
+            "path": 2.0,
+            "tags": 1.5,
+            "param_names": 1.25,
+            "description": 1.0,
+        },
     )
-    storage = RamStorage()
-    index = storage.create_index(schema)
-    writer = index.writer()
 
+    docs: list[dict[str, str]] = []
     for ep in endpoints:
         param_names = " ".join(p.get("name", "") for p in ep.get("parameters", []))
-        writer.add_document(
-            path=ep["path"],
-            method=ep["method"],
-            operationId=ep.get("operationId", ""),
-            summary=ep.get("summary", ""),
-            description=ep.get("description", ""),
-            tags=ep.get("tags", ""),
-            param_names=param_names,
+        docs.append(
+            {
+                "route_key": f"{ep['method']} {ep['path']}",
+                "path": ep["path"],
+                "method": ep["method"],
+                "operationId": ep.get("operationId", ""),
+                "summary": ep.get("summary", ""),
+                "description": ep.get("description", ""),
+                "tags": ep.get("tags", ""),
+                "param_names": param_names,
+            }
         )
-    writer.commit()
-
-    parser = MultifieldParser(
-        ["summary", "description", "operationId", "tags", "param_names"],
-        schema=schema,
-        fieldboosts={
-            "summary": 3.0,
-            "operationId": 2.0,
-            "description": 1.0,
-            "tags": 1.5,
-        },
-        group=OrGroup,
-    )
+    index.add_documents(docs)
 
     async with _cache_lock:
-        _openapi_index_cache = (index, parser, endpoints)
-    return index, parser, endpoints
+        _openapi_index_cache = (index, endpoints)
+    return index, endpoints
 
 
 async def _search_openapi(
     query: str, tag: str | None, limit: int = 20
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Search OpenAPI endpoints using Whoosh. Returns (results, fallback_message)."""
-    index, parser, endpoints = await _build_openapi_index()
+    """Search OpenAPI endpoints using Tantivy. Returns (results, fallback_message)."""
+    index, endpoints = await _build_openapi_index()
+    endpoint_by_key = {f"{ep['method']} {ep['path']}": ep for ep in endpoints}
 
-    try:
-        query_obj = parser.parse(query)
-    except Exception:
-        return [], "Query contained unsupported syntax."
+    hits, parse_errors = index.search(query, limit=limit * 3)
+    matches = []
+    for hit in hits:
+        ep = endpoint_by_key.get(hit.fields.get("route_key", ""))
+        if ep is None:
+            continue
+        if tag and tag not in ep.get("tags", ""):
+            continue
+        matches.append({**ep, "score": round(hit.score, 2)})
+        if len(matches) >= limit:
+            break
 
-    with index.searcher() as searcher:
-        results = searcher.search(
-            query_obj, limit=limit * 2
-        )  # Get extra for tag filtering
-        matches = []
-        for hit in results:
-            # Find full endpoint data
-            ep = next(
-                (
-                    e
-                    for e in endpoints
-                    if e["path"] == hit["path"] and e["method"] == hit["method"]
-                ),
-                None,
-            )
-            if ep is None:
-                continue
-            # Filter by tag if provided
-            if tag and tag not in ep.get("tags", ""):
-                continue
-            matches.append({**ep, "score": round(hit.score, 2)})
-            if len(matches) >= limit:
-                break
-
+    if matches and parse_errors:
+        return matches, "Some query syntax was ignored by the search parser."
     return matches, None if matches else "No matches found for query."
 
 
@@ -748,17 +763,17 @@ async def search_openapi_handler(arguments: dict[str, Any]) -> tuple[str, bool]:
     try:
         note = None
 
-        # If query provided, try Whoosh search first
+        # If query provided, try Tantivy search first
         if query:
             results, search_note = await _search_openapi(query, tag, limit=20)
 
-            # If Whoosh found results, return them
+            # If search found results, return them
             if results:
                 return _format_openapi_results(
                     results, tag=tag, query=query, note=search_note
                 ), True
 
-            # Whoosh found nothing - fall back to tag-based if tag provided
+            # Search found nothing - fall back to tag-based if tag provided
             if tag:
                 note = f"No matches for '{query}'; showing all endpoints in tag '{tag}'"
             else:
@@ -767,7 +782,7 @@ async def search_openapi_handler(arguments: dict[str, Any]) -> tuple[str, bool]:
 
         # Tag-based search (either as fallback or primary)
         if tag:
-            _, _, endpoints = await _build_openapi_index()
+            _, endpoints = await _build_openapi_index()
             results = [ep for ep in endpoints if tag in ep.get("tags", "")]
             return _format_openapi_results(
                 results, tag=tag, query=None, note=note

@@ -10,6 +10,8 @@ from typing import Any, Dict, List
 import requests
 from thefuzz import fuzz
 
+from agent.search import TantivyTextIndex, chunk_code
+from agent.search.cache import read_json, stable_key, write_json
 from agent.tools.types import ToolResult
 
 # In order of priority (lower index = higher priority for sorting)
@@ -52,21 +54,70 @@ EXAMPLE_PATTERNS = [
     "showcase",
 ]
 
+CODE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".md",
+    ".mdx",
+    ".yaml",
+    ".yml",
+    ".toml",
+}
+MAX_INDEXED_EXAMPLE_FILES = 50
+MAX_INDEXED_FILE_BYTES = 400_000
+
+
+def _github_headers(token: str, *, raw: bool = False) -> Dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github.raw"
+        if raw
+        else "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _github_get(
+    url: str,
+    token: str,
+    *,
+    raw: bool = False,
+    **kwargs,
+) -> requests.Response:
+    response = requests.get(
+        url,
+        headers=_github_headers(token, raw=raw),
+        **kwargs,
+    )
+    if response.status_code == 401 and token:
+        return requests.get(
+            url,
+            headers=_github_headers("", raw=raw),
+            **kwargs,
+        )
+    return response
+
 
 def _get_repo_tree(org: str, repo: str, token: str) -> tuple[List[Dict[str, Any]], str]:
     """Get all files in a repository recursively. Returns (files, error_message)"""
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Authorization": f"Bearer {token}",
-    }
+    cache_key = stable_key(org, repo)
+    cached = read_json("github-trees", cache_key)
+    if isinstance(cached, dict) and isinstance(cached.get("files"), list):
+        return cached["files"], ""
 
     full_repo = f"{org}/{repo}"
 
     # Get default branch
     try:
-        response = requests.get(
-            f"https://api.github.com/repos/{full_repo}", headers=headers, timeout=10
+        response = _github_get(
+            f"https://api.github.com/repos/{full_repo}",
+            token,
+            timeout=10,
         )
         if response.status_code == 404:
             return [], "not_found"
@@ -80,9 +131,9 @@ def _get_repo_tree(org: str, repo: str, token: str) -> tuple[List[Dict[str, Any]
 
     # Get repository tree recursively
     try:
-        response = requests.get(
+        response = _github_get(
             f"https://api.github.com/repos/{full_repo}/git/trees/{default_branch}",
-            headers=headers,
+            token,
             params={"recursive": "1"},
             timeout=30,
         )
@@ -98,12 +149,18 @@ def _get_repo_tree(org: str, repo: str, token: str) -> tuple[List[Dict[str, Any]
                 "path": item["path"],
                 "ref": item["sha"],
                 "size": item.get("size", 0),
+                "branch": default_branch,
                 "url": f"https://github.com/{full_repo}/blob/{default_branch}/{item['path']}",
             }
             for item in tree
             if item["type"] == "blob"
         ]
 
+        write_json(
+            "github-trees",
+            cache_key,
+            {"default_branch": default_branch, "files": files},
+        )
         return files, ""
     except Exception as e:
         return [], f"Error processing tree: {str(e)}"
@@ -111,19 +168,13 @@ def _get_repo_tree(org: str, repo: str, token: str) -> tuple[List[Dict[str, Any]
 
 def _search_similar_repos(org: str, repo: str, token: str) -> List[Dict[str, Any]]:
     """Search for similar repository names in the organization"""
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Authorization": f"Bearer {token}",
-    }
-
     # Search for repos in the org with similar name
     query = f"org:{org} {repo}"
 
     try:
-        response = requests.get(
+        response = _github_get(
             "https://api.github.com/search/repositories",
-            headers=headers,
+            token,
             params={"q": query, "sort": "stars", "order": "desc", "per_page": 10},
             timeout=30,
         )
@@ -166,6 +217,167 @@ def _score_against_keyword(file_path: str, keyword: str) -> int:
 
     # Return the higher of the two
     return max(partial_score, token_score)
+
+
+def _is_indexable_example_file(file_path: str, size: int) -> bool:
+    _, ext = os.path.splitext(file_path.lower())
+    return ext in CODE_EXTENSIONS and 0 < size <= MAX_INDEXED_FILE_BYTES
+
+
+def _rank_index_candidate(
+    file: Dict[str, Any], keyword: str
+) -> tuple[int, int, int, int, str]:
+    in_examples_dir, pattern_priority, path_depth = _get_pattern_priority(file["path"])
+    keyword_score = _score_against_keyword(file["path"], keyword) if keyword else 0
+    return (-keyword_score, in_examples_dir, pattern_priority, path_depth, file["path"])
+
+
+def _fetch_file_content_cached(
+    org: str,
+    repo: str,
+    file: Dict[str, Any],
+    token: str,
+) -> str | None:
+    cache_key = stable_key(org, repo, file.get("path"), file.get("ref"))
+    cached = read_json("github-files", cache_key)
+    if isinstance(cached, dict) and isinstance(cached.get("content"), str):
+        return cached["content"]
+
+    url = f"https://api.github.com/repos/{org}/{repo}/contents/{file['path']}"
+    params = {"ref": file.get("branch", "HEAD")}
+    try:
+        response = _github_get(url, token, raw=True, params=params, timeout=20)
+        if response.status_code != 200:
+            return None
+        content = response.text
+    except Exception:
+        return None
+
+    write_json("github-files", cache_key, {"content": content})
+    return content
+
+
+def _search_example_snippets(
+    keyword: str,
+    org: str,
+    repo: str,
+    files: list[Dict[str, Any]],
+    token: str,
+    *,
+    limit: int,
+) -> list[Dict[str, Any]]:
+    candidates = _get_index_candidates(files, keyword)
+    if not candidates:
+        return []
+
+    cache_key = stable_key(
+        org,
+        repo,
+        "snippet-docs",
+        *[f"{file.get('path')}@{file.get('ref')}" for file in candidates],
+    )
+    cached_docs = read_json("github-snippet-docs", cache_key)
+    if isinstance(cached_docs, list) and all(
+        isinstance(item, dict) for item in cached_docs
+    ):
+        docs = cached_docs
+    else:
+        docs = _build_example_snippet_docs(org, repo, candidates, token)
+        write_json("github-snippet-docs", cache_key, docs)
+
+    if not docs:
+        return []
+
+    index = TantivyTextIndex(
+        text_fields=["path", "heading", "content"],
+        stored_fields=[
+            "path",
+            "url",
+            "ref",
+            "size",
+            "heading",
+            "content",
+            "line_start",
+            "line_end",
+        ],
+        field_boosts={"path": 3.0, "heading": 2.0, "content": 1.0},
+    )
+    index.add_documents(docs)
+    hits, _ = index.search(keyword, limit=limit)
+    return [
+        {
+            **hit.fields,
+            "score": round(hit.score, 2),
+        }
+        for hit in hits
+    ]
+
+
+def _build_example_snippet_docs(
+    org: str,
+    repo: str,
+    candidates: list[Dict[str, Any]],
+    token: str,
+) -> list[dict[str, str]]:
+    docs: list[dict[str, str]] = []
+    for file in candidates:
+        content = _fetch_file_content_cached(org, repo, file, token)
+        if not content:
+            continue
+        for chunk in chunk_code(content):
+            docs.append(
+                {
+                    "path": file["path"],
+                    "url": file["url"],
+                    "ref": file["ref"],
+                    "size": str(file.get("size", 0)),
+                    "heading": chunk.title,
+                    "content": chunk.text,
+                    "line_start": str(chunk.line_start),
+                    "line_end": str(chunk.line_end),
+                }
+            )
+    return docs
+
+
+def _get_index_candidates(
+    files: list[Dict[str, Any]], keyword: str
+) -> list[Dict[str, Any]]:
+    return sorted(
+        [
+            file
+            for file in files
+            if _is_indexable_example_file(file["path"], int(file.get("size", 0)))
+        ],
+        key=lambda file: _rank_index_candidate(file, keyword),
+    )[:MAX_INDEXED_EXAMPLE_FILES]
+
+
+def _excerpt_around_query(content: str, query: str, *, max_chars: int = 900) -> str:
+    if len(content) <= max_chars:
+        return content
+
+    terms = [
+        term.lower()
+        for term in query.replace("_", " ").split()
+        if len(term.strip()) >= 3
+    ]
+    content_lower = content.lower()
+    first_match = min(
+        (index for term in terms if (index := content_lower.find(term)) >= 0),
+        default=0,
+    )
+    start = max(0, first_match - max_chars // 4)
+    end = min(len(content), start + max_chars)
+    if end - start < max_chars:
+        start = max(0, end - max_chars)
+
+    excerpt = content[start:end]
+    if start > 0:
+        excerpt = "...\n" + excerpt
+    if end < len(content):
+        excerpt += "\n..."
+    return excerpt
 
 
 def _get_pattern_priority(file_path: str) -> tuple[int, int, int]:
@@ -284,14 +496,7 @@ def find_examples(
     Returns:
         ToolResult with matching files, or similar repos if repo not found
     """
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        return {
-            "formatted": "Error: GITHUB_TOKEN environment variable is required",
-            "totalResults": 0,
-            "resultsShared": 0,
-            "isError": True,
-        }
+    token = os.environ.get("GITHUB_TOKEN", "")
 
     if not repo:
         return {
@@ -323,13 +528,44 @@ def find_examples(
             "resultsShared": 0,
         }
 
-    # Step 2: If keyword provided, score and filter by keyword
+    snippet_hits: list[Dict[str, Any]] = []
+
+    # Step 2: If keyword provided, score paths and search file contents.
     if keyword:
+        snippet_hits = _search_example_snippets(
+            keyword,
+            org,
+            repo,
+            example_files,
+            token,
+            limit=max(max_results * 2, 10),
+        )
+
         scored_files = []
         for file in example_files:
             keyword_score = _score_against_keyword(file["path"], keyword)
             if keyword_score >= min_score:
                 scored_files.append({**file, "score": keyword_score})
+
+        if snippet_hits:
+            snippet_scores: dict[str, float] = {}
+            for hit in snippet_hits:
+                path = hit.get("path", "")
+                snippet_scores[path] = max(
+                    snippet_scores.get(path, 0.0), float(hit["score"])
+                )
+
+            seen_paths = {file["path"] for file in scored_files}
+            for file in example_files:
+                if file["path"] in snippet_scores and file["path"] not in seen_paths:
+                    scored_files.append(
+                        {
+                            **file,
+                            "score": min(100, int(70 + snippet_scores[file["path"]] * 10)),
+                            "content_score": snippet_scores[file["path"]],
+                        }
+                    )
+                    seen_paths.add(file["path"])
 
         if not scored_files:
             return {
@@ -338,8 +574,11 @@ def find_examples(
                 "resultsShared": 0,
             }
 
-        # Sort by keyword score (descending) for best matches first
-        scored_files.sort(key=lambda x: x["score"], reverse=True)
+        # Prefer files with content hits, then path similarity.
+        scored_files.sort(
+            key=lambda x: (float(x.get("content_score", 0.0)), x["score"]),
+            reverse=True,
+        )
     else:
         # No keyword: prioritize by pattern directory, then path depth
         scored_files = []
@@ -394,6 +633,27 @@ def find_examples(
         lines.append(f"   To read, use: {read_params}")
         lines.append("")
 
+    if snippet_hits:
+        lines.append("## Best indexed code snippets")
+        lines.append(
+            "Use these line ranges with `github_read_file` before reading whole files."
+        )
+        lines.append("")
+        for i, hit in enumerate(snippet_hits[:max_results], 1):
+            path = hit["path"]
+            line_start = hit["line_start"]
+            line_end = hit["line_end"]
+            excerpt = _excerpt_around_query(hit["content"], keyword)
+            lines.append(f"{i}. **{path}:{line_start}-{line_end}**")
+            lines.append(f"   Relevance score: {hit['score']:.2f}")
+            lines.append(
+                f"   To read exactly: {{'repo': '{org}/{repo}', 'path': '{path}', 'line_start': {line_start}, 'line_end': {line_end}}}"
+            )
+            lines.append("   ```")
+            lines.append(excerpt)
+            lines.append("   ```")
+            lines.append("")
+
     return {
         "formatted": "\n".join(lines),
         "totalResults": len(results),
@@ -406,10 +666,10 @@ GITHUB_FIND_EXAMPLES_TOOL_SPEC = {
     "name": "github_find_examples",
     "description": (
         "Find working example scripts in GitHub repositories (from a list of predetermined directories e.g. examples/, scripts/, tutorials/, etc.). "
-        "Uses fuzzy keyword matching.\n\n"
+        "Uses fuzzy path matching plus Tantivy content search over indexed code snippets when a keyword is provided.\n\n"
         "MANDATORY before writing any ML training, fine-tuning, or inference code. "
         "Your internal knowledge of library APIs is outdated — working examples show current API patterns.\n\n"
-        "Sequence: github_find_examples → github_read_file (study the example) → implement based on what you found.\n\n"
+        "Sequence: github_find_examples → github_read_file with the returned line_start/line_end ranges → implement based on what you found.\n\n"
         "Skip this only for: simple data queries, status checks, non-code tasks.\n\n"
         "Examples:\n"
         "  {keyword: 'sft', repo: 'trl'} → finds examples/scripts/sft.py\n"
@@ -421,7 +681,7 @@ GITHUB_FIND_EXAMPLES_TOOL_SPEC = {
         "properties": {
             "keyword": {
                 "type": "string",
-                "description": "Keyword to fuzzy match against file paths (e.g., 'grpo', 'sft').",
+                "description": "Keyword to search against file paths and indexed code snippets (e.g., 'grpo', 'sft', 'dataset_text_field').",
             },
             "repo": {
                 "type": "string",
