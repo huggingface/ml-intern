@@ -1362,6 +1362,7 @@ async def submission_loop(
     tool_router: ToolRouter | None = None,
     session_holder: list | None = None,
     hf_token: str | None = None,
+    user_id: str | None = None,
     local_mode: bool = False,
     stream: bool = True,
 ) -> None:
@@ -1373,7 +1374,7 @@ async def submission_loop(
     # Create session with tool router
     session = Session(
         event_queue, config=config, tool_router=tool_router, hf_token=hf_token,
-        local_mode=local_mode, stream=stream,
+        user_id=user_id, local_mode=local_mode, stream=stream,
     )
     if session_holder is not None:
         session_holder[0] = session
