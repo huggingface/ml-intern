@@ -3,16 +3,16 @@
 </p>
 
 <p align="center">
-  <strong><a href="../README.md">English</a> | 简体中文 | <a href="README.zh-hant.md">繁體中文</a></strong>
+  <strong><a href="../README.md">English</a> | <a href="README_zh-hans.md">简体中文</a> | 繁體中文 | <a href="i18n/README_ko.md">한국어</a> | <a href="i18n/README_es.md">Español</a> | <a href="i18n/README_ja.md">日本語</a> | <a href="i18n/README_ru.md">Русский</a> | <a href="i18n/README_fr.md">Français</a> | <a href="i18n/README_de.md">Deutsch</a> | <a href="i18n/README_it.md">Italiano</a></strong>
 </p>
 
 # ML Intern
 
-一个能够自主调研、编写并交付高质量机器学习相关代码的 ML 实习生，基于 Hugging Face 生态构建，并可深度访问文档、论文、数据集和云计算资源。
+一個能夠自主研究、撰寫並交付高品質機器學習相關程式碼的 ML 實習生，基於 Hugging Face 生態系打造，並可深度存取文件、論文、資料集與雲端運算資源。
 
-## 快速开始
+## 快速開始
 
-### 安装
+### 安裝
 
 ```bash
 git clone git@github.com:huggingface/ml-intern.git
@@ -21,13 +21,13 @@ uv sync
 uv tool install -e .
 ```
 
-#### 就这样。现在 `ml-intern` 可以在任意目录中运行：
+#### 就這樣。現在 `ml-intern` 可以在任意目錄中執行：
 
 ```bash
 ml-intern
 ```
 
-在项目根目录创建一个 `.env` 文件（或者在 shell 中导出以下环境变量）：
+在專案根目錄建立一個 `.env` 檔案（或在 shell 中匯出以下環境變數）：
 
 ```bash
 ANTHROPIC_API_KEY=<your-anthropic-api-key> # if using anthropic models
@@ -36,23 +36,23 @@ HF_TOKEN=<your-hugging-face-token>
 GITHUB_TOKEN=<github-personal-access-token>
 ```
 
-如果没有设置 `HF_TOKEN`，CLI 会在首次启动时提示你粘贴一个 token。要获取 `GITHUB_TOKEN`，请参考[这里的教程](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token)。
+如果沒有設定 `HF_TOKEN`，CLI 會在首次啟動時提示你貼上一個 token。要取得 `GITHUB_TOKEN`，請參考[這裡的教學](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token)。
 
-### 使用方法
+### 使用方式
 
-**交互模式**（启动一个聊天会话）：
+**互動模式**（啟動一個聊天工作階段）：
 
 ```bash
 ml-intern
 ```
 
-**无头模式**（单条提示词，自动批准）：
+**無頭模式**（單一提示詞，自動核准）：
 
 ```bash
 ml-intern "fine-tune llama on my dataset"
 ```
 
-**可选参数：**
+**可選參數：**
 
 ```bash
 ml-intern --model anthropic/claude-opus-4-6 "your prompt"
@@ -61,9 +61,9 @@ ml-intern --max-iterations 100 "your prompt"
 ml-intern --no-stream "your prompt"
 ```
 
-## 架构
+## 架構
 
-### 组件概览
+### 元件總覽
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -171,30 +171,30 @@ User Message
 
 ## 事件
 
-Agent 会通过 `event_queue` 发出以下事件：
+Agent 會透過 `event_queue` 發出以下事件：
 
-- `processing` - 开始处理用户输入
-- `ready` - Agent 已准备好接收输入
-- `assistant_chunk` - 流式 token 分片
-- `assistant_message` - 完整的 LLM 响应文本
-- `assistant_stream_end` - token 流结束
-- `tool_call` - 正在调用工具及其参数
-- `tool_output` - 工具执行结果
-- `tool_log` - 工具信息日志消息
-- `tool_state_change` - 工具执行状态变化
-- `approval_required` - 请求用户批准敏感操作
-- `turn_complete` - Agent 完成当前轮处理
-- `error` - 处理过程中发生错误
-- `interrupted` - Agent 被中断
-- `compacted` - 上下文已压缩
-- `undo_complete` - 撤销操作完成
-- `shutdown` - Agent 正在关闭
+- `processing` - 開始處理使用者輸入
+- `ready` - Agent 已準備好接收輸入
+- `assistant_chunk` - 串流 token 片段
+- `assistant_message` - 完整的 LLM 回應文字
+- `assistant_stream_end` - token 串流結束
+- `tool_call` - 正在呼叫工具及其參數
+- `tool_output` - 工具執行結果
+- `tool_log` - 工具資訊日誌訊息
+- `tool_state_change` - 工具執行狀態變更
+- `approval_required` - 請求使用者核准敏感操作
+- `turn_complete` - Agent 完成目前輪次處理
+- `error` - 處理過程中發生錯誤
+- `interrupted` - Agent 被中斷
+- `compacted` - 上下文已壓縮
+- `undo_complete` - 復原操作完成
+- `shutdown` - Agent 正在關閉
 
-## 开发
+## 開發
 
-### 添加内置工具
+### 新增內建工具
 
-编辑 `agent/core/tools.py`：
+編輯 `agent/core/tools.py`：
 
 ```python
 def create_builtin_tools() -> list[ToolSpec]:
@@ -215,9 +215,9 @@ def create_builtin_tools() -> list[ToolSpec]:
     ]
 ```
 
-### 添加 MCP 服务器
+### 新增 MCP 伺服器
 
-编辑 `configs/cli_agent_config.json` 以配置 CLI 默认值，或编辑 `configs/frontend_agent_config.json` 以配置 Web 会话默认值：
+編輯 `configs/cli_agent_config.json` 以設定 CLI 預設值，或編輯 `configs/frontend_agent_config.json` 以設定 Web 工作階段預設值：
 
 ```json
 {
@@ -234,4 +234,4 @@ def create_builtin_tools() -> list[ToolSpec]:
 }
 ```
 
-注意：像 `${YOUR_TOKEN}` 这样的环境变量会自动从 `.env` 中替换。
+注意：像 `${YOUR_TOKEN}` 這樣的環境變數會自動從 `.env` 代入。

@@ -3,16 +3,16 @@
 </p>
 
 <p align="center">
-  <strong><a href="../README.md">English</a> | <a href="README.zh-hans.md">简体中文</a> | 繁體中文</strong>
+  <strong><a href="../README.md">English</a> | <a href="README_zh-hans.md">简体中文</a> | <a href="README_zh-hant.md">繁體中文</a> | <a href="README_ko.md">한국어</a> | <a href="README_es.md">Español</a> | <a href="README_ja.md">日本語</a> | <a href="README_ru.md">Русский</a> | Français | <a href="README_de.md">Deutsch</a> | <a href="README_it.md">Italiano</a></strong>
 </p>
 
 # ML Intern
 
-一個能夠自主研究、撰寫並交付高品質機器學習相關程式碼的 ML 實習生，基於 Hugging Face 生態系打造，並可深度存取文件、論文、資料集與雲端運算資源。
+Un stagiaire ML capable de rechercher, écrire et livrer de manière autonome du code de qualité lié au machine learning en s'appuyant sur l'écosystème Hugging Face, avec un accès approfondi à la documentation, aux articles, aux jeux de données et aux ressources cloud.
 
-## 快速開始
+## Démarrage rapide
 
-### 安裝
+### Installation
 
 ```bash
 git clone git@github.com:huggingface/ml-intern.git
@@ -21,13 +21,13 @@ uv sync
 uv tool install -e .
 ```
 
-#### 就這樣。現在 `ml-intern` 可以在任意目錄中執行：
+#### C'est tout. `ml-intern` fonctionne maintenant depuis n'importe quel répertoire :
 
 ```bash
 ml-intern
 ```
 
-在專案根目錄建立一個 `.env` 檔案（或在 shell 中匯出以下環境變數）：
+Créez un fichier `.env` à la racine du projet (ou exportez ces variables dans votre shell) :
 
 ```bash
 ANTHROPIC_API_KEY=<your-anthropic-api-key> # if using anthropic models
@@ -36,23 +36,23 @@ HF_TOKEN=<your-hugging-face-token>
 GITHUB_TOKEN=<github-personal-access-token>
 ```
 
-如果沒有設定 `HF_TOKEN`，CLI 會在首次啟動時提示你貼上一個 token。要取得 `GITHUB_TOKEN`，請參考[這裡的教學](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token)。
+Si `HF_TOKEN` n'est pas défini, la CLI vous demandera d'en coller un au premier lancement. Pour obtenir un `GITHUB_TOKEN`, suivez le guide disponible [ici](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token).
 
-### 使用方式
+### Utilisation
 
-**互動模式**（啟動一個聊天工作階段）：
+**Mode interactif** (démarrer une session de chat) :
 
 ```bash
 ml-intern
 ```
 
-**無頭模式**（單一提示詞，自動核准）：
+**Mode sans interface** (une seule requête, approbation automatique) :
 
 ```bash
 ml-intern "fine-tune llama on my dataset"
 ```
 
-**可選參數：**
+**Options :**
 
 ```bash
 ml-intern --model anthropic/claude-opus-4-6 "your prompt"
@@ -61,9 +61,9 @@ ml-intern --max-iterations 100 "your prompt"
 ml-intern --no-stream "your prompt"
 ```
 
-## 架構
+## Architecture
 
-### 元件總覽
+### Vue d'ensemble des composants
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -133,7 +133,7 @@ ml-intern --no-stream "your prompt"
 └────────────────────────────────────────────────────┴──┘
 ```
 
-### Agentic Loop 流程
+### Flux de la boucle agentique
 
 ```
 User Message
@@ -169,32 +169,32 @@ User Message
      ╚═══════════════════════════════════════════╝
 ```
 
-## 事件
+## Événements
 
-Agent 會透過 `event_queue` 發出以下事件：
+L'agent émet les événements suivants via `event_queue` :
 
-- `processing` - 開始處理使用者輸入
-- `ready` - Agent 已準備好接收輸入
-- `assistant_chunk` - 串流 token 片段
-- `assistant_message` - 完整的 LLM 回應文字
-- `assistant_stream_end` - token 串流結束
-- `tool_call` - 正在呼叫工具及其參數
-- `tool_output` - 工具執行結果
-- `tool_log` - 工具資訊日誌訊息
-- `tool_state_change` - 工具執行狀態變更
-- `approval_required` - 請求使用者核准敏感操作
-- `turn_complete` - Agent 完成目前輪次處理
-- `error` - 處理過程中發生錯誤
-- `interrupted` - Agent 被中斷
-- `compacted` - 上下文已壓縮
-- `undo_complete` - 復原操作完成
-- `shutdown` - Agent 正在關閉
+- `processing` - Début du traitement de l'entrée utilisateur
+- `ready` - L'agent est prêt à recevoir une entrée
+- `assistant_chunk` - Fragment de jetons diffusé en streaming
+- `assistant_message` - Texte complet de la réponse du LLM
+- `assistant_stream_end` - Fin du flux de jetons
+- `tool_call` - Appel d'un outil avec ses arguments
+- `tool_output` - Résultat d'exécution d'un outil
+- `tool_log` - Message de journal informatif d'un outil
+- `tool_state_change` - Changement d'état pendant l'exécution d'un outil
+- `approval_required` - Demande d'approbation utilisateur pour une opération sensible
+- `turn_complete` - L'agent a terminé le traitement du tour
+- `error` - Une erreur s'est produite pendant le traitement
+- `interrupted` - L'agent a été interrompu
+- `compacted` - Le contexte a été compacté
+- `undo_complete` - L'opération d'annulation est terminée
+- `shutdown` - L'agent est en cours d'arrêt
 
-## 開發
+## Développement
 
-### 新增內建工具
+### Ajouter des outils intégrés
 
-編輯 `agent/core/tools.py`：
+Modifiez `agent/core/tools.py` :
 
 ```python
 def create_builtin_tools() -> list[ToolSpec]:
@@ -215,9 +215,9 @@ def create_builtin_tools() -> list[ToolSpec]:
     ]
 ```
 
-### 新增 MCP 伺服器
+### Ajouter des serveurs MCP
 
-編輯 `configs/cli_agent_config.json` 以設定 CLI 預設值，或編輯 `configs/frontend_agent_config.json` 以設定 Web 工作階段預設值：
+Modifiez `configs/cli_agent_config.json` pour les valeurs par défaut de la CLI, ou `configs/frontend_agent_config.json` pour les valeurs par défaut des sessions web :
 
 ```json
 {
@@ -234,4 +234,4 @@ def create_builtin_tools() -> list[ToolSpec]:
 }
 ```
 
-注意：像 `${YOUR_TOKEN}` 這樣的環境變數會自動從 `.env` 代入。
+Remarque : les variables d'environnement comme `${YOUR_TOKEN}` sont automatiquement remplacées à partir de `.env`.
