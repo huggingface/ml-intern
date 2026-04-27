@@ -16,6 +16,8 @@ glues it to CLI output + session state.
 from __future__ import annotations
 
 from agent.core.effort_probe import ProbeInconclusive, probe_effort
+from agent.core.llm_errors import render_llm_error_message
+from agent.core.provider_adapters import is_valid_model_name
 
 
 # Suggested models shown by `/model` (not a gate). Users can paste any HF
@@ -50,11 +52,7 @@ def is_valid_model_id(model_id: str) -> bool:
     Actual availability is verified against the HF router catalog on
     switch, and by the provider on the probe's ping call.
     """
-    if not model_id or "/" not in model_id:
-        return False
-    head = model_id.split(":", 1)[0]
-    parts = head.split("/")
-    return len(parts) >= 2 and all(parts)
+    return is_valid_model_name(model_id)
 
 
 def _print_hf_routing_info(model_id: str, console) -> bool:
@@ -66,7 +64,7 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
     Anthropic / OpenAI ids return ``True`` without printing anything —
     the probe below covers "does this model exist".
     """
-    if model_id.startswith(("anthropic/", "openai/")):
+    if model_id.startswith(("anthropic/", "openai/", "bedrock/")):
         return True
 
     from agent.core import hf_router_catalog as cat
@@ -149,7 +147,8 @@ def print_invalid_id(arg: str, console) -> None:
         "[dim]Expected:\n"
         "  • <org>/<model>[:tag]    (HF router — paste from huggingface.co)\n"
         "  • anthropic/<model>\n"
-        "  • openai/<model>[/dim]"
+        "  • openai/<model>\n"
+        "  • bedrock/<model>[/dim]"
     )
 
 
@@ -190,14 +189,15 @@ async def probe_and_switch_model(
         outcome = await probe_effort(model_id, preference, hf_token)
     except ProbeInconclusive as e:
         _commit_switch(model_id, config, session, effective=None, cache=False)
+        warning = render_llm_error_message(e)
         console.print(
             f"[yellow]Model switched to {model_id}[/yellow] "
-            f"[dim](couldn't validate: {e}; will verify on first message)[/dim]"
+            f"[dim](couldn't validate: {warning}; will verify on first message)[/dim]"
         )
         return
     except Exception as e:
         # Hard persistent error — auth, unknown model, quota. Don't switch.
-        console.print(f"[bold red]Switch failed:[/bold red] {e}")
+        console.print(f"[bold red]Switch failed:[/bold red] {render_llm_error_message(e)}")
         console.print(f"[dim]Keeping current model: {config.model_name}[/dim]")
         return
 
