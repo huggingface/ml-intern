@@ -280,6 +280,12 @@ export default function WelcomeScreen() {
       : '';
 
   return (
+    // Outer container scrolls; inner uses `margin: auto` so the checklist
+    // centers vertically when the viewport has room and falls back to top-
+    // aligned + scrollable when it doesn't. The previous setup hardcoded
+    // `justify-content: center` with no overflow, so on short viewports
+    // (1366×768 Chrome was the reported case) the bottom of the card —
+    // including the "Start session" CTA — got clipped with no way to scroll.
     <Box
       sx={{
         width: '100%',
@@ -287,11 +293,20 @@ export default function WelcomeScreen() {
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        justifyContent: 'center',
+        overflowY: 'auto',
         background: 'var(--body-gradient)',
-        py: 8,
       }}
     >
+      <Box
+        sx={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          width: '100%',
+          margin: 'auto',
+          py: 8,
+        }}
+      >
       {/* Logo */}
       <Box
         component="img"
@@ -453,6 +468,7 @@ export default function WelcomeScreen() {
       >
         Conversations are stored locally in your browser.
       </Typography>
+      </Box>
     </Box>
   );
 }
