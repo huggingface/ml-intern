@@ -90,9 +90,11 @@ def upload_session_as_file(
         # across sessions with different tool rosters.
         session_row = {
             "session_id": data["session_id"],
+            "user_id": data.get("user_id"),
             "session_start_time": data["session_start_time"],
             "session_end_time": data["session_end_time"],
             "model_name": data["model_name"],
+            "total_cost_usd": data.get("total_cost_usd"),
             "messages": json.dumps(scrubbed_messages),
             "events": json.dumps(scrubbed_events),
             "tools": json.dumps(scrubbed_tools),
