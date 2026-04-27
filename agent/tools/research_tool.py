@@ -216,7 +216,9 @@ RESEARCH_TOOL_SPEC = {
 
 def _get_research_model(main_model: str) -> str:
     """Pick a cheaper model for research based on the main model."""
-    if "anthropic" in main_model:
+    if main_model.startswith("anthropic/"):
+        return "anthropic/claude-sonnet-4-6"
+    if main_model.startswith("bedrock/") and "anthropic" in main_model:
         return "bedrock/us.anthropic.claude-sonnet-4-6"
     # For non-Anthropic models (HF router etc.), use the same model
     return main_model
@@ -304,8 +306,10 @@ async def research_handler(
         # ── Doom-loop detection ──
         doom_prompt = check_for_doom_loop(messages)
         if doom_prompt:
-            logger.warning("Research sub-agent doom loop detected at iteration %d", _iteration)
-            await _log("Doom loop detected — injecting corrective prompt")
+            logger.warning(
+                "Research sub-agent repetition guard activated at iteration %d",
+                _iteration,
+            )
             messages.append(Message(role="user", content=doom_prompt))
 
         # ── Context budget: warn at 75%, hard-stop at 95% ──

@@ -15,7 +15,7 @@ from agent.core.tools import ToolRouter
 
 # Get project root (parent of backend directory)
 PROJECT_ROOT = Path(__file__).parent.parent
-DEFAULT_CONFIG_PATH = str(PROJECT_ROOT / "configs" / "main_agent_config.json")
+DEFAULT_CONFIG_PATH = str(PROJECT_ROOT / "configs" / "frontend_agent_config.json")
 
 
 # These dataclasses match agent/main.py structure
@@ -192,7 +192,7 @@ class SessionManager:
                 session_config.model_name = model
             session = Session(
                 event_queue, config=session_config, tool_router=tool_router,
-                hf_token=hf_token,
+                hf_token=hf_token, user_id=user_id,
             )
             t1 = _time.monotonic()
             logger.info(f"Session initialized in {t1 - t0:.2f}s")

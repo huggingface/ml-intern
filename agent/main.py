@@ -50,6 +50,16 @@ litellm.drop_params = True
 # on every error — users don't need it, and our friendly errors cover the case.
 litellm.suppress_debug_info = True
 
+CLI_CONFIG_PATH = Path(__file__).parent.parent / "configs" / "cli_agent_config.json"
+
+
+def _configure_runtime_logging() -> None:
+    """Keep third-party warning spam from punching through the interactive UI."""
+    import logging
+
+    logging.getLogger("LiteLLM").setLevel(logging.ERROR)
+    logging.getLogger("litellm").setLevel(logging.ERROR)
+
 def _safe_get_args(arguments: dict) -> dict:
     """Safely extract args dict from arguments, handling cases where LLM passes string."""
     args = arguments.get("args", {})
@@ -79,6 +89,17 @@ def _get_hf_token() -> str | None:
         if token:
             return token
     return None
+
+
+def _get_hf_user(token: str | None) -> str | None:
+    """Resolve the HF username for a token, if available."""
+    if not token:
+        return None
+    try:
+        from huggingface_hub import HfApi
+        return HfApi(token=token).whoami().get("name")
+    except Exception:
+        return None
 
 
 async def _prompt_and_save_hf_token(prompt_session: PromptSession) -> str:
@@ -771,8 +792,9 @@ async def _handle_slash_command(
                     console.print(f"  [dim]{m}: {eff or 'off'}[/dim]")
             console.print(
                 "[dim]Set with '/effort minimal|low|medium|high|xhigh|max|off'. "
-                "'max' and 'xhigh' are Anthropic-only; the cascade falls back "
-                "to whatever the model actually accepts.[/dim]"
+                "'max' is Anthropic-only; 'xhigh' is also supported by current "
+                "OpenAI GPT-5 models. The cascade falls back to whatever the "
+                "model actually accepts.[/dim]"
             )
             return None
         level = arg.lower()
@@ -820,15 +842,12 @@ async def main():
     if not hf_token:
         hf_token = await _prompt_and_save_hf_token(prompt_session)
 
-    # Resolve username for banner
-    hf_user = None
-    try:
-        from huggingface_hub import HfApi
-        hf_user = HfApi(token=hf_token).whoami().get("name")
-    except Exception:
-        pass
+    config = load_config(CLI_CONFIG_PATH)
 
-    print_banner(hf_user=hf_user)
+    # Resolve username for banner
+    hf_user = _get_hf_user(hf_token)
+
+    print_banner(model=config.model_name, hf_user=hf_user)
 
     # Pre-warm the HF router catalog in the background so /model switches
     # don't block on a network fetch.
@@ -844,10 +863,6 @@ async def main():
     turn_complete_event.set()
     ready_event = asyncio.Event()
 
-    # Start agent loop in background
-    config_path = Path(__file__).parent.parent / "configs" / "main_agent_config.json"
-    config = load_config(config_path)
-
     # Create tool router with local mode
     tool_router = ToolRouter(config.mcpServers, hf_token=hf_token, local_mode=True)
 
@@ -862,6 +877,7 @@ async def main():
             tool_router=tool_router,
             session_holder=session_holder,
             hf_token=hf_token,
+            user_id=hf_user,
             local_mode=True,
             stream=True,
         )
@@ -1036,6 +1052,7 @@ async def headless_main(
     import logging
 
     logging.basicConfig(level=logging.WARNING)
+    _configure_runtime_logging()
 
     hf_token = _get_hf_token()
     if not hf_token:
@@ -1044,9 +1061,9 @@ async def headless_main(
 
     print(f"HF token loaded", file=sys.stderr)
 
-    config_path = Path(__file__).parent.parent / "configs" / "main_agent_config.json"
-    config = load_config(config_path)
+    config = load_config(CLI_CONFIG_PATH)
     config.yolo_mode = True  # Auto-approve everything in headless mode
+    hf_user = _get_hf_user(hf_token)
 
     if model:
         config.model_name = model
@@ -1073,6 +1090,7 @@ async def headless_main(
             tool_router=tool_router,
             session_holder=session_holder,
             hf_token=hf_token,
+            user_id=hf_user,
             local_mode=True,
             stream=stream,
         )
@@ -1221,6 +1239,7 @@ def cli():
     import warnings
     # Suppress aiohttp "Unclosed client session" noise during event loop teardown
     _logging.getLogger("asyncio").setLevel(_logging.CRITICAL)
+    _configure_runtime_logging()
     # Suppress litellm pydantic deprecation warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning, module="litellm")
     # Suppress whoosh invalid escape sequence warnings (third-party, unfixed upstream)
