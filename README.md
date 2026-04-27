@@ -4,7 +4,7 @@
 
 # ML Intern
 
-An ML intern that autonomously researches, writes, and ships good quality ML releated code using the Hugging Face ecosystem — with deep access to docs, papers, datasets, and cloud compute.
+An ML intern that autonomously researches, writes, and ships good quality ML related code using the Hugging Face ecosystem — with deep access to docs, papers, datasets, and cloud compute.
 
 ## Quick Start
 
@@ -225,7 +225,8 @@ def create_builtin_tools() -> list[ToolSpec]:
 
 ### Adding MCP Servers
 
-Edit `configs/main_agent_config.json`:
+Edit `configs/cli_agent_config.json` for CLI defaults, or
+`configs/frontend_agent_config.json` for web-session defaults:
 
 ```json
 {
