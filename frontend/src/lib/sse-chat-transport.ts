@@ -226,11 +226,16 @@ function createEventToChunkStream(sideChannel: SideChannelCallbacks): TransformS
           const state = (event.data?.state as string) || '';
           const toolName = (event.data?.tool as string) || '';
           const jobUrl = (event.data?.jobUrl as string) || undefined;
+          const trackioSpaceId = (event.data?.trackioSpaceId as string) || undefined;
+          const trackioProject = (event.data?.trackioProject as string) || undefined;
 
           if (tcId.startsWith('plan_tool')) break;
 
           if (jobUrl && tcId) {
             useAgentStore.getState().setJobUrl(tcId, jobUrl);
+          }
+          if (trackioSpaceId && tcId) {
+            useAgentStore.getState().setTrackioDashboard(tcId, trackioSpaceId, trackioProject);
           }
           if (state === 'running' && toolName) {
             sideChannel.onToolRunning(toolName);

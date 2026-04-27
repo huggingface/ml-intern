@@ -221,6 +221,134 @@ function ResearchSteps({ steps }: { steps: string[] }) {
 }
 
 // ---------------------------------------------------------------------------
+// Trackio dashboard embed
+// ---------------------------------------------------------------------------
+
+/** HF Space embed subdomain: 'user/space_name' → 'user-space-name'. */
+function spaceIdToSubdomain(spaceId: string): string {
+  return spaceId
+    .toLowerCase()
+    .replace(/[/_.]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function buildTrackioEmbedUrl(spaceId: string, project?: string): string {
+  const params = new URLSearchParams({ sidebar: 'hidden', footer: 'false' });
+  if (project) params.set('project', project);
+  return `https://${spaceIdToSubdomain(spaceId)}.hf.space/?${params.toString()}`;
+}
+
+function buildTrackioPageUrl(spaceId: string, project?: string): string {
+  const qs = project ? `?${new URLSearchParams({ project }).toString()}` : '';
+  return `https://huggingface.co/spaces/${spaceId}${qs}`;
+}
+
+function TrackioEmbed({ spaceId, project }: { spaceId: string; project?: string }) {
+  const [expanded, setExpanded] = useState(true);
+  const embedUrl = useMemo(() => buildTrackioEmbedUrl(spaceId, project), [spaceId, project]);
+  const pageUrl = useMemo(() => buildTrackioPageUrl(spaceId, project), [spaceId, project]);
+  const label = project ? `${spaceId} · ${project}` : spaceId;
+
+  return (
+    <Box sx={{ pl: 4.5, pr: 1.5, pb: 1, pt: 0.25 }}>
+      <Box
+        sx={{
+          border: '1px solid var(--tool-border)',
+          borderRadius: '8px',
+          overflow: 'hidden',
+          bgcolor: 'var(--code-panel-bg)',
+        }}
+      >
+        <Stack
+          direction="row"
+          alignItems="center"
+          spacing={1}
+          onClick={(e) => e.stopPropagation()}
+          sx={{
+            px: 1.25,
+            py: 0.5,
+            borderBottom: expanded ? '1px solid var(--tool-border)' : 'none',
+          }}
+        >
+          <Typography
+            sx={{
+              fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
+              fontSize: '0.65rem',
+              fontWeight: 600,
+              color: 'var(--accent-yellow)',
+              letterSpacing: '0.04em',
+            }}
+          >
+            trackio
+          </Typography>
+          <Typography
+            sx={{
+              fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
+              fontSize: '0.65rem',
+              color: 'var(--muted-text)',
+              flex: 1,
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {label}
+          </Typography>
+          <Link
+            href={pageUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            sx={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 0.4,
+              color: 'var(--accent-yellow)',
+              fontSize: '0.65rem',
+              textDecoration: 'none',
+              '&:hover': { textDecoration: 'underline' },
+            }}
+          >
+            <LaunchIcon sx={{ fontSize: 11 }} />
+            Open
+          </Link>
+          <Button
+            size="small"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+            sx={{
+              textTransform: 'none',
+              minWidth: 'auto',
+              px: 0.75,
+              py: 0,
+              fontSize: '0.65rem',
+              color: 'var(--muted-text)',
+              '&:hover': { color: 'var(--text)', bgcolor: 'transparent' },
+            }}
+          >
+            {expanded ? 'Hide' : 'Show'}
+          </Button>
+        </Stack>
+        {expanded && (
+          <Box sx={{ width: '100%', height: 480, bgcolor: '#fff' }}>
+            <iframe
+              src={embedUrl}
+              title={`Trackio dashboard ${label}`}
+              loading="lazy"
+              style={{ border: 0, width: '100%', height: '100%', display: 'block' }}
+            />
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Hardware pricing ($/hr) — from HF Spaces & Jobs pricing
 // ---------------------------------------------------------------------------
 const HARDWARE_PRICING: Record<string, string> = {
@@ -517,7 +645,7 @@ function InlineApproval({
 const EMPTY_AGENTS: Record<string, ResearchAgentState> = {};
 
 export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProps) {
-  const { setPanel, lockPanel, getJobUrl, getEditedScript, setJobStatus, getJobStatus, setToolError, getToolError, setToolRejected, getToolRejected } = useAgentStore();
+  const { setPanel, lockPanel, getJobUrl, getEditedScript, setJobStatus, getJobStatus, getTrackioDashboard, setToolError, getToolError, setToolRejected, getToolRejected } = useAgentStore();
   const researchAgents = useAgentStore(s => {
     const activeId = s.activeSessionId;
     return (activeId && s.sessionStates[activeId]?.researchAgents) || EMPTY_AGENTS;
@@ -1062,6 +1190,18 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
               {tool.toolName === 'research' && !cancelled && state !== 'output-available' && state !== 'output-error' && state !== 'output-denied' && researchAgents[tool.toolCallId] && (
                 <ResearchSteps steps={researchAgents[tool.toolCallId].steps} />
               )}
+
+              {/* Trackio dashboard embed — shown for hf_jobs / sandbox_create runs that declared a trackio space */}
+              {(tool.toolName === 'hf_jobs' || tool.toolName === 'sandbox_create')
+                && !isPending
+                && !isRejected
+                && !cancelled
+                && (() => {
+                  const trackio = getTrackioDashboard(tool.toolCallId);
+                  return trackio
+                    ? <TrackioEmbed spaceId={trackio.spaceId} project={trackio.project} />
+                    : null;
+                })()}
 
               {/* Per-tool approval: undecided */}
               {isPending && !localDecision && !isSubmitting && (

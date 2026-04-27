@@ -19,6 +19,7 @@ from huggingface_hub import HfApi, SpaceHardware
 
 from agent.core.session import Event
 from agent.tools.sandbox_client import Sandbox
+from agent.tools.trackio_seed import ensure_trackio_dashboard
 
 
 def _looks_like_path(script: str) -> bool:
@@ -62,11 +63,36 @@ async def resolve_sandbox_script(
         return None, f"Failed to read {script} from sandbox: {e}"
 
 
+async def _seed_trackio_dashboard_safe(session: Any, space_id: str) -> None:
+    """Idempotently seed *space_id* with trackio dashboard files using the
+    session's HF token. Logs progress, swallows errors — a failed seed should
+    not block sandbox creation."""
+    if not session or not getattr(session, "hf_token", None):
+        return
+    loop = asyncio.get_running_loop()
+
+    def _log(msg: str) -> None:
+        loop.call_soon_threadsafe(
+            session.event_queue.put_nowait,
+            Event(event_type="tool_log", data={"tool": "sandbox_create", "log": msg}),
+        )
+
+    try:
+        await asyncio.to_thread(
+            ensure_trackio_dashboard, space_id, session.hf_token, _log
+        )
+    except Exception as e:
+        _log(f"trackio dashboard seed failed: {e}")
+
+
 # ── Tool name mapping (short agent names → Sandbox client names) ──────
 
 
 async def _ensure_sandbox(
-    session: Any, hardware: str = "cpu-basic", **create_kwargs
+    session: Any,
+    hardware: str = "cpu-basic",
+    extra_secrets: dict[str, str] | None = None,
+    **create_kwargs,
 ) -> tuple[Sandbox | None, str | None]:
     """
     Ensure a sandbox exists on the session. Auto-creates with given hardware if needed.
@@ -120,11 +146,15 @@ async def _ensure_sandbox(
 
     watcher_task = asyncio.create_task(_watch_cancel())
 
+    secrets: dict[str, str] = {"HF_TOKEN": token}
+    if extra_secrets:
+        secrets.update({k: v for k, v in extra_secrets.items() if v})
+
     kwargs = {
         "owner": owner,
         "hardware": hardware,
         "token": token,
-        "secrets": {"HF_TOKEN": token},
+        "secrets": secrets,
         "log": _log,
         "cancel_event": cancel_flag,
         **create_kwargs,
@@ -188,6 +218,9 @@ SANDBOX_CREATE_TOOL_SPEC = {
         "fp32 ≈ 4 bytes/param, plus ~20% overhead for optimizer states during training.\n"
         "Common picks: t4-small (16GB VRAM, fits ≤1-3B), a10g-small (24GB, ≤7B), a100-large (80GB, ≤30B). "
         "If the model won't fit, pick larger hardware upfront — OOM on a sandbox wastes time.\n\n"
+        "If you intend to run a training script in this sandbox that uses report_to='trackio', "
+        "pass `trackio_space_id` (e.g. '<username>/mlintern-<8char>') and `trackio_project` so they "
+        "are set as TRACKIO_SPACE_ID/TRACKIO_PROJECT secrets in the sandbox and the UI can embed the live dashboard.\n\n"
         "Hardware: " + ", ".join([e.value for e in SpaceHardware]) + ".\n"
     ),
     "parameters": {
@@ -204,16 +237,49 @@ SANDBOX_CREATE_TOOL_SPEC = {
                 "type": "boolean",
                 "description": "If true, create a private Space",
             },
+            "trackio_space_id": {
+                "type": "string",
+                "description": (
+                    "Optional. The HF Space hosting the trackio dashboard for runs in this sandbox "
+                    "(e.g. '<username>/mlintern-<8char>', under YOUR HF namespace). Injected as "
+                    "TRACKIO_SPACE_ID secret and surfaced to the UI. The Space is auto-created and "
+                    "seeded with the trackio dashboard — DO NOT pre-create it via hf_repo_git, "
+                    "that produces an empty Space that breaks the embed."
+                ),
+            },
+            "trackio_project": {
+                "type": "string",
+                "description": (
+                    "Optional. The trackio project name. Injected as TRACKIO_PROJECT secret and "
+                    "used by the UI to filter the embedded dashboard to this project."
+                ),
+            },
         },
     },
 }
 
 
 async def sandbox_create_handler(
-    args: dict[str, Any], session: Any = None
+    args: dict[str, Any], session: Any = None, tool_call_id: str | None = None
 ) -> tuple[str, bool]:
     """Handle sandbox_create tool calls."""
     hardware = args.get("hardware", "cpu-basic")
+    trackio_space_id = args.get("trackio_space_id") or None
+    trackio_project = args.get("trackio_project") or None
+
+    async def _emit_trackio_state(sb: Sandbox) -> None:
+        """Tell the frontend which trackio dashboard to embed for this sandbox."""
+        if not (session and tool_call_id and trackio_space_id):
+            return
+        data: dict[str, Any] = {
+            "tool_call_id": tool_call_id,
+            "tool": "sandbox_create",
+            "state": "running",
+            "trackioSpaceId": trackio_space_id,
+        }
+        if trackio_project:
+            data["trackioProject"] = trackio_project
+        await session.send_event(Event(event_type="tool_state_change", data=data))
 
     # If sandbox already exists, return its info
     if session and getattr(session, "sandbox", None):
@@ -226,6 +292,7 @@ async def sandbox_create_handler(
                 "Hardware cannot be changed by calling sandbox_create again. "
                 "Delete the existing sandbox first if you need a different tier."
             )
+        await _emit_trackio_state(sb)
         return (
             f"Sandbox already active: {sb.space_id}\n"
             f"URL: {sb.url}\n"
@@ -233,17 +300,31 @@ async def sandbox_create_handler(
             f"Use bash/read/write/edit to interact with it."
         ), True
 
-    create_kwargs = {}
+    create_kwargs: dict[str, Any] = {}
     if "private" in args:
         create_kwargs["private"] = args["private"]
 
+    extra_secrets: dict[str, str] = {}
+    if trackio_space_id:
+        extra_secrets["TRACKIO_SPACE_ID"] = trackio_space_id
+        await _seed_trackio_dashboard_safe(session, trackio_space_id)
+    if trackio_project:
+        extra_secrets["TRACKIO_PROJECT"] = trackio_project
+
     try:
-        sb, error = await _ensure_sandbox(session, hardware=hardware, **create_kwargs)
+        sb, error = await _ensure_sandbox(
+            session,
+            hardware=hardware,
+            extra_secrets=extra_secrets or None,
+            **create_kwargs,
+        )
     except Exception as e:
         return f"Failed to create sandbox: {e}", False
 
     if error:
         return error, False
+
+    await _emit_trackio_state(sb)
 
     return (
         f"Sandbox created: {sb.space_id}\n"

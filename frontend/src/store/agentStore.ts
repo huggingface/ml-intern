@@ -147,6 +147,11 @@ interface AgentStore {
   // Job statuses (tool_call_id -> job status) for HF jobs
   jobStatuses: Record<string, string>;
 
+  // Trackio dashboard config per tool call (tool_call_id -> {spaceId, project?})
+  // Set by hf_jobs / sandbox_create tools when the agent declares trackio_space_id;
+  // the UI uses it to embed the live dashboard via an iframe.
+  trackioDashboards: Record<string, { spaceId: string; project?: string }>;
+
   // Tool error states (tool_call_id -> true if errored) - persisted across renders
   toolErrors: Record<string, boolean>;
 
@@ -199,6 +204,9 @@ interface AgentStore {
 
   setJobStatus: (toolCallId: string, status: string) => void;
   getJobStatus: (toolCallId: string) => string | undefined;
+
+  setTrackioDashboard: (toolCallId: string, spaceId: string, project?: string) => void;
+  getTrackioDashboard: (toolCallId: string) => { spaceId: string; project?: string } | undefined;
 
   setToolError: (toolCallId: string, hasError: boolean) => void;
   getToolError: (toolCallId: string) => boolean | undefined;
@@ -287,6 +295,7 @@ export const useAgentStore = create<AgentStore>()((set, get) => ({
   approvalNamespaces: {},
   jobUrls: {},
   jobStatuses: {},
+  trackioDashboards: {},
   toolErrors: loadToolErrors(),
   rejectedTools: loadRejectedTools(),
 
@@ -484,6 +493,26 @@ export const useAgentStore = create<AgentStore>()((set, get) => ({
   },
 
   getJobStatus: (toolCallId) => get().jobStatuses[toolCallId],
+
+  // ── Trackio Dashboards ──────────────────────────────────────────────
+
+  setTrackioDashboard: (toolCallId, spaceId, project) => {
+    set((state) => {
+      const existing = state.trackioDashboards[toolCallId];
+      // Don't churn the object if nothing changed (avoids extra renders).
+      if (existing && existing.spaceId === spaceId && existing.project === project) {
+        return {};
+      }
+      return {
+        trackioDashboards: {
+          ...state.trackioDashboards,
+          [toolCallId]: { spaceId, ...(project ? { project } : {}) },
+        },
+      };
+    });
+  },
+
+  getTrackioDashboard: (toolCallId) => get().trackioDashboards[toolCallId],
 
   // ── Tool Errors ─────────────────────────────────────────────────────
 
