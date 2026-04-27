@@ -129,7 +129,7 @@ def check_for_doom_loop(messages: list[Message]) -> str | None:
     # Check for identical consecutive calls
     tool_name = detect_identical_consecutive(signatures, threshold=3)
     if tool_name:
-        logger.warning("Doom loop detected: %d+ identical consecutive calls to '%s'", 3, tool_name)
+        logger.info("Repetitive tool pattern: %d+ identical consecutive calls to '%s' — redirecting agent", 3, tool_name)
         return (
             f"[SYSTEM: DOOM LOOP DETECTED] You have called '{tool_name}' with the same "
             f"arguments multiple times in a row, getting the same result each time. "
@@ -143,7 +143,7 @@ def check_for_doom_loop(messages: list[Message]) -> str | None:
     pattern = detect_repeating_sequence(signatures)
     if pattern:
         pattern_desc = " → ".join(s.name for s in pattern)
-        logger.warning("Doom loop detected: repeating sequence [%s]", pattern_desc)
+        logger.info("Repetitive tool pattern: repeating sequence [%s] — redirecting agent", pattern_desc)
         return (
             f"[SYSTEM: DOOM LOOP DETECTED] You are stuck in a repeating cycle of tool calls: "
             f"[{pattern_desc}]. This pattern has repeated multiple times without progress. "
