@@ -27,6 +27,8 @@ dependencies = [
     "httpx>=0.27.0",
     "websockets>=13.0",
     "apscheduler>=3.10,<4",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
 ]
 
 [project.optional-dependencies]
