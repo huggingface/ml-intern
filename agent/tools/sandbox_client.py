@@ -99,8 +99,8 @@ CMD ["python", "sandbox_server.py"]
 
 _SANDBOX_SERVER = '''\
 """Minimal FastAPI server for sandbox operations."""
-import os, subprocess, pathlib, signal, threading, re, tempfile
-from fastapi import FastAPI
+import os, subprocess, pathlib, signal, threading, re, tempfile, hmac
+from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel
 from typing import Optional
 import uvicorn
@@ -154,7 +154,19 @@ def _atomic_write(path: pathlib.Path, content: str):
             except OSError:
                 pass
 
-app = FastAPI()
+_AUTH_TOKEN = os.environ.get("HF_TOKEN", "")
+
+def require_auth(authorization: Optional[str] = Header(None)):
+    # Fail closed: if the sandbox secret isn't set, every request 401s
+    # rather than silently becoming open again.
+    if not _AUTH_TOKEN:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if not hmac.compare_digest(authorization[len("Bearer "):], _AUTH_TOKEN):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+app = FastAPI(dependencies=[Depends(require_auth)])
 
 # Track active bash processes so they can be killed on cancel
 _active_procs = {}  # pid -> subprocess.Popen
@@ -516,7 +528,7 @@ class Sandbox:
         name: str | None = None,
         template: str = TEMPLATE_SPACE,
         hardware: str = "cpu-basic",
-        private: bool = False,
+        private: bool = True,
         sleep_time: int | None = None,
         token: str | None = None,
         secrets: dict[str, str] | None = None,
@@ -670,6 +682,17 @@ class Sandbox:
                 if resp.status_code == 200:
                     log(f"API is responsive at {self._base_url}")
                     return
+                # A reachable server that rejects auth will keep returning
+                # 401/403 for the full timeout — fail fast with a clear message
+                # instead of looping until TimeoutError hides the real cause.
+                if resp.status_code in (401, 403):
+                    raise RuntimeError(
+                        f"Sandbox API at {self._base_url} rejected auth "
+                        f"(HTTP {resp.status_code}). Check that HF_TOKEN is set "
+                        f"as a Space secret and matches the client token."
+                    )
+            except RuntimeError:
+                raise
             except Exception as e:
                 last_err = e
             time.sleep(3)

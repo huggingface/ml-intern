@@ -202,7 +202,7 @@ SANDBOX_CREATE_TOOL_SPEC = {
             },
             "private": {
                 "type": "boolean",
-                "description": "If true, create a private Space",
+                "description": "Whether the Space is private (default: true). Set false to create a public Space.",
             },
         },
     },
