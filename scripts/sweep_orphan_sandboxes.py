@@ -84,17 +84,19 @@ def log(record: dict) -> None:
 
 
 def is_sandbox_fork(space) -> bool:
-    """Filter: name pattern + originRepo == burtenshaw/sandbox."""
-    if not SANDBOX_NAME_RE.match(space.id):
-        return False
-    # ``cardData`` carries ``duplicated_from`` for HF Spaces duplicated via UI/API.
-    # ``originRepo`` is the underlying field; both names appear depending on
-    # the API version. We match either.
-    card = getattr(space, "cardData", None) or {}
-    origin = card.get("duplicated_from") or getattr(space, "originRepo", None)
-    if isinstance(origin, dict):
-        origin = origin.get("name") or origin.get("id")
-    return origin == TEMPLATE_REPO
+    """Filter: matches the ml-intern sandbox naming pattern.
+
+    NOTE: We initially tried filtering on ``duplicated_from == burtenshaw/sandbox``
+    too, for extra safety. That doesn't work — the HF REST API does not expose
+    ``duplicated_from`` on ``SpaceInfo`` (verified against ``huggingface-hub``
+    1.11+ and direct ``GET /api/spaces/{id}``: the field is None). The origin
+    repo lives in MongoDB but isn't surfaced. So we rely on the naming pattern
+    alone, which is specific enough: ``Sandbox.create()`` is the sole producer
+    of ``<owner>/sandbox-<8 lowercase hex>``, and that pattern is unlikely to
+    collide with user-created Spaces in practice. The ``--dry-run`` default
+    is the user-facing safety net for the rare false-positive.
+    """
+    return bool(SANDBOX_NAME_RE.match(space.id))
 
 
 def main() -> int:
@@ -145,6 +147,7 @@ def main() -> int:
     deleted = 0
     failed = 0
     skipped_too_recent = 0
+    skipped_capped = 0
 
     for space in candidates:
         scanned += 1
@@ -165,10 +168,13 @@ def main() -> int:
         if not args.apply:
             continue
 
+        # When we hit the deletion cap, keep scanning so the final ``matched``
+        # count reflects the *true* orphan size — not just what was scanned
+        # before we stopped deleting. Operators planning multi-pass cleanups
+        # need an accurate denominator to know when they're done.
         if deleted >= args.max_deletes:
-            log({"level": "warn", "msg": "max_deletes_reached",
-                 "deleted": deleted, "remaining": "stopped"})
-            break
+            skipped_capped += 1
+            continue
 
         try:
             api.delete_repo(repo_id=space.id, repo_type="space", token=token)
@@ -188,7 +194,9 @@ def main() -> int:
     log({"level": "info", "msg": "sweep_end",
          "scanned": scanned, "matched": matched,
          "skipped_too_recent": skipped_too_recent,
+         "skipped_capped": skipped_capped,
          "deleted": deleted, "failed": failed,
+         "capped": skipped_capped > 0,
          "apply": args.apply})
 
     return 0 if failed == 0 else 2
