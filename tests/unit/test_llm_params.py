@@ -153,3 +153,16 @@ def test_resolve_generic_local_params_trims_trailing_slash(monkeypatch):
 def test_local_params_reject_reasoning_effort_in_strict_mode():
     with pytest.raises(UnsupportedEffortError, match="reasoning_effort"):
         _resolve_llm_params("ollama/llama3.1", reasoning_effort="high", strict=True)
+
+
+def test_local_params_drop_reasoning_effort_with_warning_in_non_strict_mode(caplog):
+    params = _resolve_llm_params(
+        "ollama/llama3.1",
+        reasoning_effort="high",
+        strict=False,
+    )
+
+    assert params["model"] == "openai/llama3.1"
+    assert "reasoning_effort" not in params
+    assert "extra_body" not in params
+    assert "don't accept reasoning_effort" in caplog.text

@@ -82,9 +82,7 @@ def is_custom_local_model_id(model_id: str) -> bool:
         return False
     if not isinstance(model_id, str):
         return False
-    if not model_id or model_id != model_id.strip() or any(
-        char.isspace() for char in model_id
-    ):
+    if not model_id or any(char.isspace() for char in model_id):
         return False
     return is_local_model_id(model_id)
 

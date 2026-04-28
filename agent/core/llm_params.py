@@ -5,9 +5,12 @@ can import it without pulling in the whole agent loop / tool router and
 creating circular imports.
 """
 
+import logging
 import os
 
 from agent.core.hf_tokens import get_hf_bill_to, resolve_hf_router_token
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_hf_router_token(session_hf_token: str | None = None) -> str | None:
@@ -93,10 +96,16 @@ class UnsupportedEffortError(ValueError):
 
 
 def _raise_for_local_effort(reasoning_effort: str | None, strict: bool) -> None:
-    if reasoning_effort and strict:
-        raise UnsupportedEffortError(
-            "Local OpenAI-compatible endpoints don't accept reasoning_effort"
-        )
+    if not reasoning_effort:
+        return
+    message = "Local OpenAI-compatible endpoints don't accept reasoning_effort"
+    if strict:
+        raise UnsupportedEffortError(message)
+    logger.warning(
+        "%s; dropping reasoning_effort=%r for this local model call",
+        message,
+        reasoning_effort,
+    )
 
 
 def _resolve_llm_params(

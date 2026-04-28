@@ -149,6 +149,8 @@ LLAMACPP_BASE_URL=http://localhost:8001
 LOCAL_LLM_BASE_URL=http://localhost:8000
 ```
 
+Keep these endpoint variables server-controlled. Do not expose them as user-editable web/API inputs; they determine where the backend sends LLM traffic.
+
 For example, with Ollama:
 
 ```bash
