@@ -16,6 +16,7 @@ glues it to CLI output + session state.
 from __future__ import annotations
 
 from agent.core.effort_probe import ProbeInconclusive, probe_effort
+from ml_intern.local_models import LOCAL_MODEL_PREFIXES, is_local_model_id
 
 
 # Suggested models shown by `/model` (not a gate). Users can paste any HF
@@ -44,13 +45,18 @@ def is_valid_model_id(model_id: str) -> bool:
     Accepts:
       • anthropic/<model>
       • openai/<model>
+      • ollama/<model>, vllm/<model>, llamacpp/<model>, local://<model>
       • <org>/<model>[:<tag>]            (HF router; tag = provider or policy)
       • huggingface/<org>/<model>[:<tag>] (same, accepts legacy prefix)
 
     Actual availability is verified against the HF router catalog on
     switch, and by the provider on the probe's ping call.
     """
-    if not model_id or "/" not in model_id:
+    if not model_id:
+        return False
+    if is_local_model_id(model_id):
+        return True
+    if "/" not in model_id:
         return False
     head = model_id.split(":", 1)[0]
     parts = head.split("/")
@@ -66,7 +72,7 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
     Anthropic / OpenAI ids return ``True`` without printing anything —
     the probe below covers "does this model exist".
     """
-    if model_id.startswith(("anthropic/", "openai/")):
+    if model_id.startswith(("anthropic/", "openai/", *LOCAL_MODEL_PREFIXES)):
         return True
 
     from agent.core import hf_router_catalog as cat
@@ -139,7 +145,9 @@ def print_model_listing(config, console) -> None:
     console.print(
         "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M2.7').\n"
         "Add ':fastest', ':cheapest', ':preferred', or ':<provider>' to override routing.\n"
-        "Use 'anthropic/<model>' or 'openai/<model>' for direct API access.[/dim]"
+        "Use 'anthropic/<model>' or 'openai/<model>' for direct API access.\n"
+        "Use 'ollama/<model>', 'vllm/<model>', 'llamacpp/<model>', or 'local://<model>' "
+        "for local OpenAI-compatible endpoints.[/dim]"
     )
 
 

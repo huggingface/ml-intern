@@ -50,6 +50,12 @@ all = [
     "ml-intern[eval,dev]",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.2.0",
+]
+
 [project.scripts]
 ml-intern = "agent.main:cli"
 
@@ -62,7 +68,7 @@ build-backend = "setuptools.build_meta"
 # runtime (resolves to <site-packages>/configs/cli_agent_config.json).
 # Without it, `uv tool install` / `pip install` produce a broken install
 # that imports fine but crashes at startup with FileNotFoundError.
-include = ["agent*", "configs"]
+include = ["agent*", "configs", "ml_intern*"]
 
 [tool.setuptools.package-data]
 configs = ["*.json"]

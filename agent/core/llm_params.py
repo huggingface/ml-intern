@@ -5,7 +5,12 @@ can import it without pulling in the whole agent loop / tool router and
 creating circular imports.
 """
 
+import logging
+import os
+
 from agent.core.hf_tokens import get_hf_bill_to, resolve_hf_router_token
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_hf_router_token(session_hf_token: str | None = None) -> str | None:
@@ -79,6 +84,7 @@ _patch_litellm_effort_validation()
 _ANTHROPIC_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _OPENAI_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
 _HF_EFFORTS = {"low", "medium", "high"}
+_LOCAL_DEFAULT_API_KEY = "sk-no-key-required"
 
 
 class UnsupportedEffortError(ValueError):
@@ -87,6 +93,19 @@ class UnsupportedEffortError(ValueError):
     Raised synchronously before any network call so the probe cascade can
     skip levels the provider can't accept (e.g. ``max`` on HF router).
     """
+
+
+def _raise_for_local_effort(reasoning_effort: str | None, strict: bool) -> None:
+    if not reasoning_effort:
+        return
+    message = "Local OpenAI-compatible endpoints don't accept reasoning_effort"
+    if strict:
+        raise UnsupportedEffortError(message)
+    logger.warning(
+        "%s; dropping reasoning_effort=%r for this local model call",
+        message,
+        reasoning_effort,
+    )
 
 
 def _resolve_llm_params(
@@ -179,6 +198,46 @@ def _resolve_llm_params(
             else:
                 params["reasoning_effort"] = reasoning_effort
         return params
+
+    if model_name.startswith("ollama/"):
+        _raise_for_local_effort(reasoning_effort, strict)
+        local_model = model_name.split("/", 1)[1]
+        api_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        return {
+            "model": f"openai/{local_model}",
+            "api_base": f"{api_base.rstrip('/')}/v1",
+            "api_key": os.environ.get("OLLAMA_API_KEY", _LOCAL_DEFAULT_API_KEY),
+        }
+
+    if model_name.startswith("vllm/"):
+        _raise_for_local_effort(reasoning_effort, strict)
+        local_model = model_name.split("/", 1)[1]
+        api_base = os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
+        return {
+            "model": f"openai/{local_model}",
+            "api_base": f"{api_base.rstrip('/')}/v1",
+            "api_key": os.environ.get("VLLM_API_KEY", _LOCAL_DEFAULT_API_KEY),
+        }
+
+    if model_name.startswith("llamacpp/"):
+        _raise_for_local_effort(reasoning_effort, strict)
+        local_model = model_name.split("/", 1)[1]
+        api_base = os.environ.get("LLAMACPP_BASE_URL", "http://localhost:8001")
+        return {
+            "model": f"openai/{local_model}",
+            "api_base": f"{api_base.rstrip('/')}/v1",
+            "api_key": os.environ.get("LLAMACPP_API_KEY", _LOCAL_DEFAULT_API_KEY),
+        }
+
+    if model_name.startswith("local://"):
+        _raise_for_local_effort(reasoning_effort, strict)
+        local_model = model_name.split("://", 1)[1]
+        api_base = os.environ.get("LOCAL_LLM_BASE_URL", "http://localhost:8000")
+        return {
+            "model": f"openai/{local_model}",
+            "api_base": f"{api_base.rstrip('/')}/v1",
+            "api_key": os.environ.get("LOCAL_LLM_API_KEY", _LOCAL_DEFAULT_API_KEY),
+        }
 
     hf_model = model_name.removeprefix("huggingface/")
     api_key = _resolve_hf_router_token(session_hf_token)

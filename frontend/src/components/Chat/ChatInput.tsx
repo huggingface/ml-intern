@@ -1,8 +1,9 @@
 import { useState, useCallback, useEffect, useRef, KeyboardEvent } from 'react';
-import { Box, TextField, IconButton, CircularProgress, Typography, Menu, MenuItem, ListItemIcon, ListItemText, Chip } from '@mui/material';
+import { Box, TextField, IconButton, CircularProgress, Typography, Menu, MenuItem, ListItemIcon, ListItemText, Chip, Divider, Button } from '@mui/material';
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
 import StopIcon from '@mui/icons-material/Stop';
+import MemoryIcon from '@mui/icons-material/Memory';
 import { apiFetch } from '@/utils/api';
 import { useUserQuota } from '@/hooks/useUserQuota';
 import ClaudeCapDialog from '@/components/ClaudeCapDialog';
@@ -17,6 +18,15 @@ interface ModelOption {
   description: string;
   modelPath: string;
   avatarUrl: string;
+  provider?: string;
+  recommended?: boolean;
+}
+
+interface BackendModel {
+  id: string;
+  label: string;
+  provider: string;
+  tier?: string;
   recommended?: boolean;
 }
 
@@ -25,42 +35,81 @@ const getHfAvatarUrl = (modelId: string) => {
   return `https://huggingface.co/api/avatars/${org}`;
 };
 
-const MODEL_OPTIONS: ModelOption[] = [
+const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   {
-    id: 'kimi-k2.6',
+    id: 'moonshotai/Kimi-K2.6',
     name: 'Kimi K2.6',
     description: 'Novita',
     modelPath: 'moonshotai/Kimi-K2.6',
     avatarUrl: getHfAvatarUrl('moonshotai/Kimi-K2.6'),
+    provider: 'huggingface',
     recommended: true,
   },
   {
-    id: 'claude-opus',
+    id: 'bedrock/us.anthropic.claude-opus-4-6-v1',
     name: 'Claude Opus 4.6',
     description: 'Anthropic',
     modelPath: CLAUDE_MODEL_PATH,
     avatarUrl: 'https://huggingface.co/api/avatars/Anthropic',
+    provider: 'anthropic',
     recommended: true,
   },
   {
-    id: 'minimax-m2.7',
+    id: 'MiniMaxAI/MiniMax-M2.7',
     name: 'MiniMax M2.7',
     description: 'Novita',
     modelPath: 'MiniMaxAI/MiniMax-M2.7',
     avatarUrl: getHfAvatarUrl('MiniMaxAI/MiniMax-M2.7'),
+    provider: 'huggingface',
   },
   {
-    id: 'glm-5.1',
+    id: 'zai-org/GLM-5.1',
     name: 'GLM 5.1',
     description: 'Together',
     modelPath: 'zai-org/GLM-5.1',
     avatarUrl: getHfAvatarUrl('zai-org/GLM-5.1'),
+    provider: 'huggingface',
   },
 ];
 
-const findModelByPath = (path: string): ModelOption | undefined => {
-  return MODEL_OPTIONS.find(m => m.modelPath === path || path?.includes(m.id));
+const providerDescription = (model: BackendModel): string => {
+  if (model.provider === 'local') return 'Local';
+  if (model.provider === 'anthropic') return 'Anthropic';
+  return model.provider === 'huggingface' ? 'Hugging Face' : model.provider;
 };
+
+const modelOptionFromBackend = (model: BackendModel): ModelOption => ({
+  id: model.id,
+  name: model.label,
+  description: providerDescription(model),
+  modelPath: model.id,
+  avatarUrl: model.provider === 'local' ? '' : getHfAvatarUrl(model.id),
+  provider: model.provider,
+  recommended: model.recommended,
+});
+
+const LOCAL_MODEL_PREFIXES = ['ollama/', 'vllm/', 'llamacpp/', 'local://'];
+
+const findModelByPath = (options: ModelOption[], path: string): ModelOption | undefined => {
+  return options.find(m => m.modelPath === path || m.id === path);
+};
+
+const isLocalModelPath = (path: string) => LOCAL_MODEL_PREFIXES.some(prefix => path.startsWith(prefix));
+
+const labelFromLocalPath = (path: string) => {
+  if (path.startsWith('local://')) return path.slice('local://'.length);
+  const prefix = LOCAL_MODEL_PREFIXES.find(p => path.startsWith(p));
+  return prefix ? path.slice(prefix.length) : path;
+};
+
+const customLocalModelOption = (path: string): ModelOption => ({
+  id: path,
+  name: labelFromLocalPath(path),
+  description: 'Custom local path',
+  modelPath: path,
+  avatarUrl: '',
+  provider: 'local',
+});
 
 interface ChatInputProps {
   sessionId?: string;
@@ -74,13 +123,44 @@ interface ChatInputProps {
 }
 
 const isClaudeModel = (m: ModelOption) => isClaudePath(m.modelPath);
-const firstFreeModel = () => MODEL_OPTIONS.find(m => !isClaudeModel(m)) ?? MODEL_OPTIONS[0];
+const isLocalModel = (m: ModelOption) => m.provider === 'local' || isLocalModelPath(m.modelPath);
+
+function ModelAvatar({ model, size }: { model: ModelOption; size: number }) {
+  if (isLocalModel(model)) {
+    return (
+      <Box
+        sx={{
+          width: size,
+          height: size,
+          borderRadius: '4px',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          bgcolor: 'rgba(255,255,255,0.08)',
+          color: 'var(--text)',
+        }}
+      >
+        <MemoryIcon sx={{ fontSize: Math.max(14, size - 6) }} />
+      </Box>
+    );
+  }
+  return (
+    <img
+      src={model.avatarUrl}
+      alt={model.name}
+      style={{ height: size, width: size, objectFit: 'contain', borderRadius: '4px' }}
+    />
+  );
+}
 
 export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJobs, onContinueBlockedJobsWithNamespace, isProcessing = false, disabled = false, placeholder = 'Ask anything...' }: ChatInputProps) {
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const [selectedModelId, setSelectedModelId] = useState<string>(MODEL_OPTIONS[0].id);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>(DEFAULT_MODEL_OPTIONS);
+  const [selectedModelId, setSelectedModelId] = useState<string>(DEFAULT_MODEL_OPTIONS[0].id);
   const [modelAnchorEl, setModelAnchorEl] = useState<null | HTMLElement>(null);
+  const [customModelPath, setCustomModelPath] = useState('');
+  const [customModelError, setCustomModelError] = useState('');
   const { quota, refresh: refreshQuota } = useUserQuota();
   // The daily-cap dialog is triggered from two places: (a) a 429 returned
   // from the chat transport when the user tries to send on Opus over cap —
@@ -93,6 +173,26 @@ export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJ
   const setJobsUpgradeRequired = useAgentStore((s) => s.setJobsUpgradeRequired);
   const lastSentRef = useRef<string>('');
 
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/config/model')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !Array.isArray(data?.available)) return;
+        const nextOptions = data.available.map(modelOptionFromBackend);
+        if (nextOptions.length === 0) return;
+        setModelOptions(nextOptions);
+        const current = typeof data.current === 'string'
+          ? findModelByPath(nextOptions, data.current)
+          : undefined;
+        setSelectedModelId((prev) => (
+          current?.id ?? (nextOptions.some((model: ModelOption) => model.id === prev) ? prev : nextOptions[0].id)
+        ));
+      })
+      .catch(() => { /* keep bundled defaults */ });
+    return () => { cancelled = true; };
+  }, []);
+
   // Model is per-session: fetch this tab's current model every time the
   // session changes. Other tabs keep their own selections independently.
   useEffect(() => {
@@ -103,15 +203,23 @@ export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJ
       .then((data) => {
         if (cancelled) return;
         if (data?.model) {
-          const model = findModelByPath(data.model);
+          let model = findModelByPath(modelOptions, data.model);
+          if (!model && isLocalModelPath(data.model)) {
+            model = customLocalModelOption(data.model);
+            setModelOptions((prev) => (
+              findModelByPath(prev, data.model) ? prev : [...prev, model as ModelOption]
+            ));
+          }
           if (model) setSelectedModelId(model.id);
         }
       })
       .catch(() => { /* ignore */ });
     return () => { cancelled = true; };
-  }, [sessionId]);
+  }, [sessionId, modelOptions]);
 
-  const selectedModel = MODEL_OPTIONS.find(m => m.id === selectedModelId) || MODEL_OPTIONS[0];
+  const selectedModel = modelOptions.find(m => m.id === selectedModelId) || modelOptions[0];
+  const customLocalEnabled = modelOptions.some(isLocalModel);
+  const firstFreeModel = () => modelOptions.find(m => !isClaudeModel(m)) ?? modelOptions[0];
 
   // Auto-focus the textarea when the session becomes ready
   useEffect(() => {
@@ -173,6 +281,41 @@ export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJ
     } catch { /* ignore */ }
   };
 
+  const handleUseCustomModel = async () => {
+    const path = customModelPath.trim();
+    if (!path || !sessionId) return;
+    setCustomModelError('');
+    const model = customLocalModelOption(path);
+    try {
+      const res = await apiFetch(`/api/session/${sessionId}/model`, {
+        method: 'POST',
+        body: JSON.stringify({ model: model.modelPath }),
+      });
+      if (!res.ok) {
+        let message = `Unable to use ${path}`;
+        try {
+          const data = await res.json();
+          if (typeof data?.detail === 'string') {
+            message = data.detail;
+          } else if (typeof data?.detail?.message === 'string') {
+            message = data.detail.message;
+          }
+        } catch { /* keep fallback */ }
+        setCustomModelError(message);
+        return;
+      }
+      setModelOptions((prev) => (
+        findModelByPath(prev, model.modelPath) ? prev : [...prev, model]
+      ));
+      setSelectedModelId(model.id);
+      setCustomModelPath('');
+      setCustomModelError('');
+      handleModelClose();
+    } catch {
+      setCustomModelError('Unable to switch to that local model.');
+    }
+  };
+
   // Dialog close: just clear the flag. The typed text is already restored.
   const handleCapDialogClose = useCallback(() => {
     setClaudeQuotaExhausted(false);
@@ -183,7 +326,7 @@ export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJ
   const handleUseFreeModel = useCallback(async () => {
     setClaudeQuotaExhausted(false);
     if (!sessionId) return;
-    const free = MODEL_OPTIONS.find(m => m.modelPath === FIRST_FREE_MODEL_PATH)
+    const free = modelOptions.find(m => m.modelPath === FIRST_FREE_MODEL_PATH)
       ?? firstFreeModel();
     try {
       const res = await apiFetch(`/api/session/${sessionId}/model`, {
@@ -200,7 +343,7 @@ export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJ
         }
       }
     } catch { /* ignore */ }
-  }, [sessionId, onSend, setClaudeQuotaExhausted]);
+  }, [sessionId, onSend, setClaudeQuotaExhausted, modelOptions]);
 
   const handleClaudeUpgradeClick = useCallback(async () => {
     if (!sessionId) return;
@@ -377,11 +520,7 @@ export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJ
           <Typography variant="caption" sx={{ fontSize: '10px', color: 'var(--muted-text)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 500 }}>
             powered by
           </Typography>
-          <img
-            src={selectedModel.avatarUrl}
-            alt={selectedModel.name}
-            style={{ height: '14px', width: '14px', objectFit: 'contain', borderRadius: '2px' }}
-          />
+          <ModelAvatar model={selectedModel} size={14} />
           <Typography variant="caption" sx={{ fontSize: '10px', color: 'var(--text)', fontWeight: 600, letterSpacing: '0.02em' }}>
             {selectedModel.name}
           </Typography>
@@ -412,7 +551,7 @@ export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJ
             }
           }}
         >
-          {MODEL_OPTIONS.map((model) => (
+          {modelOptions.map((model) => (
             <MenuItem
               key={model.id}
               onClick={() => handleSelectModel(model)}
@@ -425,11 +564,7 @@ export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJ
               }}
             >
               <ListItemIcon>
-                <img
-                  src={model.avatarUrl}
-                  alt={model.name}
-                  style={{ width: 24, height: 24, borderRadius: '4px', objectFit: 'cover' }}
-                />
+                <ModelAvatar model={model} size={24} />
               </ListItemIcon>
               <ListItemText
                 primary={
@@ -470,6 +605,82 @@ export default function ChatInput({ sessionId, onSend, onStop, onDeclineBlockedJ
               />
             </MenuItem>
           ))}
+          {customLocalEnabled && (
+            <>
+              <Divider sx={{ borderColor: 'var(--divider)', my: 0.5 }} />
+              <Box
+                sx={{ px: 1.5, py: 1.25, width: 360, maxWidth: 'calc(100vw - 32px)' }}
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                <Typography
+                  variant="caption"
+                  sx={{
+                    display: 'block',
+                    mb: 0.75,
+                    color: 'var(--muted-text)',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  Custom local model path
+                </Typography>
+                <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                  <TextField
+                    size="small"
+                    value={customModelPath}
+                    onChange={(e) => {
+                      setCustomModelPath(e.target.value);
+                      setCustomModelError('');
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleUseCustomModel();
+                      }
+                    }}
+                    placeholder="ollama/qwen2.5-coder"
+                    fullWidth
+                    variant="outlined"
+                    error={!!customModelError}
+                    helperText={customModelError || ' '}
+                    FormHelperTextProps={{
+                      sx: {
+                        mx: 0,
+                        color: customModelError ? 'var(--accent-red)' : 'transparent',
+                        fontSize: '11px',
+                      },
+                    }}
+                    sx={{
+                      '& .MuiInputBase-root': {
+                        color: 'var(--text)',
+                        bgcolor: 'rgba(255,255,255,0.04)',
+                      },
+                      '& .MuiOutlinedInput-notchedOutline': {
+                        borderColor: 'var(--divider)',
+                      },
+                    }}
+                  />
+                  <Button
+                    variant="contained"
+                    size="small"
+                    disabled={!customModelPath.trim()}
+                    onClick={handleUseCustomModel}
+                    sx={{
+                      minWidth: 56,
+                      bgcolor: 'var(--accent-yellow)',
+                      color: '#000',
+                      fontWeight: 700,
+                      '&:hover': { bgcolor: 'var(--accent-yellow)' },
+                    }}
+                  >
+                    Use
+                  </Button>
+                </Box>
+              </Box>
+            </>
+          )}
         </Menu>
 
         <ClaudeCapDialog
