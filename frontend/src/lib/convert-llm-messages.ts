@@ -60,6 +60,12 @@ export function llmMessagesToUIMessages(
     if (msg.role === 'tool') continue; // handled via tool_calls pairing
 
     if (msg.role === 'user') {
+      // Skip internal system-style nudges (doom-loop correction, compact
+      // hints, restore notices, etc.) — they're meant for the LLM, not
+      // the user. They always start with "[SYSTEM:".
+      if (typeof msg.content === 'string' && msg.content.trimStart().startsWith('[SYSTEM:')) {
+        continue;
+      }
       // Try to reuse existing ID if the message at this position matches
       const existingId = getExistingId(uiMessages.length, 'user');
       uiMessages.push({
@@ -136,4 +142,99 @@ export function llmMessagesToUIMessages(
   }
 
   return uiMessages;
+}
+
+
+interface ToolPart {
+  type: string;
+  toolCallId?: string;
+  toolName?: string;
+  state?: string;
+  input?: unknown;
+  output?: unknown;
+  errorText?: string;
+}
+
+function joinText(parts: UIMessage['parts']): string {
+  return parts
+    .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+    .map((p) => p.text)
+    .join('');
+}
+
+function stringifyOutput(output: unknown): string {
+  if (output == null) return '';
+  if (typeof output === 'string') return output;
+  try {
+    return JSON.stringify(output);
+  } catch {
+    return String(output);
+  }
+}
+
+/**
+ * Reverse of llmMessagesToUIMessages — used as a fallback when we need to
+ * restore a session but only have the UIMessage cache (e.g. the session
+ * predates the backend-message cache feature).
+ *
+ * Includes every tool call the assistant made, regardless of the part's
+ * stored state. If we have a captured output (or errorText), we emit a
+ * paired role=tool result. If we don't, we leave the tool_call dangling —
+ * the backend's ContextManager patches those via _patch_dangling_tool_calls.
+ */
+export function uiMessagesToLLMMessages(uiMessages: UIMessage[]): LLMMessage[] {
+  const out: LLMMessage[] = [];
+  for (const msg of uiMessages) {
+    if (msg.role === 'user') {
+      const text = joinText(msg.parts);
+      if (text) out.push({ role: 'user', content: text });
+      continue;
+    }
+    if (msg.role === 'assistant') {
+      const text = joinText(msg.parts);
+      const toolCalls: LLMToolCall[] = [];
+      const pairedResults: Array<{ id: string; content: string }> = [];
+      for (const raw of msg.parts as ToolPart[]) {
+        if (!raw.type) continue;
+        const isTool = raw.type === 'dynamic-tool' || raw.type.startsWith('tool-');
+        if (!isTool) continue;
+        const toolCallId = raw.toolCallId;
+        const toolName =
+          raw.toolName ?? (raw.type.startsWith('tool-') ? raw.type.slice(5) : undefined);
+        if (!toolCallId || !toolName) continue;
+
+        toolCalls.push({
+          id: toolCallId,
+          function: {
+            name: toolName,
+            arguments: JSON.stringify(raw.input ?? {}),
+          },
+        });
+
+        // Prefer output; fall back to errorText for output-error /
+        // output-denied. A missing result leaves the tool_call dangling —
+        // the backend will patch it with a synthesized stub.
+        const result =
+          raw.output != null
+            ? stringifyOutput(raw.output)
+            : typeof raw.errorText === 'string' && raw.errorText
+              ? raw.errorText
+              : null;
+        if (result != null) {
+          pairedResults.push({ id: toolCallId, content: result });
+        }
+      }
+      if (text || toolCalls.length) {
+        out.push({
+          role: 'assistant',
+          content: text || null,
+          tool_calls: toolCalls.length ? toolCalls : null,
+        });
+      }
+      for (const r of pairedResults) {
+        out.push({ role: 'tool', content: r.content, tool_call_id: r.id });
+      }
+    }
+  }
+  return out;
 }

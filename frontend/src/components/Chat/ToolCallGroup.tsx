@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Stack, Typography, Chip, Button, TextField, IconButton, Link, CircularProgress } from '@mui/material';
+import { Alert, Box, Stack, Typography, Chip, Button, TextField, IconButton, Link, CircularProgress } from '@mui/material';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
@@ -7,7 +7,7 @@ import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
 import LaunchIcon from '@mui/icons-material/Launch';
 import SendIcon from '@mui/icons-material/Send';
 import BlockIcon from '@mui/icons-material/Block';
-import { useAgentStore } from '@/store/agentStore';
+import { useAgentStore, type ResearchAgentState } from '@/store/agentStore';
 import { useLayoutStore } from '@/store/layoutStore';
 import { logger } from '@/utils/logger';
 import { RESEARCH_MAX_STEPS } from '@/lib/research-store';
@@ -36,16 +36,22 @@ interface ToolCallGroupProps {
 // Research sub-steps (inline under the research tool row)
 // ---------------------------------------------------------------------------
 
-/** Hook that ticks every second while startedAt is set, returning elapsed seconds. */
-function useElapsed(startedAt: number | null): number | null {
-  const [elapsed, setElapsed] = useState<number | null>(null);
+/** Hook that forces a re-render every second while enabled — used so each
+ * research card can compute its own elapsed seconds synchronously from
+ * Date.now() without needing its own timer. */
+function useSecondTick(enabled: boolean): void {
+  const [, setTick] = useState(0);
   useEffect(() => {
-    if (startedAt === null) { setElapsed(null); return; }
-    setElapsed(Math.round((Date.now() - startedAt) / 1000));
-    const id = setInterval(() => setElapsed(Math.round((Date.now() - startedAt) / 1000)), 1000);
+    if (!enabled) return;
+    const id = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(id);
-  }, [startedAt]);
-  return elapsed;
+  }, [enabled]);
+}
+
+/** Compute elapsed seconds from startedAt (or null). Call under useSecondTick. */
+function computeElapsed(startedAt: number | null): number | null {
+  if (startedAt === null) return null;
+  return Math.round((Date.now() - startedAt) / 1000);
 }
 
 /** Format token count like the CLI: "12.4k" or "800". */
@@ -172,9 +178,8 @@ function formatResearchStep(raw: string): { label: string } {
   return { label: step.replace(/^▸\s*/, '') };
 }
 
-/** Rolling 2-line display of research sub-tool calls — hidden when complete. */
-function ResearchSteps({ steps, isRunning }: { steps: string[]; isRunning: boolean }) {
-  if (!isRunning) return null;
+/** Rolling display of research sub-tool calls for a single agent. */
+function ResearchSteps({ steps }: { steps: string[] }) {
   const visible = steps.slice(-RESEARCH_MAX_STEPS);
   if (visible.length === 0) return null;
 
@@ -215,8 +220,193 @@ function ResearchSteps({ steps, isRunning }: { steps: string[]; isRunning: boole
   );
 }
 
-// Stable reference to avoid infinite re-renders from Zustand selectors
-const EMPTY_STEPS: string[] = [];
+// ---------------------------------------------------------------------------
+// Trackio dashboard embed
+// ---------------------------------------------------------------------------
+
+// HF repo IDs are `<owner>/<name>` where each segment is alphanumerics plus
+// `_`, `.`, `-`. Anything else (slashes, spaces, query params, missing owner)
+// would let an attacker-controlled string redirect the embed to a different
+// Space, so we refuse to render rather than build a malformed URL.
+const SPACE_ID_PATTERN = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
+
+function isValidSpaceId(spaceId: string): boolean {
+  return SPACE_ID_PATTERN.test(spaceId);
+}
+
+/** HF Space embed subdomain: 'user/space_name' → 'user-space-name'. */
+function spaceIdToSubdomain(spaceId: string): string {
+  return spaceId
+    .toLowerCase()
+    .replace(/[/_.]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function buildTrackioEmbedUrl(spaceId: string, project?: string): string {
+  // __theme=dark is gradio's standard query param to force the embedded
+  // dashboard into dark mode so it blends with the surrounding chat instead
+  // of flashing a bright white panel inside the dark UI.
+  const params = new URLSearchParams({
+    sidebar: 'hidden',
+    footer: 'false',
+    __theme: 'dark',
+  });
+  if (project) params.set('project', project);
+  return `https://${spaceIdToSubdomain(spaceId)}.hf.space/?${params.toString()}`;
+}
+
+function buildTrackioPageUrl(spaceId: string, project?: string): string {
+  const qs = project ? `?${new URLSearchParams({ project }).toString()}` : '';
+  return `https://huggingface.co/spaces/${spaceId}${qs}`;
+}
+
+function TrackioEmbed({ spaceId, project }: { spaceId: string; project?: string }) {
+  const [expanded, setExpanded] = useState(true);
+  const [iframeLoaded, setIframeLoaded] = useState(false);
+  const embedUrl = useMemo(() => buildTrackioEmbedUrl(spaceId, project), [spaceId, project]);
+  const pageUrl = useMemo(() => buildTrackioPageUrl(spaceId, project), [spaceId, project]);
+  const label = project ? `${spaceId} · ${project}` : spaceId;
+
+  if (!isValidSpaceId(spaceId)) return null;
+
+  return (
+    <Box sx={{ pl: 4.5, pr: 1.5, pb: 1, pt: 0.25 }}>
+      <Box
+        sx={{
+          border: '1px solid var(--tool-border)',
+          borderRadius: '8px',
+          overflow: 'hidden',
+          bgcolor: 'var(--code-panel-bg)',
+        }}
+      >
+        <Stack
+          direction="row"
+          alignItems="center"
+          spacing={1}
+          onClick={(e) => e.stopPropagation()}
+          sx={{
+            px: 1.25,
+            py: 0.5,
+            borderBottom: expanded ? '1px solid var(--tool-border)' : 'none',
+          }}
+        >
+          <Typography
+            sx={{
+              fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
+              fontSize: '0.65rem',
+              fontWeight: 600,
+              color: 'var(--accent-yellow)',
+              letterSpacing: '0.04em',
+            }}
+          >
+            trackio
+          </Typography>
+          <Typography
+            sx={{
+              fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
+              fontSize: '0.65rem',
+              color: 'var(--muted-text)',
+              flex: 1,
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {label}
+          </Typography>
+          <Link
+            href={pageUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            sx={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 0.4,
+              color: 'var(--accent-yellow)',
+              fontSize: '0.65rem',
+              textDecoration: 'none',
+              '&:hover': { textDecoration: 'underline' },
+            }}
+          >
+            <LaunchIcon sx={{ fontSize: 11 }} />
+            Open
+          </Link>
+          <Button
+            size="small"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+            sx={{
+              textTransform: 'none',
+              minWidth: 'auto',
+              px: 0.75,
+              py: 0,
+              fontSize: '0.65rem',
+              color: 'var(--muted-text)',
+              '&:hover': { color: 'var(--text)', bgcolor: 'transparent' },
+            }}
+          >
+            {expanded ? 'Hide' : 'Show'}
+          </Button>
+        </Stack>
+        {expanded && (
+          <Box sx={{ position: 'relative', width: '100%', height: 480, bgcolor: 'var(--code-panel-bg)' }}>
+            <iframe
+              src={embedUrl}
+              title={`Trackio dashboard ${label}`}
+              loading="lazy"
+              onLoad={() => setIframeLoaded(true)}
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
+              style={{ border: 0, width: '100%', height: '100%', display: 'block' }}
+            />
+            {!iframeLoaded && (
+              <Stack
+                direction="column"
+                alignItems="center"
+                justifyContent="center"
+                spacing={1.5}
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  bgcolor: 'var(--code-panel-bg)',
+                  color: 'var(--muted-text)',
+                  pointerEvents: 'none',
+                }}
+              >
+                <CircularProgress size={20} sx={{ color: 'var(--accent-yellow)' }} />
+                <Typography
+                  sx={{
+                    fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
+                    fontSize: '0.75rem',
+                    color: 'var(--text)',
+                  }}
+                >
+                  Spinning up the trackio dashboard…
+                </Typography>
+                <Typography
+                  sx={{
+                    fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
+                    fontSize: '0.65rem',
+                    color: 'var(--muted-text)',
+                    textAlign: 'center',
+                    maxWidth: 360,
+                    px: 2,
+                  }}
+                >
+                  First load takes 30–60 seconds. Charts appear automatically once the run starts logging.
+                </Typography>
+              </Stack>
+            )}
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Hardware pricing ($/hr) — from HF Spaces & Jobs pricing
@@ -312,6 +502,7 @@ function InlineApproval({
 }) {
   const [feedback, setFeedback] = useState('');
   const args = input as Record<string, unknown> | undefined;
+  const autoApproval = useAgentStore((state) => state.budgetBlocks[toolCallId]);
   const { setPanel, getEditedScript } = useAgentStore();
   const { setRightPanelOpen, setLeftSidebarOpen } = useLayoutStore();
   const hasEditedScript = !!getEditedScript(toolCallId);
@@ -331,6 +522,24 @@ function InlineApproval({
 
   return (
     <Box sx={{ px: 1.5, py: 1.5, borderTop: '1px solid var(--tool-border)' }}>
+      {autoApproval && (
+        <Alert
+          severity="warning"
+          sx={{
+            mb: 1.5,
+            py: 0.5,
+            bgcolor: 'rgba(245,158,11,0.08)',
+            border: '1px solid rgba(245,158,11,0.18)',
+            color: 'var(--text)',
+            '& .MuiAlert-icon': { color: 'var(--accent-yellow)' },
+          }}
+        >
+          <Typography variant="body2" sx={{ fontSize: '0.72rem' }}>
+            YOLO paused: {autoApproval.reason || 'manual approval required.'}
+          </Typography>
+        </Alert>
+      )}
+
       {toolName === 'sandbox_create' && args && (() => {
         const hw = String(args.hardware || 'cpu-basic');
         const cost = costLabel(hw);
@@ -346,9 +555,7 @@ function InlineApproval({
                   {' '}({cost})
                 </Box>
               )}
-              {!!args.private && (
-                <Box component="span" sx={{ color: 'var(--muted-text)' }}>{' (private)'}</Box>
-              )}
+              <Box component="span" sx={{ color: 'var(--muted-text)' }}>{' (private)'}</Box>
             </Typography>
             <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.7rem', opacity: 0.7 }}>
               Creates a temporary HF Space to develop and test scripts before running jobs. Takes 1-2 min to start.
@@ -512,17 +719,22 @@ function InlineApproval({
 // Main component
 // ---------------------------------------------------------------------------
 
+const EMPTY_AGENTS: Record<string, ResearchAgentState> = {};
+
 export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProps) {
-  const { setPanel, lockPanel, getJobUrl, getEditedScript, setJobStatus, getJobStatus, setToolError, getToolError, setToolRejected, getToolRejected } = useAgentStore();
-  const researchSteps = useAgentStore(s => {
+  const { setPanel, lockPanel, getJobUrl, getEditedScript, setJobStatus, getJobStatus, getTrackioDashboard, setToolError, getToolError, setToolRejected, getToolRejected } = useAgentStore();
+  const researchAgents = useAgentStore(s => {
     const activeId = s.activeSessionId;
-    return activeId ? (s.sessionStates[activeId]?.researchSteps) : undefined;
-  }) ?? EMPTY_STEPS;
-  const researchStats = useAgentStore(s => {
-    const activeId = s.activeSessionId;
-    return activeId ? s.sessionStates[activeId]?.researchStats : undefined;
-  }) ?? { toolCount: 0, tokenCount: 0, startedAt: null, finalElapsed: null };
-  const liveElapsed = useElapsed(researchStats.startedAt);
+    return (activeId && s.sessionStates[activeId]?.researchAgents) || EMPTY_AGENTS;
+  });
+  // Tick once per second while any research agent is running so each card's
+  // elapsed seconds update in real time.
+  const anyResearchRunning = useMemo(
+    () => Object.values(researchAgents).some(a => a.stats.startedAt !== null),
+    [researchAgents],
+  );
+  useSecondTick(anyResearchRunning);
+
   const isProcessing = useAgentStore(s => s.isProcessing);
   const { setRightPanelOpen, setLeftSidebarOpen } = useLayoutStore();
 
@@ -572,12 +784,15 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
   // Persist error states when tools error
   useEffect(() => {
     for (const tool of tools) {
-      const currentlyHasError = tool.state === 'output-error';
+      const currentlyHasError = tool.state === 'output-error' && !isCancelledTool(tool);
       const persistedError = getToolError(tool.toolCallId);
 
-      // Persist error state if we detect it and haven't already
+      // Persist real error states across refresh. Clear stale persisted errors
+      // once the SDK reports a successful output for the same tool call.
       if (currentlyHasError && !persistedError) {
         setToolError(tool.toolCallId, true);
+      } else if (tool.state === 'output-available' && persistedError) {
+        setToolError(tool.toolCallId, false);
       }
     }
   }, [tools, setToolError, getToolError]);
@@ -964,13 +1179,17 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
 
                 {/* Status chip (non hf_jobs, or hf_jobs without final status) */}
                 {(() => {
-                  // Research tool: override chip label with live stats (but not if cancelled/done)
+                  // Research tool: override chip label with this card's agent stats
+                  const agentState: ResearchAgentState | undefined = tool.toolName === 'research'
+                    ? researchAgents[tool.toolCallId]
+                    : undefined;
                   const researchDone = cancelled || state === 'output-available' || state === 'output-error' || state === 'output-denied';
-                  const researchLabel = tool.toolName === 'research' && !researchDone
-                    ? researchChipLabel(researchStats, liveElapsed)
-                    : (tool.toolName === 'research' && researchDone && researchStats.finalElapsed !== null)
-                      ? researchChipLabel({ ...researchStats, startedAt: null }, null)
-                      : null;
+                  const liveElapsed = agentState ? computeElapsed(agentState.stats.startedAt) : null;
+                  const researchLabel = tool.toolName === 'research' && agentState
+                    ? (researchDone && agentState.stats.finalElapsed !== null
+                        ? researchChipLabel({ ...agentState.stats, startedAt: null }, null)
+                        : researchChipLabel(agentState.stats, liveElapsed))
+                    : null;
                   const chipLabel = researchLabel || label;
                   if (!chipLabel || (tool.toolName === 'hf_jobs' && jobMeta.jobStatus)) return null;
 
@@ -1048,12 +1267,21 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
               </Stack>
 
               {/* Research sub-agent rolling steps (visible only while running) */}
-              {tool.toolName === 'research' && !cancelled && state !== 'output-available' && state !== 'output-error' && state !== 'output-denied' && (
-                <ResearchSteps
-                  steps={researchSteps}
-                  isRunning={researchStats.startedAt !== null}
-                />
+              {tool.toolName === 'research' && !cancelled && state !== 'output-available' && state !== 'output-error' && state !== 'output-denied' && researchAgents[tool.toolCallId] && (
+                <ResearchSteps steps={researchAgents[tool.toolCallId].steps} />
               )}
+
+              {/* Trackio dashboard embed — shown for hf_jobs / sandbox_create runs that declared a trackio space */}
+              {(tool.toolName === 'hf_jobs' || tool.toolName === 'sandbox_create')
+                && !isPending
+                && !isRejected
+                && !cancelled
+                && (() => {
+                  const trackio = getTrackioDashboard(tool.toolCallId);
+                  return trackio
+                    ? <TrackioEmbed spaceId={trackio.spaceId} project={trackio.project} />
+                    : null;
+                })()}
 
               {/* Per-tool approval: undecided */}
               {isPending && !localDecision && !isSubmitting && (

@@ -11,6 +11,7 @@ import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import MessageList from '@/components/Chat/MessageList';
 import ChatInput from '@/components/Chat/ChatInput';
+import ExpiredBanner from '@/components/Chat/ExpiredBanner';
 import { apiFetch } from '@/utils/api';
 import { logger } from '@/utils/logger';
 
@@ -22,9 +23,20 @@ interface SessionChatProps {
 
 export default function SessionChat({ sessionId, isActive, onSessionDead }: SessionChatProps) {
   const { isConnected, isProcessing, activityStatus, updateSession } = useAgentStore();
-  const { updateSessionTitle } = useSessionStore();
+  const { updateSessionTitle, sessions } = useSessionStore();
+  const sessionMeta = sessions.find((s) => s.id === sessionId);
+  const isExpired = sessionMeta?.expired === true;
 
-  const { messages, sendMessage, stop, status, undoLastTurn, editAndRegenerate, approveTools } = useAgentChat({
+  const {
+    messages,
+    sendMessage,
+    stop,
+    status,
+    undoLastTurn,
+    editAndRegenerate,
+    approveTools,
+    refreshMessages,
+  } = useAgentChat({
     sessionId,
     isActive,
     onReady: () => logger.log(`Session ${sessionId} ready`),
@@ -100,21 +112,29 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
       <MessageList
         messages={messages}
         isProcessing={busy}
+        sessionId={sessionId}
         approveTools={approveTools}
         onUndoLastTurn={undoLastTurn}
         onEditAndRegenerate={editAndRegenerate}
       />
-      <ChatInput
-        onSend={handleSendMessage}
-        onStop={handleStop}
-        isProcessing={busy}
-        disabled={!isConnected || activityStatus.type === 'waiting-approval'}
-        placeholder={
-          activityStatus.type === 'waiting-approval'
-            ? 'Approve or reject pending tools first...'
-            : undefined
-        }
-      />
+      {isExpired ? (
+        <ExpiredBanner sessionId={sessionId} />
+      ) : (
+        <ChatInput
+          sessionId={sessionId}
+          initialModelPath={sessionMeta?.model}
+          onSend={handleSendMessage}
+          onStop={handleStop}
+          onDatasetUploaded={refreshMessages}
+          isProcessing={busy}
+          disabled={!isConnected || activityStatus.type === 'waiting-approval'}
+          placeholder={
+            activityStatus.type === 'waiting-approval'
+              ? 'Approve or reject pending tools first...'
+              : undefined
+          }
+        />
+      )}
     </>
   );
 }

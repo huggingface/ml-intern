@@ -61,3 +61,11 @@ export function deleteMessages(sessionId: string): void {
   delete map[sessionId];
   writeAll(map);
 }
+
+export function moveMessages(fromId: string, toId: string): void {
+  const map = readAll();
+  if (!map[fromId]) return;
+  map[toId] = map[fromId];
+  delete map[fromId];
+  writeAll(map);
+}

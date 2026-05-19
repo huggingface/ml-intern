@@ -24,12 +24,13 @@ import SessionSidebar from '@/components/SessionSidebar/SessionSidebar';
 import SessionChat from '@/components/SessionChat';
 import CodePanel from '@/components/CodePanel/CodePanel';
 import WelcomeScreen from '@/components/WelcomeScreen/WelcomeScreen';
+import YoloControl from '@/components/YoloControl';
 import { apiFetch } from '@/utils/api';
 
 const DRAWER_WIDTH = 260;
 
 export default function AppLayout() {
-  const { sessions, activeSessionId, deleteSession } = useSessionStore();
+  const { sessions, activeSessionId, markExpired } = useSessionStore();
   const { isConnected, llmHealthError, setLlmHealthError, user } = useAgentStore();
   const {
     isLeftSidebarOpen,
@@ -121,12 +122,48 @@ export default function AppLayout() {
     };
   }, [isConnected, activeSessionId]);
 
+  // Best-effort sandbox cleanup when the browser tab/window closes. This
+  // preserves durable chat history; explicit delete still removes the session.
+  useEffect(() => {
+    const teardownSandboxes = () => {
+      const liveSessionIds = useSessionStore
+        .getState()
+        .sessions
+        .filter((session) => session.isActive && !session.expired)
+        .map((session) => session.id);
+
+      for (const sessionId of liveSessionIds) {
+        const url = `/api/session/${sessionId}/sandbox/teardown`;
+        const body = '{}';
+        const blob = new Blob([body], { type: 'application/json' });
+
+        if (navigator.sendBeacon?.(url, blob)) {
+          continue;
+        }
+
+        fetch(url, {
+          method: 'POST',
+          body,
+          keepalive: true,
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+        }).catch(() => {});
+      }
+    };
+
+    window.addEventListener('pagehide', teardownSandboxes);
+    return () => window.removeEventListener('pagehide', teardownSandboxes);
+  }, []);
+
   const handleSessionDead = useCallback(
     (deadSessionId: string) => {
-      useAgentStore.getState().clearSessionState(deadSessionId);
-      deleteSession(deadSessionId);
+      // Backend lost this session — mark it expired so the chat shows a
+      // recovery banner instead of either silently failing or eagerly
+      // creating a new backend session (which would pay a summary-call
+      // cost for sessions the user may never revisit).
+      markExpired(deadSessionId);
     },
-    [deleteSession],
+    [markExpired],
   );
 
   // Close sidebar on mobile after selecting a session
@@ -249,6 +286,7 @@ export default function AppLayout() {
           </Box>
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <YoloControl />
             <IconButton
               onClick={toggleTheme}
               size="small"
