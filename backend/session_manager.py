@@ -6,7 +6,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -100,6 +100,8 @@ class AgentSession:
     is_processing: bool = False  # True while a submission is being executed
     broadcaster: Any = None
     title: str | None = None
+    # Last time this session was accessed (for idle-unload logic)
+    last_access: datetime = field(default_factory=datetime.utcnow)
     # True once this session has been counted against the user's daily
     # Claude quota. Guards double-counting when the user re-selects an
     # Anthropic model mid-session.
@@ -141,10 +143,19 @@ class SessionManager:
         self.persistence_store = get_session_store()
         await self.persistence_store.init()
         await self.messaging_gateway.start()
+        # Start background cleanup task to unload long-idle sessions.
+        self._cleanup_task = asyncio.create_task(self._unload_inactive_sessions_loop())
 
     async def close(self) -> None:
         """Flush and close shared background resources."""
         await self._cleanup_all_sandboxes_on_close()
+        # Cancel cleanup task
+        if getattr(self, "_cleanup_task", None):
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
         await self.messaging_gateway.close()
         if self.persistence_store is not None:
             await self.persistence_store.close()
@@ -327,8 +338,17 @@ class SessionManager:
         async with self._lock:
             existing = self.sessions.get(agent_session.session_id)
             if existing:
-                return existing
-            self.sessions[agent_session.session_id] = agent_session
+                # If an earlier coroutine reserved the slot with a placeholder
+                # AgentSession (session is None), replace it with the real
+                # agent_session. Otherwise return the existing live session.
+                if getattr(existing, "session", None) is None:
+                    self.sessions[agent_session.session_id] = agent_session
+                else:
+                    # Update access time for the existing live session
+                    existing.last_access = datetime.utcnow()
+                    return existing
+            else:
+                self.sessions[agent_session.session_id] = agent_session
 
         task = asyncio.create_task(
             self._run_session(
@@ -339,6 +359,8 @@ class SessionManager:
             )
         )
         agent_session.task = task
+        # mark last access time when the session has been started
+        agent_session.last_access = datetime.utcnow()
         return agent_session
 
     @staticmethod
@@ -494,6 +516,61 @@ class SessionManager:
             last_err,
         )
 
+    async def _unload_inactive_sessions_loop(self) -> None:
+        """Background task: unload sessions that have been idle for too long.
+
+        Sessions idle for more than 24 hours are persisted and removed from
+        memory to free capacity. The loop runs periodically (every 10 minutes).
+        """
+        try:
+            while True:
+                await asyncio.sleep(600)  # 10 minutes
+                now = datetime.utcnow()
+                to_unload: list[tuple[str, AgentSession]] = []
+                async with self._lock:
+                    for sid, agent_session in list(self.sessions.items()):
+                        try:
+                            if not agent_session.is_active:
+                                continue
+                            if getattr(agent_session, "is_processing", False):
+                                continue
+                            last = getattr(agent_session, "last_access", agent_session.created_at)
+                            if now - last > timedelta(hours=24):
+                                # Mark inactive and remove from registry under lock
+                                agent_session.is_active = False
+                                to_unload.append((sid, agent_session))
+                                del self.sessions[sid]
+                        except Exception as e:
+                            logger.debug("Skipping unload check for %s: %s", sid, e)
+
+                for sid, agent_session in to_unload:
+                    try:
+                        await self.persist_session_snapshot(
+                            agent_session,
+                            runtime_state=self._runtime_state(agent_session),
+                            status="inactive",
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to persist snapshot before unloading %s: %s",
+                            sid,
+                            e,
+                        )
+                    # Cancel the running task if present
+                    try:
+                        if agent_session.task:
+                            agent_session.task.cancel()
+                            try:
+                                await asyncio.wait_for(agent_session.task, timeout=5)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    logger.info("Unloaded inactive session %s due to inactivity", sid)
+        except asyncio.CancelledError:
+            return
+
     async def persist_session_snapshot(
         self,
         agent_session: AgentSession,
@@ -567,8 +644,21 @@ class SessionManager:
                     existing,
                     preload_sandbox=preload_sandbox,
                 )
+                existing.last_access = datetime.utcnow()
                 return existing
             return None
+
+        # Check capacity before restoring from persistence
+        async with self._lock:
+            active_count = self.active_session_count
+            if active_count >= MAX_SESSIONS:
+                logger.warning(
+                    "Cannot restore session %s: server at capacity (%d/%d)",
+                    session_id,
+                    active_count,
+                    MAX_SESSIONS,
+                )
+                return None
 
         store = self._store()
         loaded = await store.load_session(session_id)
@@ -588,6 +678,7 @@ class SessionManager:
                     existing,
                     preload_sandbox=preload_sandbox,
                 )
+                existing.last_access = datetime.utcnow()
                 return existing
             return None
 
@@ -674,6 +765,7 @@ class SessionManager:
                 hf_token=hf_token,
                 hf_username=hf_username,
             )
+            started.last_access = datetime.utcnow()
             return started
         if preload_sandbox:
             self._start_cpu_sandbox_preload(agent_session)
@@ -706,7 +798,11 @@ class SessionManager:
             SessionCapacityError: If the server or user has reached the
                 maximum number of concurrent sessions.
         """
-        # ── Capacity checks ──────────────────────────────────────────
+        # ── Capacity checks & reservation ───────────────────────────
+        # Create lightweight queues up-front (non-blocking).
+        submission_queue: asyncio.Queue = asyncio.Queue()
+        event_queue: asyncio.Queue = asyncio.Queue()
+
         async with self._lock:
             active_count = self.active_session_count
             if active_count >= MAX_SESSIONS:
@@ -724,11 +820,22 @@ class SessionManager:
                         error_type="per_user",
                     )
 
-        session_id = str(uuid.uuid4())
-
-        # Create queues for this session
-        submission_queue: asyncio.Queue = asyncio.Queue()
-        event_queue: asyncio.Queue = asyncio.Queue()
+            session_id = str(uuid.uuid4())
+            # Reserve the slot with a placeholder AgentSession so concurrent
+            # creators cannot exceed MAX_SESSIONS. The placeholder has no
+            # real Session/tool_router yet (session is None) but counts
+            # towards `active_session_count` because `is_active` is True.
+            placeholder = AgentSession(
+                session_id=session_id,
+                session=None,
+                tool_router=None,
+                submission_queue=submission_queue,
+                user_id=user_id,
+                hf_username=hf_username,
+                hf_token=hf_token,
+                is_active=True,
+            )
+            self.sessions[session_id] = placeholder
 
         # Run blocking constructors in a thread to keep the event loop responsive.
         tool_router, session = await asyncio.to_thread(
@@ -741,7 +848,8 @@ class SessionManager:
             event_queue=event_queue,
         )
 
-        # Create wrapper
+        # Create wrapper with the real session resources and replace the
+        # placeholder in _start_agent_session.
         agent_session = AgentSession(
             session_id=session_id,
             session=session,
