@@ -210,6 +210,40 @@ class SessionManager:
         logger.info("Session initialized in %.2fs", t1 - t0)
         return tool_router, session
 
+    def _make_reserved_session(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        hf_username: str | None,
+        hf_token: str | None,
+        submission_queue: asyncio.Queue,
+    ) -> AgentSession:
+        """Create a placeholder session that reserves capacity under lock."""
+        return AgentSession(
+            session_id=session_id,
+            session=None,
+            tool_router=None,
+            submission_queue=submission_queue,
+            user_id=user_id,
+            hf_username=hf_username,
+            hf_token=hf_token,
+            is_active=True,
+        )
+
+    async def _release_reserved_session_slot(
+        self,
+        session_id: str,
+        reserved_session: AgentSession | None = None,
+    ) -> None:
+        """Remove a reserved placeholder if it is still present."""
+        async with self._lock:
+            current = self.sessions.get(session_id)
+            if current is None:
+                return
+            if current is reserved_session or getattr(current, "session", None) is None:
+                self.sessions.pop(session_id, None)
+
     def _serialize_messages(self, session: Session) -> list[dict[str, Any]]:
         return [msg.model_dump(mode="json") for msg in session.context_manager.items]
 
@@ -518,6 +552,77 @@ class SessionManager:
             last_err,
         )
 
+    async def _unload_inactive_sessions_once(self) -> None:
+        """Run one idle-session sweep.
+
+        Extracted so tests can exercise the cleanup behavior without waiting
+        for the background loop's sleep interval.
+        """
+        now = datetime.utcnow()
+        to_unload: list[tuple[str, AgentSession]] = []
+        async with self._lock:
+            for sid, agent_session in list(self.sessions.items()):
+                try:
+                    if not agent_session.is_active:
+                        continue
+                    if getattr(agent_session, "is_processing", False):
+                        continue
+                    last = getattr(
+                        agent_session,
+                        "last_access",
+                        agent_session.created_at,
+                    )
+                    if now - last > INACTIVE_SESSION_IDLE_THRESHOLD:
+                        # Mark inactive, but keep it resident until the
+                        # snapshot has been persisted successfully.
+                        agent_session.is_active = False
+                        to_unload.append((sid, agent_session))
+                except Exception as e:
+                    logger.debug("Skipping unload check for %s: %s", sid, e)
+
+        for sid, agent_session in to_unload:
+            try:
+                await self.persist_session_snapshot(
+                    agent_session,
+                    runtime_state=self._runtime_state(agent_session),
+                    status="inactive",
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to persist snapshot before unloading %s: %s",
+                    sid,
+                    e,
+                )
+                # Keep the session in memory so the next cleanup cycle
+                # can retry persistence and so callers can still inspect
+                # the session state.
+                agent_session.is_active = True
+                continue
+
+            removed = False
+            async with self._lock:
+                current = self.sessions.get(sid)
+                if current is agent_session:
+                    self.sessions.pop(sid, None)
+                    removed = True
+
+            if not removed:
+                # Session was replaced or revived while we were persisting.
+                continue
+
+            # Cancel the running task if present once the snapshot is safe.
+            try:
+                if agent_session.task:
+                    agent_session.task.cancel()
+                    try:
+                        await asyncio.wait_for(agent_session.task, timeout=5)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            logger.info("Unloaded inactive session %s due to inactivity", sid)
+
     async def _unload_inactive_sessions_loop(self) -> None:
         """Background task: unload sessions that have been idle for too long.
 
@@ -526,50 +631,8 @@ class SessionManager:
         """
         try:
             while True:
-                await asyncio.sleep(600)  # 10 minutes
-                now = datetime.utcnow()
-                to_unload: list[tuple[str, AgentSession]] = []
-                async with self._lock:
-                    for sid, agent_session in list(self.sessions.items()):
-                        try:
-                            if not agent_session.is_active:
-                                continue
-                            if getattr(agent_session, "is_processing", False):
-                                continue
-                            last = getattr(agent_session, "last_access", agent_session.created_at)
-                            if now - last > timedelta(hours=24):
-                                # Mark inactive and remove from registry under lock
-                                agent_session.is_active = False
-                                to_unload.append((sid, agent_session))
-                                del self.sessions[sid]
-                        except Exception as e:
-                            logger.debug("Skipping unload check for %s: %s", sid, e)
-
-                for sid, agent_session in to_unload:
-                    try:
-                        await self.persist_session_snapshot(
-                            agent_session,
-                            runtime_state=self._runtime_state(agent_session),
-                            status="inactive",
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to persist snapshot before unloading %s: %s",
-                            sid,
-                            e,
-                        )
-                    # Cancel the running task if present
-                    try:
-                        if agent_session.task:
-                            agent_session.task.cancel()
-                            try:
-                                await asyncio.wait_for(agent_session.task, timeout=5)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-
-                    logger.info("Unloaded inactive session %s due to inactivity", sid)
+                await asyncio.sleep(INACTIVE_SESSION_SWEEP_INTERVAL_SECONDS)
+                await self._unload_inactive_sessions_once()
         except asyncio.CancelledError:
             return
 
@@ -633,146 +696,169 @@ class SessionManager:
         preload_sandbox: bool = True,
     ) -> AgentSession | None:
         """Return a live runtime session, lazily restoring it from Mongo."""
-        async with self._lock:
-            existing = self.sessions.get(session_id)
-        if existing:
-            if self._can_access_session(existing, user_id):
-                self._update_hf_identity(
-                    existing,
-                    hf_token=hf_token,
-                    hf_username=hf_username,
-                )
-                self._restart_cpu_preload_if_token_recovered(
-                    existing,
-                    preload_sandbox=preload_sandbox,
-                )
-                existing.last_access = datetime.utcnow()
-                return existing
-            return None
+        submission_queue: asyncio.Queue = asyncio.Queue()
+        event_queue: asyncio.Queue = asyncio.Queue()
+        reserved_session: AgentSession | None = None
+        should_release_reserved_slot = False
 
-        # Check capacity before restoring from persistence
-        async with self._lock:
-            active_count = self.active_session_count
-            if active_count >= MAX_SESSIONS:
-                logger.warning(
-                    "Cannot restore session %s: server at capacity (%d/%d)",
-                    session_id,
-                    active_count,
-                    MAX_SESSIONS,
+        try:
+            async with self._lock:
+                existing = self.sessions.get(session_id)
+                if existing:
+                    if getattr(existing, "session", None) is None:
+                        return None
+                    if self._can_access_session(existing, user_id):
+                        self._update_hf_identity(
+                            existing,
+                            hf_token=hf_token,
+                            hf_username=hf_username,
+                        )
+                        self._restart_cpu_preload_if_token_recovered(
+                            existing,
+                            preload_sandbox=preload_sandbox,
+                        )
+                        existing.last_access = datetime.utcnow()
+                        return existing
+                    return None
+
+                active_count = self.active_session_count
+                if active_count >= MAX_SESSIONS:
+                    logger.warning(
+                        "Cannot restore session %s: server at capacity (%d/%d)",
+                        session_id,
+                        active_count,
+                        MAX_SESSIONS,
+                    )
+                    return None
+
+                reserved_session = self._make_reserved_session(
+                    session_id=session_id,
+                    user_id=user_id,
+                    hf_username=hf_username,
+                    hf_token=hf_token,
+                    submission_queue=submission_queue,
                 )
+                self.sessions[session_id] = reserved_session
+                should_release_reserved_slot = True
+
+            store = self._store()
+            loaded = await store.load_session(session_id)
+            if not loaded:
                 return None
 
-        store = self._store()
-        loaded = await store.load_session(session_id)
-        if not loaded:
-            return None
+            async with self._lock:
+                existing = self.sessions.get(session_id)
+                if existing is not reserved_session:
+                    if existing and getattr(existing, "session", None) is not None:
+                        if self._can_access_session(existing, user_id):
+                            self._update_hf_identity(
+                                existing,
+                                hf_token=hf_token,
+                                hf_username=hf_username,
+                            )
+                            self._restart_cpu_preload_if_token_recovered(
+                                existing,
+                                preload_sandbox=preload_sandbox,
+                            )
+                            existing.last_access = datetime.utcnow()
+                            should_release_reserved_slot = False
+                            return existing
+                    return None
 
-        async with self._lock:
-            existing = self.sessions.get(session_id)
-        if existing:
-            if self._can_access_session(existing, user_id):
+            meta = loaded.get("metadata") or {}
+            owner = str(meta.get("user_id") or "")
+            if user_id != "dev" and owner != "dev" and owner != user_id:
+                return None
+
+            await self._cleanup_persisted_sandbox(
+                session_id,
+                meta,
+                hf_token=hf_token,
+            )
+
+            from litellm import Message
+
+            model = meta.get("model") or self.config.model_name
+            tool_router, session = await asyncio.to_thread(
+                self._create_session_sync,
+                session_id=session_id,
+                user_id=owner or user_id,
+                hf_username=hf_username,
+                hf_token=hf_token,
+                model=model,
+                event_queue=event_queue,
+                notification_destinations=meta.get("notification_destinations") or [],
+            )
+
+            restored_messages: list[Message] = []
+            for raw in loaded.get("messages") or []:
+                if not isinstance(raw, dict) or raw.get("role") == "system":
+                    continue
+                try:
+                    restored_messages.append(Message.model_validate(raw))
+                except Exception as e:
+                    logger.warning("Dropping malformed restored message: %s", e)
+            if restored_messages:
+                # Keep the freshly-rendered system prompt, then attach the durable
+                # non-system context so tools/date/user context stay current.
+                session.context_manager.items = [
+                    session.context_manager.items[0],
+                    *restored_messages,
+                ]
+
+            self._restore_pending_approval(session, meta.get("pending_approval") or [])
+            session.turn_count = int(meta.get("turn_count") or 0)
+            session.auto_approval_enabled = bool(
+                meta.get("auto_approval_enabled", False)
+            )
+            raw_cap = meta.get("auto_approval_cost_cap_usd")
+            session.auto_approval_cost_cap_usd = (
+                float(raw_cap) if isinstance(raw_cap, int | float) else None
+            )
+            session.auto_approval_estimated_spend_usd = float(
+                meta.get("auto_approval_estimated_spend_usd") or 0.0
+            )
+
+            created_at = meta.get("created_at")
+            if not isinstance(created_at, datetime):
+                created_at = datetime.utcnow()
+
+            agent_session = AgentSession(
+                session_id=session_id,
+                session=session,
+                tool_router=tool_router,
+                submission_queue=submission_queue,
+                user_id=owner or user_id,
+                hf_username=hf_username,
+                hf_token=hf_token,
+                created_at=created_at,
+                is_active=True,
+                is_processing=False,
+                claude_counted=bool(meta.get("claude_counted")),
+                title=meta.get("title"),
+            )
+            started = await self._start_agent_session(
+                agent_session=agent_session,
+                event_queue=event_queue,
+                tool_router=tool_router,
+            )
+            if started is not agent_session:
                 self._update_hf_identity(
-                    existing,
+                    started,
                     hf_token=hf_token,
                     hf_username=hf_username,
                 )
-                self._restart_cpu_preload_if_token_recovered(
-                    existing,
-                    preload_sandbox=preload_sandbox,
-                )
-                existing.last_access = datetime.utcnow()
-                return existing
-            return None
-
-        meta = loaded.get("metadata") or {}
-        owner = str(meta.get("user_id") or "")
-        if user_id != "dev" and owner != "dev" and owner != user_id:
-            return None
-
-        await self._cleanup_persisted_sandbox(
-            session_id,
-            meta,
-            hf_token=hf_token,
-        )
-
-        from litellm import Message
-
-        model = meta.get("model") or self.config.model_name
-        event_queue: asyncio.Queue = asyncio.Queue()
-        submission_queue: asyncio.Queue = asyncio.Queue()
-        tool_router, session = await asyncio.to_thread(
-            self._create_session_sync,
-            session_id=session_id,
-            user_id=owner or user_id,
-            hf_username=hf_username,
-            hf_token=hf_token,
-            model=model,
-            event_queue=event_queue,
-            notification_destinations=meta.get("notification_destinations") or [],
-        )
-
-        restored_messages: list[Message] = []
-        for raw in loaded.get("messages") or []:
-            if not isinstance(raw, dict) or raw.get("role") == "system":
-                continue
-            try:
-                restored_messages.append(Message.model_validate(raw))
-            except Exception as e:
-                logger.warning("Dropping malformed restored message: %s", e)
-        if restored_messages:
-            # Keep the freshly-rendered system prompt, then attach the durable
-            # non-system context so tools/date/user context stay current.
-            session.context_manager.items = [
-                session.context_manager.items[0],
-                *restored_messages,
-            ]
-
-        self._restore_pending_approval(session, meta.get("pending_approval") or [])
-        session.turn_count = int(meta.get("turn_count") or 0)
-        session.auto_approval_enabled = bool(meta.get("auto_approval_enabled", False))
-        raw_cap = meta.get("auto_approval_cost_cap_usd")
-        session.auto_approval_cost_cap_usd = (
-            float(raw_cap) if isinstance(raw_cap, int | float) else None
-        )
-        session.auto_approval_estimated_spend_usd = float(
-            meta.get("auto_approval_estimated_spend_usd") or 0.0
-        )
-
-        created_at = meta.get("created_at")
-        if not isinstance(created_at, datetime):
-            created_at = datetime.utcnow()
-
-        agent_session = AgentSession(
-            session_id=session_id,
-            session=session,
-            tool_router=tool_router,
-            submission_queue=submission_queue,
-            user_id=owner or user_id,
-            hf_username=hf_username,
-            hf_token=hf_token,
-            created_at=created_at,
-            is_active=True,
-            is_processing=False,
-            claude_counted=bool(meta.get("claude_counted")),
-            title=meta.get("title"),
-        )
-        started = await self._start_agent_session(
-            agent_session=agent_session,
-            event_queue=event_queue,
-            tool_router=tool_router,
-        )
-        if started is not agent_session:
-            self._update_hf_identity(
-                started,
-                hf_token=hf_token,
-                hf_username=hf_username,
-            )
-            started.last_access = datetime.utcnow()
-            return started
-        if preload_sandbox:
-            self._start_cpu_sandbox_preload(agent_session)
-        logger.info("Restored session %s for user %s", session_id, owner or user_id)
-        return agent_session
+                started.last_access = datetime.utcnow()
+                should_release_reserved_slot = False
+                return started
+            if preload_sandbox:
+                self._start_cpu_sandbox_preload(agent_session)
+            logger.info("Restored session %s for user %s", session_id, owner or user_id)
+            should_release_reserved_slot = False
+            return agent_session
+        finally:
+            if should_release_reserved_slot:
+                await self._release_reserved_session_slot(session_id, reserved_session)
 
     async def create_session(
         self,
