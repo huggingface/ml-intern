@@ -156,6 +156,8 @@ class SessionManager:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.exception("Cleanup task failed during shutdown")
         await self.messaging_gateway.close()
         if self.persistence_store is not None:
             await self.persistence_store.close()
