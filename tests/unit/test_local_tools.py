@@ -100,6 +100,15 @@ async def test_bash_timeout_non_numeric_falls_back_to_default(monkeypatch):
     assert seen["kwargs"]["timeout"] == DEFAULT_TIMEOUT
 
 
+async def test_bash_timeout_non_positive_falls_back_to_default(monkeypatch):
+    """A non-positive ``timeout`` must not be passed to ``subprocess.run``."""
+    for bad in (-5, "-5", "0"):
+        seen: dict = {}
+        monkeypatch.setattr(local_tools.subprocess, "run", _fake_run(seen))
+        await local_tools._bash_handler({"command": "echo hi", "timeout": bad})
+        assert seen["kwargs"]["timeout"] == DEFAULT_TIMEOUT
+
+
 async def test_bash_rejects_nonexistent_work_dir(monkeypatch):
     """A missing ``work_dir`` returns an actionable error, not a raw OSError."""
     seen: dict = {}

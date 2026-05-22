@@ -112,9 +112,13 @@ async def _bash_handler(
         return f"work_dir is not an existing directory: {work_dir}", False
     # Providers occasionally emit the schema-typed integer `timeout` as a
     # string; coerce it so a string value can't raise an uncaught TypeError.
+    # A non-positive value would make subprocess.run time out instantly, so
+    # fall back to the default in that case too.
     try:
         timeout = int(args.get("timeout") or DEFAULT_TIMEOUT)
     except (TypeError, ValueError):
+        timeout = DEFAULT_TIMEOUT
+    if timeout <= 0:
         timeout = DEFAULT_TIMEOUT
     timeout = min(timeout, MAX_TIMEOUT)
     try:
