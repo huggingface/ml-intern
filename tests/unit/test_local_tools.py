@@ -1,9 +1,13 @@
 """Regression tests for ``_bash_handler`` argument handling.
 
-The bash tool's JSON schema declares ``timeout`` as an integer, but model
-providers occasionally serialize schema-typed integers as JSON strings
-(``"120"``). The handler must coerce such values instead of letting
-``min(...)`` raise an uncaught ``TypeError`` that kills the agent turn.
+Two robustness fixes are covered:
+
+* ``timeout`` — the bash tool's JSON schema declares this as an integer, but
+  model providers occasionally serialize schema-typed integers as JSON
+  strings (``"120"``). The handler must coerce such values instead of
+  letting ``min(...)`` raise an uncaught ``TypeError`` that kills the turn.
+* ``work_dir`` — a non-existent ``work_dir`` must produce an actionable tool
+  error rather than a raw ``OSError`` string.
 """
 
 from types import SimpleNamespace
@@ -94,3 +98,47 @@ async def test_bash_timeout_non_numeric_falls_back_to_default(monkeypatch):
 
     assert ok is True
     assert seen["kwargs"]["timeout"] == DEFAULT_TIMEOUT
+
+
+async def test_bash_rejects_nonexistent_work_dir(monkeypatch):
+    """A missing ``work_dir`` returns an actionable error, not a raw OSError."""
+    seen: dict = {}
+    monkeypatch.setattr(local_tools.subprocess, "run", _fake_run(seen))
+
+    output, ok = await local_tools._bash_handler(
+        {"command": "echo hi", "work_dir": "/no/such/directory/xyz123"}
+    )
+
+    assert ok is False
+    assert "work_dir" in output
+    assert "/no/such/directory/xyz123" in output
+    assert "command" not in seen  # subprocess.run never reached
+
+
+async def test_bash_rejects_file_as_work_dir(monkeypatch, tmp_path):
+    """A regular file passed as ``work_dir`` is rejected."""
+    seen: dict = {}
+    monkeypatch.setattr(local_tools.subprocess, "run", _fake_run(seen))
+    a_file = tmp_path / "not_a_dir.txt"
+    a_file.write_text("x")
+
+    output, ok = await local_tools._bash_handler(
+        {"command": "echo hi", "work_dir": str(a_file)}
+    )
+
+    assert ok is False
+    assert "work_dir" in output
+    assert "command" not in seen
+
+
+async def test_bash_accepts_valid_work_dir(monkeypatch, tmp_path):
+    """An existing ``work_dir`` is passed through to ``subprocess.run``."""
+    seen: dict = {}
+    monkeypatch.setattr(local_tools.subprocess, "run", _fake_run(seen))
+
+    output, ok = await local_tools._bash_handler(
+        {"command": "echo hi", "work_dir": str(tmp_path)}
+    )
+
+    assert ok is True
+    assert seen["kwargs"]["cwd"] == str(tmp_path)

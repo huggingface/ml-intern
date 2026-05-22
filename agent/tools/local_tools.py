@@ -108,6 +108,8 @@ async def _bash_handler(
         return "No command provided.", False
     command = wrap_shell_command_with_hub_artifact_bootstrap(command, session)
     work_dir = args.get("work_dir", ".")
+    if not os.path.isdir(work_dir):
+        return f"work_dir is not an existing directory: {work_dir}", False
     # Providers occasionally emit the schema-typed integer `timeout` as a
     # string; coerce it so a string value can't raise an uncaught TypeError.
     try:
