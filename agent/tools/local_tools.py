@@ -108,7 +108,13 @@ async def _bash_handler(
         return "No command provided.", False
     command = wrap_shell_command_with_hub_artifact_bootstrap(command, session)
     work_dir = args.get("work_dir", ".")
-    timeout = min(args.get("timeout") or DEFAULT_TIMEOUT, MAX_TIMEOUT)
+    # Providers occasionally emit the schema-typed integer `timeout` as a
+    # string; coerce it so a string value can't raise an uncaught TypeError.
+    try:
+        timeout = int(args.get("timeout") or DEFAULT_TIMEOUT)
+    except (TypeError, ValueError):
+        timeout = DEFAULT_TIMEOUT
+    timeout = min(timeout, MAX_TIMEOUT)
     try:
         result = subprocess.run(
             command,
