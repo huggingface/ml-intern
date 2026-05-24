@@ -171,6 +171,15 @@ def _resolve_llm_params(
     • ``openai/<model>`` — ``reasoning_effort`` forwarded as a top-level
       kwarg (GPT-5 / o-series). LiteLLM uses the user's ``OPENAI_API_KEY``.
 
+    • ``bedrock/<model>`` — AWS Bedrock via the Converse adapter; creds
+      come from the standard ``AWS_*`` env vars.
+
+    • ``vertex_ai/<model>`` / ``gemini/<model>`` — GCP-hosted models.
+      ``vertex_ai/`` covers Gemini and Anthropic Model Garden models and
+      reads ``VERTEXAI_PROJECT`` / ``VERTEXAI_LOCATION`` + Application
+      Default Credentials; ``gemini/`` is Google AI Studio and reads
+      ``GEMINI_API_KEY``. ``reasoning_effort`` is not forwarded.
+
     • ``ollama/<model>``, ``vllm/<model>``, ``lm_studio/<model>``, and
       ``llamacpp/<model>`` — local OpenAI-compatible endpoints. The id prefix
       selects a configurable localhost base URL, and the model suffix is sent
@@ -229,6 +238,23 @@ def _resolve_llm_params(
         # (``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` / ``AWS_REGION``).
         # The Anthropic thinking/effort shape is not forwarded through Converse
         # the same way, so we leave it off for now.
+        return {"model": model_name}
+
+    if model_name.startswith(("vertex_ai/", "gemini/")):
+        # GCP-hosted models via LiteLLM:
+        #   ``vertex_ai/<model>``  — Vertex AI. Covers Gemini
+        #     (``vertex_ai/gemini-3.1-pro``, ``vertex_ai/gemini-3.5-flash``)
+        #     and Anthropic models served through Model Garden
+        #     (``vertex_ai/claude-opus-4-...``).
+        #     LiteLLM reads ``VERTEXAI_PROJECT`` / ``VERTEXAI_LOCATION`` from
+        #     the env and authenticates via Application Default Credentials
+        #     (``GOOGLE_APPLICATION_CREDENTIALS`` service-account JSON, or
+        #     ``gcloud auth application-default login``).
+        #   ``gemini/<model>``     — Google AI Studio. Simpler path: LiteLLM
+        #     reads a single ``GEMINI_API_KEY`` from the env.
+        # As with ``bedrock/``, each provider has its own thinking/effort
+        # shape, so we don't forward ``reasoning_effort`` here — the probe
+        # cascade resolves effort to "off" and real calls run without it.
         return {"model": model_name}
 
     if model_name.startswith("openai/"):

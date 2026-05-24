@@ -33,6 +33,10 @@ Create a `.env` file in the project root (or export these in your shell):
 ```bash
 ANTHROPIC_API_KEY=<your-anthropic-api-key> # if using anthropic models
 OPENAI_API_KEY=<your-openai-api-key> # if using openai models
+GEMINI_API_KEY=<your-ai-studio-key> # if using gemini/ (Google AI Studio) models
+VERTEXAI_PROJECT=<gcp-project-id> # if using vertex_ai/ models
+VERTEXAI_LOCATION=us-central1 # GCP region for vertex_ai/ models
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json # ADC for vertex_ai/
 LOCAL_LLM_BASE_URL=http://localhost:8000 # shared fallback for local model prefixes
 LOCAL_LLM_API_KEY=<optional-local-api-key> # optional shared local API key
 HF_TOKEN=<your-hugging-face-token>
@@ -61,6 +65,9 @@ ml-intern "fine-tune llama on my dataset"
 ```bash
 ml-intern --model anthropic/claude-opus-4-7 "your prompt"   # requires ANTHROPIC_API_KEY
 ml-intern --model openai/gpt-5.5 "your prompt"              # requires OPENAI_API_KEY
+ml-intern --model vertex_ai/gemini-3.1-pro "your prompt"    # GCP Vertex AI (ADC + VERTEXAI_*)
+ml-intern --model vertex_ai/gemini-3.5-flash "your prompt"  # GCP Vertex AI
+ml-intern --model gemini/gemini-3.5-flash "your prompt"     # Google AI Studio (GEMINI_API_KEY)
 ml-intern --model ollama/llama3.1:8b "your prompt"
 ml-intern --model vllm/meta-llama/Llama-3.1-8B-Instruct "your prompt"
 ml-intern --sandbox-tools "your prompt"                         # use HF Space sandbox tools
@@ -97,6 +104,27 @@ one shared local endpoint, or override a specific provider with its matching
 `*_BASE_URL` / `*_API_KEY` variable, such as `OLLAMA_BASE_URL` or
 `VLLM_API_KEY`. Provider-specific variables take precedence over the shared
 local variables. Base URLs may include or omit `/v1`.
+
+**GCP models (Vertex AI / Gemini):**
+
+Google Cloud models route through LiteLLM, no extra dependency needed:
+
+```text
+/model vertex_ai/gemini-3.1-pro      # Gemini 3.1 Pro on Vertex AI
+/model vertex_ai/gemini-3.5-flash    # Gemini 3.5 Flash on Vertex AI
+/model vertex_ai/claude-opus-4-6     # Anthropic models via Vertex Model Garden
+/model gemini/gemini-3.5-flash       # Google AI Studio (simpler, key-only)
+```
+
+- `vertex_ai/<model>` — full Vertex AI. Set `VERTEXAI_PROJECT` and
+  `VERTEXAI_LOCATION`, and authenticate with Application Default Credentials:
+  either `GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account JSON,
+  or run `gcloud auth application-default login`. Covers Gemini and the
+  Anthropic models published in Vertex Model Garden.
+- `gemini/<model>` — Google AI Studio. Only needs `GEMINI_API_KEY`.
+
+Reasoning effort is not forwarded to these providers (each has its own
+thinking shape); calls run without an effort level.
 
 **CLI tool runtime:**
 

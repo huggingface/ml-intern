@@ -42,6 +42,8 @@ SUGGESTED_MODELS = [
         "id": "bedrock/us.anthropic.claude-opus-4-6-v1",
         "label": "Claude Opus 4.6 via Bedrock",
     },
+    {"id": "vertex_ai/gemini-3.1-pro", "label": "Gemini 3.1 Pro via Vertex AI"},
+    {"id": "vertex_ai/gemini-3.5-flash", "label": "Gemini 3.5 Flash via Vertex AI"},
     {"id": "MiniMaxAI/MiniMax-M2.7", "label": "MiniMax M2.7"},
     {"id": "moonshotai/Kimi-K2.6", "label": "Kimi K2.6"},
     {"id": "zai-org/GLM-5.1", "label": "GLM 5.1"},
@@ -50,7 +52,14 @@ SUGGESTED_MODELS = [
 
 
 _ROUTING_POLICIES = {"fastest", "cheapest", "preferred"}
-_DIRECT_PREFIXES = ("anthropic/", "openai/", *LOCAL_MODEL_PREFIXES)
+_DIRECT_PREFIXES = (
+    "anthropic/",
+    "openai/",
+    "bedrock/",
+    "vertex_ai/",
+    "gemini/",
+    *LOCAL_MODEL_PREFIXES,
+)
 _LOCAL_PROBE_TIMEOUT = 15.0
 
 

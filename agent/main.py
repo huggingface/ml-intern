@@ -1618,6 +1618,12 @@ def cli():
     warnings.filterwarnings("ignore", category=DeprecationWarning, module="litellm")
     # Suppress whoosh invalid escape sequence warnings (third-party, unfixed upstream)
     warnings.filterwarnings("ignore", category=SyntaxWarning, module="whoosh")
+    # Suppress Pydantic serializer warnings raised when LiteLLM serializes
+    warnings.filterwarnings(
+        "ignore",
+        message="Pydantic serializer warnings",
+        category=UserWarning,
+    )
 
     parser = argparse.ArgumentParser(description="Hugging Face Agent CLI")
     parser.add_argument(
