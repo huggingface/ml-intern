@@ -873,7 +873,11 @@ async def _call_llm_streaming(
             raise
         except Exception as e:
             if _is_context_overflow_error(e):
-                raise ContextWindowExceededError(str(e)) from e
+                raise ContextWindowExceededError(
+                    message=str(e),
+                    model=llm_params.get("model", ""),
+                    llm_provider=(llm_params.get("model", "") or "").split("/")[0],
+                ) from e
             if not _healed_effort and _is_effort_config_error(e):
                 _healed_effort = True
                 llm_params = await _heal_effort_and_rebuild_params(
@@ -1030,7 +1034,11 @@ async def _call_llm_non_streaming(
             raise
         except Exception as e:
             if _is_context_overflow_error(e):
-                raise ContextWindowExceededError(str(e)) from e
+                raise ContextWindowExceededError(
+                    message=str(e),
+                    model=llm_params.get("model", ""),
+                    llm_provider=(llm_params.get("model", "") or "").split("/")[0],
+                ) from e
             if not _healed_effort and _is_effort_config_error(e):
                 _healed_effort = True
                 llm_params = await _heal_effort_and_rebuild_params(
