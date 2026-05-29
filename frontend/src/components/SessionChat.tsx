@@ -39,6 +39,10 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
   } = useAgentChat({
     sessionId,
     isActive,
+    // A backgrounded session that the backend reports mid-turn still needs to
+    // mount its live subscription; idle backgrounded sessions do not (that's
+    // what stops app load from reactivating every historical runtime).
+    isProcessing: sessionMeta?.isProcessing ?? false,
     onReady: () => logger.log(`Session ${sessionId} ready`),
     onError: (error) => logger.error(`Session ${sessionId} error:`, error),
     onSessionDead,

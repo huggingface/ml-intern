@@ -659,6 +659,7 @@ async def upload_session_dataset(
         agent_session.session.context_manager.add_message(
             Message(role="user", content=dataset_context_note(uploaded))
         )
+        session_manager._touch(agent_session)
         await session_manager.persist_session_snapshot(agent_session)
         logger.info(
             "Uploaded dataset file %s to %s for session %s",

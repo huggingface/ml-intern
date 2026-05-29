@@ -24,17 +24,30 @@ import { logger } from '@/utils/logger';
 interface UseAgentChatOptions {
   sessionId: string;
   isActive: boolean;
+  /** Backend reports this session is mid-turn (from the GET /sessions list). */
+  isProcessing?: boolean;
   onReady?: () => void;
   onError?: (error: string) => void;
   onSessionDead?: (sessionId: string) => void;
 }
 
-export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionDead }: UseAgentChatOptions) {
+export function useAgentChat({ sessionId, isActive, isProcessing = false, onReady, onError, onSessionDead }: UseAgentChatOptions) {
   const callbacksRef = useRef({ onReady, onError, onSessionDead });
   callbacksRef.current = { onReady, onError, onSessionDead };
 
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
+
+  // Only the active tab — or a session the backend says is mid-turn — gets a
+  // reactivating hydration (the /messages + /session fetch and the SDK's
+  // resume reconnect both call ensure_session_loaded, which spins a runtime +
+  // sandbox back up for any not-currently-live session). Gating on this keeps
+  // app load from reactivating every historical session and refilling the
+  // global active-session pool. A processing session is already live, so
+  // hydrating it returns the existing object without inflating the pool.
+  const shouldReactivate = isActive || isProcessing;
+  const shouldReactivateRef = useRef(shouldReactivate);
+  shouldReactivateRef.current = shouldReactivate;
 
   const { setNeedsAttention, updateSessionYolo } = useSessionStore();
 
@@ -46,6 +59,11 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
     () => ({
       onReady: () => {
         updateSession(sessionId, { isProcessing: false });
+        // Mirror to the sidebar store too: agentStore drives the live UI, but
+        // SessionMeta.isProcessing (sessionStore) is what feeds shouldReactivate.
+        // Only mergeServerSessions sets it, so without clearing it here a
+        // finished background task keeps reactivating until the next list fetch.
+        useSessionStore.getState().setSessionProcessing(sessionId, false);
         if (isActiveRef.current) {
           useAgentStore.getState().setConnected(true);
         }
@@ -54,12 +72,14 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
       },
       onShutdown: () => {
         updateSession(sessionId, { isProcessing: false });
+        useSessionStore.getState().setSessionProcessing(sessionId, false);
         if (isActiveRef.current) {
           useAgentStore.getState().setConnected(false);
         }
       },
       onError: (error: string) => {
         updateSession(sessionId, { isProcessing: false });
+        useSessionStore.getState().setSessionProcessing(sessionId, false);
         callbacksRef.current.onError?.(error);
       },
       onProcessing: () => {
@@ -67,12 +87,15 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
           isProcessing: true,
           activityStatus: { type: 'thinking' },
         });
+        useSessionStore.getState().setSessionProcessing(sessionId, true);
       },
       onProcessingDone: () => {
         updateSession(sessionId, { isProcessing: false });
+        useSessionStore.getState().setSessionProcessing(sessionId, false);
       },
       onUndoComplete: () => {
         updateSession(sessionId, { isProcessing: false });
+        useSessionStore.getState().setSessionProcessing(sessionId, false);
       },
       onCompacted: (oldTokens: number, newTokens: number) => {
         logger.log(`Context compacted: ${oldTokens} -> ${newTokens} tokens`);
@@ -197,7 +220,14 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
           );
         }
 
-        updateSession(sessionId, { activityStatus: { type: 'waiting-approval' } });
+        // Approval pauses the turn: the backend has returned and set
+        // is_processing=False, and no turn_complete/onProcessingDone fires on
+        // this path. Clear processing in both stores (sessionStore.isProcessing
+        // feeds shouldReactivate) so a backgrounded waiting-approval session
+        // doesn't stay "processing" until the next /sessions merge —
+        // activityStatus still surfaces the waiting-approval state.
+        updateSession(sessionId, { isProcessing: false, activityStatus: { type: 'waiting-approval' } });
+        useSessionStore.getState().setSessionProcessing(sessionId, false);
 
         // Build panel data for this session's pending approval
         const firstTool = tools[0];
@@ -349,14 +379,17 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
     experimental_throttle: 80,
     // On mount, the SDK calls transport.reconnectToStream() which checks
     // is_processing and subscribes to the live event stream if the agent
-    // is mid-turn.  Without this, page refresh kills live updates.
-    resume: true,
+    // is mid-turn.  Without this, page refresh kills live updates. Gated on
+    // shouldReactivate so an idle backgrounded session isn't reactivated on
+    // app load just to find there's nothing to resume.
+    resume: shouldReactivate,
     // After all approval responses are set, auto-send to continue the agent loop.
     // Without this, addToolApprovalResponse only updates the UI — it won't trigger
     // sendMessages on the transport.
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
     onError: (error) => {
       updateSession(sessionId, { isProcessing: false });
+      useSessionStore.getState().setSessionProcessing(sessionId, false);
       // Premium-model daily cap: open the cap dialog instead of the generic error
       // banner. Transport marks the error with this sentinel.
       if (error.message === 'CLAUDE_QUOTA_EXHAUSTED') {
@@ -374,7 +407,13 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
   chatActionsRef.current.messages = chat.messages;
 
   // -- Hydrate from backend on mount (page refresh recovery) --------------
+  // Gated on shouldReactivate: an idle backgrounded session renders from its
+  // localStorage message cache + the sidebar list payload, with no per-session
+  // fetch that would reactivate its runtime/sandbox. Re-runs when a session
+  // becomes active (user selects it) or the list reports it processing, which
+  // is exactly when reactivation is wanted.
   useEffect(() => {
+    if (!shouldReactivate) return;
     let cancelled = false;
     (async () => {
       try {
@@ -450,7 +489,7 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
       }
     })();
     return () => { cancelled = true; };
-  }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId, shouldReactivate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // -- Re-hydrate + reconnect on wake from sleep ----------------------------
   // The Vercel AI SDK only calls reconnectToStream() on mount, NOT on
@@ -627,6 +666,10 @@ export function useAgentChat({ sessionId, isActive, onReady, onError, onSessionD
 
     const onVisible = async () => {
       if (document.visibilityState !== 'visible') return;
+      // Idle backgrounded sessions stay dormant on tab refocus too — otherwise
+      // every refocus would re-hydrate (and reactivate) every session, refilling
+      // the pool the reaper just drained. Only the active/processing session wakes.
+      if (!shouldReactivateRef.current) return;
 
       // Always re-hydrate messages on wake
       const result = await hydrateMessages();

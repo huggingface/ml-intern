@@ -105,6 +105,8 @@ def _manager_with_store(store: NoopSessionStore) -> SessionManager:
     manager._lock = asyncio.Lock()
     manager.persistence_store = store
     manager.messaging_gateway = CloseableResource()
+    manager._pending_creates = 0
+    manager._reaper_task = None
     return manager
 
 
@@ -621,6 +623,87 @@ async def test_lazy_restore_preserves_auto_approval_policy():
         assert restored.session.auto_approval_cost_cap_usd == 5.0
         assert restored.session.auto_approval_estimated_spend_usd == 1.25
         assert restored.session.auto_approval_policy_summary()["remaining_usd"] == 3.75
+    finally:
+        stop.set()
+        await _cancel_runtime_tasks(manager)
+
+
+@pytest.mark.asyncio
+async def test_lazy_restore_injects_sandbox_reset_note_when_session_had_sandbox():
+    store = RestoreStore(
+        metadata={
+            "session_id": "had-sandbox",
+            "user_id": "owner",
+            "model": "test-model",
+            "sandbox_status": "destroyed",
+        }
+    )
+    manager = _manager_with_store(store)
+    stop = _install_fake_runtime(manager)
+
+    try:
+        restored = await manager.ensure_session_loaded("had-sandbox", user_id="owner")
+
+        assert restored is not None
+        items = restored.session.context_manager.items
+        assert len(items) == 1
+        assert "sandbox was reset" in items[0].content
+    finally:
+        stop.set()
+        await _cancel_runtime_tasks(manager)
+
+
+@pytest.mark.asyncio
+async def test_lazy_restore_skips_sandbox_reset_note_when_no_sandbox():
+    store = RestoreStore(
+        metadata={
+            "session_id": "no-sandbox",
+            "user_id": "owner",
+            "model": "test-model",
+        }
+    )
+    manager = _manager_with_store(store)
+    stop = _install_fake_runtime(manager)
+
+    try:
+        restored = await manager.ensure_session_loaded("no-sandbox", user_id="owner")
+
+        assert restored is not None
+        assert restored.session.context_manager.items == []
+    finally:
+        stop.set()
+        await _cancel_runtime_tasks(manager)
+
+
+@pytest.mark.asyncio
+async def test_lazy_restore_skips_sandbox_note_when_pending_approval():
+    """The sandbox-reset note must be skipped when an approval is pending: it
+    would land between the restored assistant tool-calls and their results,
+    orphaning the tool results on approval (the provider rejects the ordering)."""
+    store = RestoreStore(
+        metadata={
+            "session_id": "had-sandbox-pending",
+            "user_id": "owner",
+            "model": "test-model",
+            "sandbox_status": "destroyed",
+            "pending_approval": [
+                {"tool": "bash", "tool_call_id": "call_1", "arguments": {}}
+            ],
+        }
+    )
+    manager = _manager_with_store(store)
+    stop = _install_fake_runtime(manager)
+
+    try:
+        restored = await manager.ensure_session_loaded(
+            "had-sandbox-pending", user_id="owner"
+        )
+
+        assert restored is not None
+        items = restored.session.context_manager.items
+        assert not any("sandbox was reset" in getattr(m, "content", "") for m in items)
+        # The pending approval itself is still restored.
+        assert restored.session.pending_approval is not None
     finally:
         stop.set()
         await _cancel_runtime_tasks(manager)

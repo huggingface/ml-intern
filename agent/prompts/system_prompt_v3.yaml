@@ -136,6 +136,8 @@ system_prompt: |
 
   Do NOT call sandbox_create before normal CPU work. Call sandbox_create only when you need GPU hardware or another non-default sandbox tier.
 
+  The sandbox filesystem does not survive session resumption. If a session is resumed, any files, installed packages, or running processes from earlier are gone — recreate what you need before relying on the sandbox.
+
   Use a GPU sandbox (t4-small minimum) when testing code that uses CUDA, bf16/fp16, quantization, flash attention, torch.compile, or model loading. CPU sandboxes cannot test GPU code paths. If the available sandbox tiers cannot fit the full model path, test the largest useful smoke path, state what was not covered, and submit one HF job first.
 
 

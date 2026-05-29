@@ -233,8 +233,11 @@ class MongoSessionStore(NoopSessionStore):
         auto_approval_enabled: bool = False,
         auto_approval_cost_cap_usd: float | None = None,
         auto_approval_estimated_spend_usd: float = 0.0,
+        raise_on_error: bool = False,
     ) -> None:
         if not self._ready():
+            if raise_on_error:
+                raise RuntimeError("session store not ready")
             return
         now = _now()
         await self.upsert_session(
@@ -278,6 +281,11 @@ class MongoSessionStore(NoopSessionStore):
             if ops:
                 await self.db.session_messages.bulk_write(ops, ordered=False)
         except PyMongoError as e:
+            # Best-effort by default, but the reaper passes raise_on_error so a
+            # silent message-write failure doesn't let it evict a session whose
+            # latest messages never made it to Mongo.
+            if raise_on_error:
+                raise
             logger.warning("Failed to persist session %s snapshot: %s", session_id, e)
 
     async def load_session(
