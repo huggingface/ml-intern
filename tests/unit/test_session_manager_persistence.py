@@ -726,6 +726,8 @@ async def test_list_sessions_dev_uses_store_dev_visibility():
                         "user_id": "alice",
                         "model": "m",
                         "created_at": datetime.now(UTC),
+                        "premium_user_billed": True,
+                        "claude_counted": True,
                         "auto_approval_enabled": True,
                         "auto_approval_cost_cap_usd": 5.0,
                         "auto_approval_estimated_spend_usd": 2.0,
@@ -747,6 +749,8 @@ async def test_list_sessions_dev_uses_store_dev_visibility():
     assert store.seen_user_id == "dev"
     assert {session["session_id"] for session in sessions} == {"s1", "s2"}
     yolo = next(session for session in sessions if session["session_id"] == "s1")
+    assert yolo["premium_user_billed"] is True
+    assert yolo["premium_quota_counted"] is True
     assert yolo["auto_approval"] == {
         "enabled": True,
         "cost_cap_usd": 5.0,

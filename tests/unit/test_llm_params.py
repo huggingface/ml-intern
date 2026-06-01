@@ -194,6 +194,24 @@ def test_hf_router_anthropic_user_billed_when_flagged(monkeypatch):
     assert "extra_headers" not in params
 
 
+def test_hf_router_user_billed_does_not_fall_back_to_cached_token(monkeypatch):
+    import huggingface_hub
+
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+    monkeypatch.setenv("HF_TOKEN", "server-token")
+    monkeypatch.setattr(huggingface_hub, "get_token", lambda: "cached-token")
+
+    params = _resolve_llm_params(
+        "huggingface/anthropic/claude-opus-4.6:fal-ai",
+        None,
+        bill_to_user=True,
+    )
+
+    assert params["api_key"] is None
+    assert "extra_headers" not in params
+
+
 def test_bill_to_user_ignored_for_free_models(monkeypatch):
     monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
     monkeypatch.setenv("HF_BILL_TO", "smolagents")

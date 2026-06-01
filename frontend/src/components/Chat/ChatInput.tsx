@@ -20,7 +20,7 @@ import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
 import StopIcon from '@mui/icons-material/Stop';
 import AddIcon from '@mui/icons-material/Add';
 import { apiFetch, apiUpload } from '@/utils/api';
-import { useUserQuota } from '@/hooks/useUserQuota';
+import type { UserQuota } from '@/hooks/useUserQuota';
 import JobsUpgradeDialog from '@/components/JobsUpgradeDialog';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
@@ -123,6 +123,8 @@ interface ChatInputProps {
   isProcessing?: boolean;
   disabled?: boolean;
   placeholder?: string;
+  quota: UserQuota | null;
+  refreshQuota: () => Promise<void> | void;
 }
 
 interface DatasetUploadResponse {
@@ -157,7 +159,7 @@ const datasetRepoUrl = (repoId: string) => (
   `https://huggingface.co/datasets/${repoId.split('/').map(encodeURIComponent).join('/')}`
 );
 
-export default function ChatInput({ sessionId, initialModelPath, onSend, onStop, onDatasetUploaded, isProcessing = false, disabled = false, placeholder = 'Ask anything...' }: ChatInputProps) {
+export default function ChatInput({ sessionId, initialModelPath, onSend, onStop, onDatasetUploaded, isProcessing = false, disabled = false, placeholder = 'Ask anything...', quota, refreshQuota }: ChatInputProps) {
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -168,7 +170,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     () => findModelByPath(initialModelPath ?? '', DEFAULT_MODEL_OPTIONS)?.id ?? DEFAULT_MODEL_OPTIONS[0].id,
   );
   const [modelAnchorEl, setModelAnchorEl] = useState<null | HTMLElement>(null);
-  const { quota, refresh: refreshQuota } = useUserQuota();
   const jobsUpgradeRequired = useAgentStore((s) => s.jobsUpgradeRequired);
   const setJobsUpgradeRequired = useAgentStore((s) => s.setJobsUpgradeRequired);
   const updateSessionModel = useSessionStore((s) => s.updateSessionModel);

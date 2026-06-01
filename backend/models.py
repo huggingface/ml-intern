@@ -106,6 +106,7 @@ class SessionInfo(BaseModel):
         default_factory=SessionAutoApprovalInfo
     )
     premium_user_billed: bool = False
+    premium_quota_counted: bool = False
 
 
 class SessionNotificationsRequest(BaseModel):

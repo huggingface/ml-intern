@@ -18,13 +18,13 @@ export interface UserQuota {
   premiumRemaining: number;
 }
 
-export function useUserQuota() {
+export function useUserQuota({ enabled = true }: { enabled?: boolean } = {}) {
   const user = useAgentStore((s) => s.user);
   const [quota, setQuota] = useState<UserQuota | null>(null);
   const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(async () => {
-    if (!user?.authenticated) return;
+    if (!enabled || !user?.authenticated) return;
     setLoading(true);
     try {
       const res = await apiFetch('/api/user/quota');
@@ -41,7 +41,7 @@ export function useUserQuota() {
     } finally {
       setLoading(false);
     }
-  }, [user?.authenticated]);
+  }, [enabled, user?.authenticated]);
 
   useEffect(() => {
     refresh();

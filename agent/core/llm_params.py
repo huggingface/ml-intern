@@ -272,7 +272,7 @@ def _resolve_llm_params(
     # subsidized path.
     bill_user = bill_to_user and hf_model.startswith(("anthropic/", "openai/"))
     api_key = (
-        resolve_hf_token(session_hf_token)
+        resolve_hf_token(session_hf_token, include_cached=False)
         if bill_user
         else _resolve_hf_router_token(session_hf_token)
     )

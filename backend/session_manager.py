@@ -1475,6 +1475,7 @@ class SessionManager:
             "premium_user_billed": getattr(
                 agent_session.session, "premium_user_billed", False
             ),
+            "premium_quota_counted": agent_session.claude_counted,
         }
 
     def set_notification_destinations(
@@ -1539,6 +1540,10 @@ class SessionManager:
                         "pending_approval": pending or None,
                         "model": row.get("model"),
                         "title": row.get("title"),
+                        "premium_user_billed": bool(
+                            row.get("premium_user_billed", False)
+                        ),
+                        "premium_quota_counted": bool(row.get("claude_counted", False)),
                         "notification_destinations": row.get(
                             "notification_destinations"
                         )
