@@ -1,5 +1,5 @@
 {
-  "model_name": "${ML_INTERN_CLAUDE_MODEL_ID:-bedrock/us.anthropic.claude-opus-4-6-v1}",
+  "model_name": "${ML_INTERN_CLAUDE_MODEL_ID:-huggingface/anthropic/claude-opus-4.6:fal-ai}",
   "save_sessions": true,
   "session_dataset_repo": "smolagents/ml-intern-sessions",
   "share_traces": true,

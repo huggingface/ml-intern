@@ -221,6 +221,11 @@ RESEARCH_TOOL_SPEC = {
 
 def _get_research_model(main_model: str) -> str:
     """Pick a cheaper model for research based on the main model."""
+    # HF-router Anthropic (e.g. huggingface/anthropic/claude-opus-4.6:fal-ai)
+    # downgrades to Sonnet on the same router, so research keeps the user's
+    # billing path instead of running full Opus.
+    if main_model.startswith("huggingface/anthropic/"):
+        return "huggingface/anthropic/claude-sonnet-4-6:fal-ai"
     if main_model.startswith("anthropic/"):
         return "anthropic/claude-sonnet-4-6"
     if main_model.startswith("bedrock/") and "anthropic" in main_model:
@@ -264,6 +269,7 @@ async def research_handler(
         research_model,
         getattr(session, "hf_token", None),
         reasoning_effort=_capped,
+        bill_to_user=getattr(session, "premium_user_billed", False),
     )
 
     # Get read-only tool specs from the session's tool router

@@ -541,6 +541,7 @@ async def _heal_effort_and_rebuild_params(
         model,
         session.hf_token,
         reasoning_effort=session.effective_effort_for(model),
+        bill_to_user=getattr(session, "premium_user_billed", False),
     )
 
 
@@ -1256,6 +1257,7 @@ class Handlers:
                     reasoning_effort=session.effective_effort_for(
                         session.config.model_name
                     ),
+                    bill_to_user=getattr(session, "premium_user_billed", False),
                 )
                 if session.stream:
                     llm_result = await _call_llm_streaming(

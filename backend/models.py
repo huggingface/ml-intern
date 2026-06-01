@@ -105,6 +105,7 @@ class SessionInfo(BaseModel):
     auto_approval: SessionAutoApprovalInfo = Field(
         default_factory=SessionAutoApprovalInfo
     )
+    premium_user_billed: bool = False
 
 
 class SessionNotificationsRequest(BaseModel):

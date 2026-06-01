@@ -118,8 +118,6 @@ interface AgentStore {
   activityStatus: ActivityStatus;
   user: User | null;
   llmHealthError: LLMHealthError | null;
-  /** Set when a premium-model send hits the daily quota; ChatInput opens the cap dialog. */
-  claudeQuotaExhausted: boolean;
   jobsUpgradeRequired: JobsUpgradeState | null;
 
   // Right panel (single-artifact pattern)
@@ -173,7 +171,6 @@ interface AgentStore {
   setActivityStatus: (status: ActivityStatus) => void;
   setUser: (user: User | null) => void;
   setLlmHealthError: (error: LLMHealthError | null) => void;
-  setClaudeQuotaExhausted: (exhausted: boolean) => void;
   setJobsUpgradeRequired: (state: JobsUpgradeState | null) => void;
 
   setPanel: (data: PanelData, view?: PanelView, editable?: boolean) => void;
@@ -294,7 +291,6 @@ export const useAgentStore = create<AgentStore>()((set, get) => ({
   activityStatus: { type: 'idle' },
   user: null,
   llmHealthError: null,
-  claudeQuotaExhausted: false,
   jobsUpgradeRequired: null,
 
   panelData: null,
@@ -407,7 +403,6 @@ export const useAgentStore = create<AgentStore>()((set, get) => ({
   setActivityStatus: (status) => set({ activityStatus: status }),
   setUser: (user) => set({ user }),
   setLlmHealthError: (error) => set({ llmHealthError: error }),
-  setClaudeQuotaExhausted: (exhausted) => set({ claudeQuotaExhausted: exhausted }),
   setJobsUpgradeRequired: (state) => set({ jobsUpgradeRequired: state }),
 
   // ── Panel (single-artifact) ───────────────────────────────────────

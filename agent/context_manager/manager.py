@@ -142,7 +142,12 @@ async def summarize_messages(
     from agent.core.llm_params import _resolve_llm_params
 
     prompt_messages = list(messages) + [Message(role="user", content=prompt)]
-    llm_params = _resolve_llm_params(model_name, hf_token, reasoning_effort="high")
+    llm_params = _resolve_llm_params(
+        model_name,
+        hf_token,
+        reasoning_effort="high",
+        bill_to_user=getattr(session, "premium_user_billed", False),
+    )
     prompt_messages, tool_specs = with_prompt_caching(
         prompt_messages, tool_specs, llm_params.get("model")
     )

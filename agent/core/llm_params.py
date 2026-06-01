@@ -7,7 +7,11 @@ creating circular imports.
 
 import os
 
-from agent.core.hf_tokens import get_hf_bill_to, resolve_hf_router_token
+from agent.core.hf_tokens import (
+    get_hf_bill_to,
+    resolve_hf_router_token,
+    resolve_hf_token,
+)
 from agent.core.local_models import (
     LOCAL_MODEL_API_KEY_DEFAULT,
     LOCAL_MODEL_API_KEY_ENV,
@@ -151,6 +155,7 @@ def _resolve_llm_params(
     session_hf_token: str | None = None,
     reasoning_effort: str | None = None,
     strict: bool = False,
+    bill_to_user: bool = False,
 ) -> dict:
     """
     Build LiteLLM kwargs for a given model id.
@@ -199,6 +204,14 @@ def _resolve_llm_params(
       2. session.hf_token — the user's own token (CLI / OAuth / cache file).
       3. huggingface_hub cache — ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` /
          local ``hf auth login`` cache.
+
+    Premium models routed through the HF router (``huggingface/anthropic/...``
+    or ``huggingface/openai/...``) can be billed to the user instead of the
+    Space: pass ``bill_to_user=True`` and the call uses the caller's own token
+    (starting at step 2, skipping INFERENCE_TOKEN) with no ``X-HF-Bill-To``. The
+    backend flips this on only once a user is past their subsidized daily
+    allowance; within the allowance, and for every free model, the default
+    subsidized path applies.
     """
     if model_name.startswith("anthropic/"):
         params: dict = {"model": model_name}
@@ -250,13 +263,25 @@ def _resolve_llm_params(
         return _resolve_local_model_params(model_name, reasoning_effort, strict)
 
     hf_model = model_name.removeprefix("huggingface/")
-    api_key = _resolve_hf_router_token(session_hf_token)
+    # Premium models routed through the HF router (Anthropic Claude, OpenAI GPT)
+    # can be billed to the *user's* own HF account instead of the Space: when
+    # ``bill_to_user`` is set (the backend flips it on once a user is past their
+    # subsidized daily allowance) use the caller's session token (never
+    # INFERENCE_TOKEN) and omit X-HF-Bill-To so the spend lands on their wallet.
+    # Otherwise — within the allowance, or for any free model — keep the
+    # subsidized path.
+    bill_user = bill_to_user and hf_model.startswith(("anthropic/", "openai/"))
+    api_key = (
+        resolve_hf_token(session_hf_token)
+        if bill_user
+        else _resolve_hf_router_token(session_hf_token)
+    )
     params = {
         "model": f"openai/{hf_model}",
         "api_base": "https://router.huggingface.co/v1",
         "api_key": api_key,
     }
-    if bill_to := get_hf_bill_to():
+    if not bill_user and (bill_to := get_hf_bill_to()):
         params["extra_headers"] = {"X-HF-Bill-To": bill_to}
     if reasoning_effort:
         hf_level = "low" if reasoning_effort == "minimal" else reasoning_effort

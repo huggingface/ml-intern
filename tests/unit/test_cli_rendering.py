@@ -31,6 +31,21 @@ def test_non_anthropic_research_model_is_unchanged():
     assert _get_research_model("openai/gpt-5.4") == "openai/gpt-5.4"
 
 
+def test_hf_router_anthropic_research_downgrades_to_router_sonnet():
+    assert (
+        _get_research_model("huggingface/anthropic/claude-opus-4.6:fal-ai")
+        == "huggingface/anthropic/claude-sonnet-4-6:fal-ai"
+    )
+
+
+def test_hf_router_openai_research_model_is_unchanged():
+    # No Sonnet equivalent for GPT — research stays on the same router model.
+    assert (
+        _get_research_model("huggingface/openai/gpt-5.5:fal-ai")
+        == "huggingface/openai/gpt-5.5:fal-ai"
+    )
+
+
 def test_help_output_keeps_descriptions_aligned(monkeypatch):
     output = StringIO()
     console = Console(

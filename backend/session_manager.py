@@ -570,6 +570,9 @@ class SessionManager:
                     agent_session.session
                 ),
                 claude_counted=agent_session.claude_counted,
+                premium_user_billed=getattr(
+                    agent_session.session, "premium_user_billed", False
+                ),
                 created_at=agent_session.created_at,
                 notification_destinations=list(
                     agent_session.session.notification_destinations
@@ -717,6 +720,7 @@ class SessionManager:
         self._restore_pending_approval(session, meta.get("pending_approval") or [])
         session.turn_count = int(meta.get("turn_count") or 0)
         session.auto_approval_enabled = bool(meta.get("auto_approval_enabled", False))
+        session.premium_user_billed = bool(meta.get("premium_user_billed", False))
         raw_cap = meta.get("auto_approval_cost_cap_usd")
         session.auto_approval_cost_cap_usd = (
             float(raw_cap) if isinstance(raw_cap, int | float) else None
@@ -1450,6 +1454,9 @@ class SessionManager:
                 agent_session.session.notification_destinations
             ),
             "auto_approval": self._auto_approval_summary(agent_session.session),
+            "premium_user_billed": getattr(
+                agent_session.session, "premium_user_billed", False
+            ),
         }
 
     def set_notification_destinations(

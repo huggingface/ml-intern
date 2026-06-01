@@ -21,13 +21,11 @@ import StopIcon from '@mui/icons-material/Stop';
 import AddIcon from '@mui/icons-material/Add';
 import { apiFetch, apiUpload } from '@/utils/api';
 import { useUserQuota } from '@/hooks/useUserQuota';
-import ClaudeCapDialog from '@/components/ClaudeCapDialog';
 import JobsUpgradeDialog from '@/components/JobsUpgradeDialog';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import {
   CLAUDE_MODEL_PATH,
-  FIRST_FREE_MODEL_PATH,
   GPT_55_MODEL_PATH,
   isClaudePath,
   isPremiumPath,
@@ -148,7 +146,6 @@ const DATASET_UPLOAD_EXTENSIONS = new Set(['csv', 'json', 'jsonl']);
 
 const isClaudeModel = (m: ModelOption) => isClaudePath(m.modelPath);
 const isPremiumModel = (m: ModelOption) => isPremiumPath(m.modelPath);
-const firstFreeModel = (options: ModelOption[]) => options.find(m => !isPremiumModel(m)) ?? options[0];
 
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -172,13 +169,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   );
   const [modelAnchorEl, setModelAnchorEl] = useState<null | HTMLElement>(null);
   const { quota, refresh: refreshQuota } = useUserQuota();
-  // The daily-cap dialog is triggered from two places: (a) a 429 returned
-  // from the chat transport when the user tries to send on a premium model over cap —
-  // surfaced via the agent-store flag — and (b) nothing else right now
-  // (switching models is free). Keeping the open state in the store means
-  // the hook layer can flip it without threading props through.
-  const claudeQuotaExhausted = useAgentStore((s) => s.claudeQuotaExhausted);
-  const setClaudeQuotaExhausted = useAgentStore((s) => s.setClaudeQuotaExhausted);
   const jobsUpgradeRequired = useAgentStore((s) => s.jobsUpgradeRequired);
   const setJobsUpgradeRequired = useAgentStore((s) => s.setJobsUpgradeRequired);
   const updateSessionModel = useSessionStore((s) => s.updateSessionModel);
@@ -189,7 +179,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   const [uploadedDatasets, setUploadedDatasets] = useState<DatasetUploadResponse[]>([]);
   const [isUploadingDataset, setIsUploadingDataset] = useState(false);
   const [datasetUploadProgress, setDatasetUploadProgress] = useState<number | null>(null);
-  const lastSentRef = useRef<string>('');
 
   useEffect(() => {
     modelOptionsRef.current = modelOptions;
@@ -256,7 +245,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
 
   const handleSend = useCallback(() => {
     if (input.trim() && !disabled && !isUploadingDataset) {
-      lastSentRef.current = input;
       onSend(input);
       setInput('');
     }
@@ -325,14 +313,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     [sessionId, onDatasetUploaded],
   );
 
-  // When the chat transport reports a premium-model quota 429, restore the typed
-  // text so the user doesn't lose their message.
-  useEffect(() => {
-    if (claudeQuotaExhausted && lastSentRef.current) {
-      setInput(lastSentRef.current);
-    }
-  }, [claudeQuotaExhausted]);
-
   useEffect(() => {
     if (!datasetUploadError) return;
     const timeout = window.setTimeout(() => setDatasetUploadError(null), 7000);
@@ -390,48 +370,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     }
   };
 
-  // Dialog close: just clear the flag. The typed text is already restored.
-  const handleCapDialogClose = useCallback(() => {
-    setClaudeQuotaExhausted(false);
-  }, [setClaudeQuotaExhausted]);
-
-  // "Use a free model" — switch the current session to Kimi (or the first
-  // non-premium option) and auto-retry the send that tripped the cap.
-  const handleUseFreeModel = useCallback(async () => {
-    setClaudeQuotaExhausted(false);
-    if (!sessionId) return;
-    const free = modelOptions.find(m => m.modelPath === FIRST_FREE_MODEL_PATH)
-      ?? firstFreeModel(modelOptions);
-    try {
-      const res = await apiFetch(`/api/session/${sessionId}/model`, {
-        method: 'POST',
-        body: JSON.stringify({ model: free.modelPath }),
-      });
-      if (res.ok) {
-        setSelectedModelId(free.id);
-        updateSessionModel(sessionId, free.modelPath);
-        const retryText = lastSentRef.current;
-        if (retryText) {
-          onSend(retryText);
-          setInput('');
-          lastSentRef.current = '';
-        }
-      }
-    } catch { /* ignore */ }
-  }, [sessionId, onSend, setClaudeQuotaExhausted, modelOptions, updateSessionModel]);
-
-  const handlePremiumUpgradeClick = useCallback(async () => {
-    if (!sessionId) return;
-    try {
-      await apiFetch(`/api/pro-click/${sessionId}`, {
-        method: 'POST',
-        body: JSON.stringify({ source: 'premium_cap_dialog', target: 'pro_pricing' }),
-      });
-    } catch {
-      /* tracking is best-effort */
-    }
-  }, [sessionId]);
-
   const handleJobsUpgradeClose = useCallback(() => {
     setJobsUpgradeRequired(null);
     setAwaitingTopUp(false);
@@ -477,9 +415,10 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   // premium-model session without sending should not populate a counter.
   const premiumChip = (() => {
     if (!quota || quota.premiumUsedToday === 0) return null;
-    if (quota.plan === 'free') {
-      return quota.premiumRemaining > 0 ? 'Free today' : 'Pro only';
-    }
+    // Past the subsidized daily allowance, further premium usage bills the
+    // user's own HF account — same for free and pro.
+    if (quota.premiumRemaining === 0) return 'Billed';
+    if (quota.plan === 'free') return 'Free today';
     return `${quota.premiumUsedToday}/${quota.premiumDailyCap} today`;
   })();
 
@@ -804,14 +743,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
           ))}
         </Menu>
 
-        <ClaudeCapDialog
-          open={claudeQuotaExhausted}
-          plan={quota?.plan ?? 'free'}
-          cap={quota?.premiumDailyCap ?? 1}
-          onClose={handleCapDialogClose}
-          onUseFreeModel={handleUseFreeModel}
-          onUpgrade={handlePremiumUpgradeClick}
-        />
         <JobsUpgradeDialog
           open={!!jobsUpgradeRequired}
           message={jobsUpgradeRequired?.message || ''}

@@ -60,12 +60,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agent"])
 _background_teardown_tasks: set[asyncio.Task] = set()
 
-DEFAULT_CLAUDE_MODEL_ID = "bedrock/us.anthropic.claude-opus-4-6-v1"
+DEFAULT_CLAUDE_MODEL_ID = "huggingface/anthropic/claude-opus-4.6:fal-ai"
+DEFAULT_GPT_MODEL_ID = "huggingface/openai/gpt-5.5:fal-ai"
 DEFAULT_FREE_MODEL_ID = "moonshotai/Kimi-K2.6"
 PREMIUM_MODEL_IDS = {
     DEFAULT_CLAUDE_MODEL_ID,
-    "openai/gpt-5.5",
+    DEFAULT_GPT_MODEL_ID,
 }
+# Premium models that can be billed to the user's own HF account past the
+# subsidized daily allowance (routed via the HF router with the user's OAuth
+# token). Currently every premium model is user-billable; the set stays
+# distinct from PREMIUM_MODEL_IDS so a future company-billed premium model can
+# still hard-cap instead of overflowing onto the user's wallet.
+USER_BILLED_MODEL_IDS = {DEFAULT_CLAUDE_MODEL_ID, DEFAULT_GPT_MODEL_ID}
 DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
 
 
@@ -98,7 +105,7 @@ def _available_models() -> list[dict[str, Any]]:
             "recommended": True,
         },
         {
-            "id": "openai/gpt-5.5",
+            "id": DEFAULT_GPT_MODEL_ID,
             "label": "GPT-5.5",
             "provider": "openai",
             "tier": "pro",
@@ -132,6 +139,10 @@ def _is_premium_model(model_id: str) -> bool:
     return model_id in PREMIUM_MODEL_IDS
 
 
+def _is_user_billed(model_id: str) -> bool:
+    return model_id in USER_BILLED_MODEL_IDS
+
+
 async def _model_override_for_new_session(
     request: Request,
     requested_model: str | None,
@@ -158,6 +169,22 @@ async def _model_override_for_new_session(
     return DEFAULT_FREE_MODEL_ID
 
 
+def _premium_cap_message(plan: str) -> str:
+    """Over-allowance message for a premium model that can't fall back to user
+    billing. Defensive: every current premium model is user-billable and
+    overflows to the user's own HF account instead of reaching this.
+    """
+    if plan == "pro":
+        return (
+            "Daily premium model limit reached. Use a free model and try premium "
+            "models again tomorrow."
+        )
+    return (
+        "Daily premium model limit reached. Upgrade to HF Pro for "
+        f"{user_quotas.CLAUDE_PRO_DAILY}/day or use a free model."
+    )
+
+
 async def _enforce_premium_model_quota(
     user: dict[str, Any],
     agent_session: AgentSession,
@@ -169,9 +196,13 @@ async def _enforce_premium_model_quota(
     ``claude_counted`` flag on ``AgentSession`` guards against re-counting the
     same session; the stored field name is kept for persistence compatibility.
 
-    No-ops when the session's current model isn't premium, or when this
-    session has already been charged. Raises 429 when the user has hit
-    their daily cap.
+    Subsidizes the same daily allowance as before (free = 1, pro = 20),
+    company-billed. Past the allowance, a user-billable model (Claude or GPT-5.5
+    via the HF router) flips the session to ``premium_user_billed`` so the call
+    bills the user's own HF (OAuth) token instead of blocking. A premium model
+    that is *not* user-billable hard-caps with a 429 — defensive only, as every
+    current premium model is user-billable. No-ops when the model isn't premium
+    or when this session's billing has already been decided.
     """
     if agent_session.claude_counted:
         return
@@ -181,27 +212,21 @@ async def _enforce_premium_model_quota(
     user_id = user["user_id"]
     plan = user.get("plan", "free")
     cap = user_quotas.daily_cap_for(plan)
-    new_count = await user_quotas.try_increment_claude(user_id, cap)
-    if new_count is None:
-        if plan == "pro":
-            message = (
-                "Daily premium model limit reached. Use a free model and try "
-                "premium models again tomorrow."
+    within_allowance = await user_quotas.try_increment_claude(user_id, cap) is not None
+    if not within_allowance:
+        if not _is_user_billed(model_name):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "premium_model_daily_cap",
+                    "plan": plan,
+                    "cap": cap,
+                    "message": _premium_cap_message(plan),
+                },
             )
-        else:
-            message = (
-                "Daily premium model limit reached. Upgrade to HF Pro for "
-                f"{user_quotas.CLAUDE_PRO_DAILY}/day or use a free model."
-            )
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "premium_model_daily_cap",
-                "plan": plan,
-                "cap": cap,
-                "message": message,
-            },
-        )
+        # Past the subsidized allowance on a user-billable model: bill the
+        # user's own HF (OAuth) token for this session instead of blocking.
+        agent_session.session.premium_user_billed = True
     agent_session.claude_counted = True
     await session_manager.persist_session_snapshot(agent_session)
 

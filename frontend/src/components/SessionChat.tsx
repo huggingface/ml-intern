@@ -5,13 +5,15 @@
  * runs — processing events — but only the active session renders visible
  * UI (MessageList + ChatInput).
  */
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useAgentChat } from '@/hooks/useAgentChat';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import MessageList from '@/components/Chat/MessageList';
 import ChatInput from '@/components/Chat/ChatInput';
 import ExpiredBanner from '@/components/Chat/ExpiredBanner';
+import BillingBanner from '@/components/Chat/BillingBanner';
+import { isPremiumPath } from '@/utils/model';
 import { apiFetch } from '@/utils/api';
 import { logger } from '@/utils/logger';
 
@@ -81,6 +83,30 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
   const sdkBusy = status === 'streaming' || status === 'submitted';
   const busy = isProcessing || sdkBusy;
 
+  // Whether this session's premium usage is being billed to the user's own HF
+  // account (past the subsidized daily allowance). Re-read after each turn,
+  // since the backend flips it at submit time. Only premium-model sessions can
+  // ever be user-billed, so skip the fetch for free models.
+  const [premiumBilled, setPremiumBilled] = useState(false);
+  const onPremiumModel = isPremiumPath(sessionMeta?.model ?? undefined);
+  useEffect(() => {
+    if (!isActive || !onPremiumModel) {
+      setPremiumBilled(false);
+      return;
+    }
+    if (busy) return;
+    let cancelled = false;
+    apiFetch(`/api/session/${sessionId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d) setPremiumBilled(Boolean(d.premium_user_billed));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [busy, isActive, onPremiumModel, sessionId]);
+
   const handleSendMessage = useCallback(
     async (text: string) => {
       if (!text.trim() || busy) return;
@@ -124,20 +150,23 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
       {isExpired ? (
         <ExpiredBanner sessionId={sessionId} />
       ) : (
-        <ChatInput
-          sessionId={sessionId}
-          initialModelPath={sessionMeta?.model}
-          onSend={handleSendMessage}
-          onStop={handleStop}
-          onDatasetUploaded={refreshMessages}
-          isProcessing={busy}
-          disabled={!isConnected || activityStatus.type === 'waiting-approval'}
-          placeholder={
-            activityStatus.type === 'waiting-approval'
-              ? 'Approve or reject pending tools first...'
-              : undefined
-          }
-        />
+        <>
+          {premiumBilled && <BillingBanner />}
+          <ChatInput
+            sessionId={sessionId}
+            initialModelPath={sessionMeta?.model}
+            onSend={handleSendMessage}
+            onStop={handleStop}
+            onDatasetUploaded={refreshMessages}
+            isProcessing={busy}
+            disabled={!isConnected || activityStatus.type === 'waiting-approval'}
+            placeholder={
+              activityStatus.type === 'waiting-approval'
+                ? 'Approve or reject pending tools first...'
+                : undefined
+            }
+          />
+        </>
       )}
     </>
   );

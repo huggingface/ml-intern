@@ -22,9 +22,15 @@ def _reset_quota_store():
     agent.user_quotas._reset_for_tests()
 
 
-def test_premium_model_predicate_includes_bedrock_claude_and_gpt55_only():
-    assert agent._is_premium_model("bedrock/us.anthropic.claude-opus-4-6-v1")
-    assert agent._is_premium_model("openai/gpt-5.5")
+def test_premium_model_predicate_includes_router_claude_and_gpt55_only():
+    assert agent._is_premium_model(agent.DEFAULT_CLAUDE_MODEL_ID)
+    assert agent._is_premium_model(agent.DEFAULT_GPT_MODEL_ID)
+    # Both premium models are now user-billable (HF router, user's OAuth token).
+    assert agent._is_user_billed(agent.DEFAULT_CLAUDE_MODEL_ID)
+    assert agent._is_user_billed(agent.DEFAULT_GPT_MODEL_ID)
+    # Retired Bedrock + native Anthropic/OpenAI ids are no longer premium.
+    assert not agent._is_premium_model("openai/gpt-5.5")
+    assert not agent._is_premium_model("bedrock/us.anthropic.claude-opus-4-6-v1")
     assert not agent._is_premium_model("anthropic/claude-opus-4-6")
     assert not agent._is_premium_model("moonshotai/Kimi-K2.6")
 
@@ -88,13 +94,13 @@ async def test_switching_to_premium_model_is_allowed_for_authenticated_user(
 
     response = await agent.set_session_model(
         "s1",
-        {"model": "openai/gpt-5.5"},
+        {"model": agent.DEFAULT_GPT_MODEL_ID},
         request=None,
         user={"user_id": "u1", "plan": "free"},
     )
 
-    assert response == {"session_id": "s1", "model": "openai/gpt-5.5"}
-    assert updated == [("s1", "openai/gpt-5.5")]
+    assert response == {"session_id": "s1", "model": agent.DEFAULT_GPT_MODEL_ID}
+    assert updated == [("s1", agent.DEFAULT_GPT_MODEL_ID)]
 
 
 @pytest.mark.asyncio
@@ -113,7 +119,8 @@ async def test_premium_quota_charges_gpt55(monkeypatch):
     agent_session = SimpleNamespace(
         claude_counted=False,
         session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
+            config=SimpleNamespace(model_name=agent.DEFAULT_GPT_MODEL_ID),
+            premium_user_billed=False,
         ),
     )
 
@@ -122,13 +129,15 @@ async def test_premium_quota_charges_gpt55(monkeypatch):
         agent_session,
     )
 
+    # Within the free allowance → subsidized (company-billed), counted.
     assert agent_session.claude_counted is True
+    assert agent_session.session.premium_user_billed is False
     assert persisted == [agent_session]
     assert await agent.user_quotas.get_claude_used_today("u1") == 1
 
 
 @pytest.mark.asyncio
-async def test_free_user_premium_quota_rejects_second_session(monkeypatch):
+async def test_free_user_gpt_overflow_bills_user(monkeypatch):
     async def fake_persist_session_snapshot(_agent_session):
         return None
 
@@ -138,32 +147,24 @@ async def test_free_user_premium_quota_rejects_second_session(monkeypatch):
         fake_persist_session_snapshot,
     )
 
-    first_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
-        ),
-    )
-    second_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
-        ),
-    )
-
-    await agent._enforce_premium_model_quota(
-        {"user_id": "free-user", "plan": "free"},
-        first_session,
-    )
-    with pytest.raises(HTTPException) as exc_info:
-        await agent._enforce_premium_model_quota(
-            {"user_id": "free-user", "plan": "free"},
-            second_session,
+    def mk():
+        return SimpleNamespace(
+            claude_counted=False,
+            session=SimpleNamespace(
+                config=SimpleNamespace(model_name=agent.DEFAULT_GPT_MODEL_ID),
+                premium_user_billed=False,
+            ),
         )
 
-    assert exc_info.value.status_code == 429
-    assert exc_info.value.detail["error"] == "premium_model_daily_cap"
-    assert exc_info.value.detail["plan"] == "free"
+    # Free allowance = 1: first GPT-5.5 session subsidized, second billed to
+    # the user (no 429) — same overflow behavior as Claude.
+    first = mk()
+    await agent._enforce_premium_model_quota({"user_id": "g1", "plan": "free"}, first)
+    assert first.session.premium_user_billed is False
+
+    second = mk()
+    await agent._enforce_premium_model_quota({"user_id": "g1", "plan": "free"}, second)
+    assert second.session.premium_user_billed is True
 
 
 @pytest.mark.asyncio
@@ -181,7 +182,8 @@ async def test_pro_user_uses_pro_premium_quota(monkeypatch):
         agent_session = SimpleNamespace(
             claude_counted=False,
             session=SimpleNamespace(
-                config=SimpleNamespace(model_name="openai/gpt-5.5"),
+                config=SimpleNamespace(model_name=agent.DEFAULT_GPT_MODEL_ID),
+                premium_user_billed=False,
             ),
         )
         await agent._enforce_premium_model_quota(
@@ -189,11 +191,19 @@ async def test_pro_user_uses_pro_premium_quota(monkeypatch):
             agent_session,
         )
         assert agent_session.claude_counted is True
+        assert agent_session.session.premium_user_billed is False
         assert await agent.user_quotas.get_claude_used_today("pro-user") == index + 1
 
 
 @pytest.mark.asyncio
-async def test_org_plan_uses_free_premium_quota(monkeypatch):
+async def test_company_billed_premium_still_hard_caps(monkeypatch):
+    # A hypothetical premium model that is NOT user-billable (company-billed)
+    # still hard-caps with a 429 past the allowance instead of overflowing onto
+    # the user — the defensive fallback. Use the native OpenAI id, which is in
+    # neither set by default, and force it into PREMIUM_MODEL_IDS only.
+    fake = "openai/gpt-5.5"
+    monkeypatch.setattr(agent, "PREMIUM_MODEL_IDS", agent.PREMIUM_MODEL_IDS | {fake})
+
     async def fake_persist_session_snapshot(_agent_session):
         return None
 
@@ -203,31 +213,20 @@ async def test_org_plan_uses_free_premium_quota(monkeypatch):
         fake_persist_session_snapshot,
     )
 
-    first_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
-        ),
-    )
-    second_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
-        ),
-    )
+    def mk():
+        return SimpleNamespace(
+            claude_counted=False,
+            session=SimpleNamespace(config=SimpleNamespace(model_name=fake)),
+        )
 
-    await agent._enforce_premium_model_quota(
-        {"user_id": "org-user", "plan": "org"},
-        first_session,
-    )
+    await agent._enforce_premium_model_quota({"user_id": "c1", "plan": "free"}, mk())
     with pytest.raises(HTTPException) as exc_info:
         await agent._enforce_premium_model_quota(
-            {"user_id": "org-user", "plan": "org"},
-            second_session,
+            {"user_id": "c1", "plan": "free"}, mk()
         )
 
     assert exc_info.value.status_code == 429
-    assert exc_info.value.detail["plan"] == "org"
+    assert exc_info.value.detail["error"] == "premium_model_daily_cap"
     assert "Upgrade to HF Pro" in exc_info.value.detail["message"]
 
 
@@ -256,6 +255,63 @@ async def test_premium_quota_skips_direct_anthropic(monkeypatch):
 
     assert agent_session.claude_counted is False
     assert await agent.user_quotas.get_claude_used_today("u1") == 0
+
+
+@pytest.mark.asyncio
+async def test_user_billable_overflow_bills_user_instead_of_blocking(monkeypatch):
+    persisted = []
+
+    async def fake_persist(agent_session):
+        persisted.append(agent_session)
+
+    monkeypatch.setattr(agent.session_manager, "persist_session_snapshot", fake_persist)
+    # Free allowance = 1: first session subsidized, second billed to the user.
+    monkeypatch.setattr(agent.user_quotas, "daily_cap_for", lambda plan: 1)
+
+    def mk():
+        return SimpleNamespace(
+            claude_counted=False,
+            session=SimpleNamespace(
+                config=SimpleNamespace(model_name=agent.DEFAULT_CLAUDE_MODEL_ID),
+                premium_user_billed=False,
+            ),
+        )
+
+    first = mk()
+    await agent._enforce_premium_model_quota({"user_id": "u1", "plan": "free"}, first)
+    assert first.claude_counted is True
+    assert first.session.premium_user_billed is False  # subsidized
+
+    second = mk()
+    await agent._enforce_premium_model_quota({"user_id": "u1", "plan": "free"}, second)
+    assert second.claude_counted is True
+    assert second.session.premium_user_billed is True  # billed to the user, no 429
+
+    assert len(persisted) == 2
+
+
+@pytest.mark.asyncio
+async def test_pro_user_billable_overflow_also_bills_user(monkeypatch):
+    async def fake_persist(_agent_session):
+        return None
+
+    monkeypatch.setattr(agent.session_manager, "persist_session_snapshot", fake_persist)
+    # Shrink the Pro allowance to 1 so the second session overflows.
+    monkeypatch.setattr(agent.user_quotas, "daily_cap_for", lambda plan: 1)
+
+    def mk():
+        return SimpleNamespace(
+            claude_counted=False,
+            session=SimpleNamespace(
+                config=SimpleNamespace(model_name=agent.DEFAULT_CLAUDE_MODEL_ID),
+                premium_user_billed=False,
+            ),
+        )
+
+    await agent._enforce_premium_model_quota({"user_id": "p1", "plan": "pro"}, mk())
+    over = mk()
+    await agent._enforce_premium_model_quota({"user_id": "p1", "plan": "pro"}, over)
+    assert over.session.premium_user_billed is True
 
 
 @pytest.mark.asyncio
