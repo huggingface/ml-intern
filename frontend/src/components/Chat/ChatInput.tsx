@@ -26,6 +26,7 @@ import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import {
   CLAUDE_MODEL_PATH,
+  CLAUDE_OPUS_48_MODEL_PATH,
   GPT_55_MODEL_PATH,
   isClaudePath,
   isPremiumPath,
@@ -56,12 +57,19 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
     recommended: true,
   },
   {
-    id: 'claude-opus',
+    id: 'claude-opus-4-6',
     name: 'Claude Opus 4.6',
     description: 'Anthropic',
     modelPath: CLAUDE_MODEL_PATH,
     avatarUrl: 'https://huggingface.co/api/avatars/Anthropic',
     recommended: true,
+  },
+  {
+    id: 'claude-opus-4-8',
+    name: 'Claude Opus 4.8',
+    description: 'Anthropic',
+    modelPath: CLAUDE_OPUS_48_MODEL_PATH,
+    avatarUrl: 'https://huggingface.co/api/avatars/Anthropic',
   },
   {
     id: 'gpt-5.5',
@@ -93,12 +101,30 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   },
 ];
 
+const normalizeModelPath = (path: string | undefined) => (
+  (path ?? '')
+    .toLowerCase()
+    .replace(/^huggingface\//, '')
+    .replace(/claude-opus-4\.(\d)/g, 'claude-opus-4-$1')
+);
+
 const findModelByPath = (path: string, options: ModelOption[]): ModelOption | undefined => {
+  const normalizedPath = normalizeModelPath(path);
+  const matched = options.find((m) => {
+    const normalizedModelPath = normalizeModelPath(m.modelPath);
+    const normalizedId = normalizeModelPath(m.id);
+    return (
+      m.modelPath === path ||
+      normalizedModelPath === normalizedPath ||
+      normalizedPath.includes(normalizedId)
+    );
+  });
+  if (matched) return matched;
   if (isClaudePath(path)) {
     const claude = options.find(isClaudeModel);
     if (claude) return claude;
   }
-  return options.find(m => m.modelPath === path || path?.includes(m.id));
+  return undefined;
 };
 
 const readApiErrorMessage = async (res: Response, fallback: string): Promise<string> => {
@@ -201,7 +227,7 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
         if (!claude?.id) return;
 
         const next = DEFAULT_MODEL_OPTIONS.map((option) => (
-          isClaudeModel(option)
+          option.id === 'claude-opus-4-6'
             ? { ...option, modelPath: claude.id, name: claude.label ?? option.name }
             : option
         ));

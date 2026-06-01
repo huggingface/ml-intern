@@ -80,6 +80,10 @@ def _patch_litellm_effort_validation() -> None:
                 "opus_4_7",
                 "opus-4.7",
                 "opus_4.7",
+                "opus-4-8",
+                "opus_4_8",
+                "opus-4.8",
+                "opus_4.8",
             )
         )
 
@@ -110,6 +114,9 @@ _HF_EFFORTS = {"low", "medium", "high"}
 _USER_BILLED_HF_ROUTER_MODEL_BY_SUBSIDIZED_MODEL = {
     "bedrock/us.anthropic.claude-opus-4-6-v1": (
         "huggingface/anthropic/claude-opus-4.6:fal-ai"
+    ),
+    "bedrock/us.anthropic.claude-opus-4-8": (
+        "huggingface/anthropic/claude-opus-4.8:fal-ai"
     ),
     "bedrock/us.anthropic.claude-sonnet-4-6": (
         "huggingface/anthropic/claude-sonnet-4-6:fal-ai"

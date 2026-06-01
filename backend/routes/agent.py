@@ -60,16 +60,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agent"])
 _background_teardown_tasks: set[asyncio.Task] = set()
 
-DEFAULT_CLAUDE_MODEL_ID = "bedrock/us.anthropic.claude-opus-4-6-v1"
+CLAUDE_OPUS_46_MODEL_ID = "bedrock/us.anthropic.claude-opus-4-6-v1"
+CLAUDE_OPUS_48_MODEL_ID = "bedrock/us.anthropic.claude-opus-4-8"
+DEFAULT_CLAUDE_MODEL_ID = CLAUDE_OPUS_46_MODEL_ID
 DEFAULT_GPT_MODEL_ID = "openai/gpt-5.5"
-USER_BILLED_CLAUDE_MODEL_ID = "huggingface/anthropic/claude-opus-4.6:fal-ai"
+USER_BILLED_CLAUDE_OPUS_46_MODEL_ID = "huggingface/anthropic/claude-opus-4.6:fal-ai"
+USER_BILLED_CLAUDE_OPUS_48_MODEL_ID = "huggingface/anthropic/claude-opus-4.8:fal-ai"
+USER_BILLED_CLAUDE_MODEL_ID = USER_BILLED_CLAUDE_OPUS_46_MODEL_ID
 USER_BILLED_GPT_MODEL_ID = "huggingface/openai/gpt-5.5:fal-ai"
 DEFAULT_FREE_MODEL_ID = "moonshotai/Kimi-K2.6"
 PREMIUM_MODEL_IDS = {
     DEFAULT_CLAUDE_MODEL_ID,
+    CLAUDE_OPUS_48_MODEL_ID,
     DEFAULT_GPT_MODEL_ID,
     # Backward-compatible for sessions created while the FAL ids were exposed.
     USER_BILLED_CLAUDE_MODEL_ID,
+    USER_BILLED_CLAUDE_OPUS_48_MODEL_ID,
     USER_BILLED_GPT_MODEL_ID,
 }
 # Premium models that can switch to the user's own HF account past the
@@ -78,8 +84,10 @@ PREMIUM_MODEL_IDS = {
 # ids only when ``premium_user_billed`` is true.
 USER_BILLED_MODEL_IDS = {
     DEFAULT_CLAUDE_MODEL_ID,
+    CLAUDE_OPUS_48_MODEL_ID,
     DEFAULT_GPT_MODEL_ID,
     USER_BILLED_CLAUDE_MODEL_ID,
+    USER_BILLED_CLAUDE_OPUS_48_MODEL_ID,
     USER_BILLED_GPT_MODEL_ID,
 }
 DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
@@ -112,6 +120,12 @@ def _available_models() -> list[dict[str, Any]]:
             "provider": "anthropic",
             "tier": "pro",
             "recommended": True,
+        },
+        {
+            "id": CLAUDE_OPUS_48_MODEL_ID,
+            "label": "Claude Opus 4.8",
+            "provider": "anthropic",
+            "tier": "pro",
         },
         {
             "id": DEFAULT_GPT_MODEL_ID,

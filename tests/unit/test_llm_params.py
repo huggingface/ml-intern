@@ -219,6 +219,22 @@ def test_bedrock_claude_user_billed_preserves_subsidized_effort(monkeypatch):
     assert params["extra_body"] == {"reasoning_effort": "max"}
 
 
+def test_bedrock_claude48_user_billed_maps_to_hf_router_when_flagged(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+
+    params = _resolve_llm_params(
+        "bedrock/us.anthropic.claude-opus-4-8",
+        "session-token",
+        bill_to_user=True,
+    )
+
+    assert params["model"] == "openai/anthropic/claude-opus-4.8:fal-ai"
+    assert params["api_base"] == "https://router.huggingface.co/v1"
+    assert params["api_key"] == "session-token"
+    assert "extra_headers" not in params
+
+
 def test_openai_gpt55_user_billed_preserves_subsidized_effort(monkeypatch):
     monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
     monkeypatch.setenv("HF_BILL_TO", "smolagents")
@@ -261,6 +277,17 @@ def test_hf_router_legacy_anthropic_subsidized_maps_back_to_bedrock(monkeypatch)
     )
 
     assert params == {"model": "bedrock/us.anthropic.claude-opus-4-6-v1"}
+
+
+def test_hf_router_legacy_anthropic48_subsidized_maps_back_to_bedrock(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+
+    params = _resolve_llm_params(
+        "huggingface/anthropic/claude-opus-4.8:fal-ai", "session-token"
+    )
+
+    assert params == {"model": "bedrock/us.anthropic.claude-opus-4-8"}
 
 
 def test_hf_router_legacy_openai_subsidized_maps_back_to_direct_openai(monkeypatch):
