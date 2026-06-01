@@ -226,12 +226,15 @@ def test_bedrock_claude48_user_billed_maps_to_hf_router_when_flagged(monkeypatch
     params = _resolve_llm_params(
         "bedrock/us.anthropic.claude-opus-4-8",
         "session-token",
+        reasoning_effort="max",
+        strict=True,
         bill_to_user=True,
     )
 
     assert params["model"] == "openai/anthropic/claude-opus-4.8:fal-ai"
     assert params["api_base"] == "https://router.huggingface.co/v1"
     assert params["api_key"] == "session-token"
+    assert params["extra_body"] == {"reasoning_effort": "max"}
     assert "extra_headers" not in params
 
 

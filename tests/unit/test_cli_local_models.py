@@ -30,6 +30,13 @@ def test_openai_compat_prefix_is_not_supported():
     assert not model_switcher.is_valid_model_id("openai-compat/custom-model")
 
 
+def test_suggested_models_include_opus48_direct_and_bedrock_ids():
+    ids = {m["id"] for m in model_switcher.SUGGESTED_MODELS}
+
+    assert "anthropic/claude-opus-4-8" in ids
+    assert "bedrock/us.anthropic.claude-opus-4-8" in ids
+
+
 def test_local_models_skip_hf_router_catalog_output():
     class NoPrintConsole:
         def print(self, *args, **kwargs):
