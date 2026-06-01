@@ -30,6 +30,8 @@ def test_premium_model_predicate_includes_subsidized_and_legacy_router_ids():
     # Both selectable premium models can overflow to user billing.
     assert agent._is_user_billed(agent.DEFAULT_CLAUDE_MODEL_ID)
     assert agent._is_user_billed(agent.DEFAULT_GPT_MODEL_ID)
+    assert agent._is_user_billed(agent.USER_BILLED_CLAUDE_MODEL_ID)
+    assert agent._is_user_billed(agent.USER_BILLED_GPT_MODEL_ID)
     # Native Anthropic remains a local/dev escape hatch, not a production cap.
     assert not agent._is_premium_model("anthropic/claude-opus-4-6")
     assert not agent._is_premium_model("moonshotai/Kimi-K2.6")

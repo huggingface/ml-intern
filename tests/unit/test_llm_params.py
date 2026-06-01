@@ -202,6 +202,40 @@ def test_bedrock_claude_user_billed_maps_to_hf_router_when_flagged(monkeypatch):
     assert "extra_headers" not in params
 
 
+def test_bedrock_claude_user_billed_preserves_subsidized_effort(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+
+    params = _resolve_llm_params(
+        "bedrock/us.anthropic.claude-opus-4-6-v1",
+        "session-token",
+        reasoning_effort="max",
+        strict=True,
+        bill_to_user=True,
+    )
+
+    assert params["model"] == "openai/anthropic/claude-opus-4.6:fal-ai"
+    assert params["api_key"] == "session-token"
+    assert params["extra_body"] == {"reasoning_effort": "max"}
+
+
+def test_openai_gpt55_user_billed_preserves_subsidized_effort(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+
+    params = _resolve_llm_params(
+        "openai/gpt-5.5",
+        "session-token",
+        reasoning_effort="xhigh",
+        strict=True,
+        bill_to_user=True,
+    )
+
+    assert params["model"] == "openai/openai/gpt-5.5:fal-ai"
+    assert params["api_key"] == "session-token"
+    assert params["extra_body"] == {"reasoning_effort": "xhigh"}
+
+
 def test_bedrock_research_sonnet_user_billed_maps_to_hf_router(monkeypatch):
     monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
     monkeypatch.setenv("HF_BILL_TO", "smolagents")
@@ -227,6 +261,15 @@ def test_hf_router_legacy_anthropic_subsidized_maps_back_to_bedrock(monkeypatch)
     )
 
     assert params == {"model": "bedrock/us.anthropic.claude-opus-4-6-v1"}
+
+
+def test_hf_router_legacy_openai_subsidized_maps_back_to_direct_openai(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+
+    params = _resolve_llm_params("huggingface/openai/gpt-5.5:fal-ai", "session-token")
+
+    assert params == {"model": "openai/gpt-5.5"}
 
 
 def test_hf_router_anthropic_user_billed_when_flagged(monkeypatch):
