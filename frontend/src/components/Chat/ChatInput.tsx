@@ -417,7 +417,9 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   const premiumChip = (() => {
     if (!quota) return null;
     const remaining = Math.max(0, quota.premiumRemaining);
-    if (remaining === 0) return '0 left - enable billing';
+    if (remaining === 0) {
+      return quota.plan === 'pro' ? '0 left – using HF billing' : '0 left – enable billing';
+    }
     return `${remaining} left today`;
   })();
 
