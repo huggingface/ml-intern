@@ -60,19 +60,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agent"])
 _background_teardown_tasks: set[asyncio.Task] = set()
 
-DEFAULT_CLAUDE_MODEL_ID = "huggingface/anthropic/claude-opus-4.6:fal-ai"
-DEFAULT_GPT_MODEL_ID = "huggingface/openai/gpt-5.5:fal-ai"
+DEFAULT_CLAUDE_MODEL_ID = "bedrock/us.anthropic.claude-opus-4-6-v1"
+DEFAULT_GPT_MODEL_ID = "openai/gpt-5.5"
+USER_BILLED_CLAUDE_MODEL_ID = "huggingface/anthropic/claude-opus-4.6:fal-ai"
+USER_BILLED_GPT_MODEL_ID = "huggingface/openai/gpt-5.5:fal-ai"
 DEFAULT_FREE_MODEL_ID = "moonshotai/Kimi-K2.6"
 PREMIUM_MODEL_IDS = {
     DEFAULT_CLAUDE_MODEL_ID,
     DEFAULT_GPT_MODEL_ID,
+    # Backward-compatible for sessions created while the FAL ids were exposed.
+    USER_BILLED_CLAUDE_MODEL_ID,
+    USER_BILLED_GPT_MODEL_ID,
 }
-# Premium models that can be billed to the user's own HF account past the
-# subsidized daily allowance (routed via the HF router with the user's OAuth
-# token). Currently every premium model is user-billable; the set stays
-# distinct from PREMIUM_MODEL_IDS so a future company-billed premium model can
-# still hard-cap instead of overflowing onto the user's wallet.
-USER_BILLED_MODEL_IDS = {DEFAULT_CLAUDE_MODEL_ID, DEFAULT_GPT_MODEL_ID}
+# Premium models that can switch to the user's own HF account past the
+# subsidized daily allowance. The selectable/default ids stay on the old
+# subsidized endpoints; ``agent.core.llm_params`` maps them to the FAL router
+# ids only when ``premium_user_billed`` is true.
+USER_BILLED_MODEL_IDS = {
+    DEFAULT_CLAUDE_MODEL_ID,
+    DEFAULT_GPT_MODEL_ID,
+    USER_BILLED_CLAUDE_MODEL_ID,
+    USER_BILLED_GPT_MODEL_ID,
+}
 DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
 
 

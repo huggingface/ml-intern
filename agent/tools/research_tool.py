@@ -221,9 +221,9 @@ RESEARCH_TOOL_SPEC = {
 
 def _get_research_model(main_model: str) -> str:
     """Pick a cheaper model for research based on the main model."""
-    # HF-router Anthropic (e.g. huggingface/anthropic/claude-opus-4.6:fal-ai)
-    # downgrades to Sonnet on the same router, so research keeps the user's
-    # billing path instead of running full Opus.
+    # HF-router Anthropic (used for user-billed overflow) downgrades to Sonnet
+    # on the same router, so research keeps the user's billing path instead of
+    # running full Opus.
     if main_model.startswith("huggingface/anthropic/"):
         return "huggingface/anthropic/claude-sonnet-4-6:fal-ai"
     if main_model.startswith("anthropic/"):

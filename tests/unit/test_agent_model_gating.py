@@ -22,15 +22,15 @@ def _reset_quota_store():
     agent.user_quotas._reset_for_tests()
 
 
-def test_premium_model_predicate_includes_router_claude_and_gpt55_only():
+def test_premium_model_predicate_includes_subsidized_and_legacy_router_ids():
     assert agent._is_premium_model(agent.DEFAULT_CLAUDE_MODEL_ID)
     assert agent._is_premium_model(agent.DEFAULT_GPT_MODEL_ID)
-    # Both premium models are now user-billable (HF router, user's OAuth token).
+    assert agent._is_premium_model(agent.USER_BILLED_CLAUDE_MODEL_ID)
+    assert agent._is_premium_model(agent.USER_BILLED_GPT_MODEL_ID)
+    # Both selectable premium models can overflow to user billing.
     assert agent._is_user_billed(agent.DEFAULT_CLAUDE_MODEL_ID)
     assert agent._is_user_billed(agent.DEFAULT_GPT_MODEL_ID)
-    # Retired Bedrock + native Anthropic/OpenAI ids are no longer premium.
-    assert not agent._is_premium_model("openai/gpt-5.5")
-    assert not agent._is_premium_model("bedrock/us.anthropic.claude-opus-4-6-v1")
+    # Native Anthropic remains a local/dev escape hatch, not a production cap.
     assert not agent._is_premium_model("anthropic/claude-opus-4-6")
     assert not agent._is_premium_model("moonshotai/Kimi-K2.6")
 
@@ -199,9 +199,8 @@ async def test_pro_user_uses_pro_premium_quota(monkeypatch):
 async def test_company_billed_premium_still_hard_caps(monkeypatch):
     # A hypothetical premium model that is NOT user-billable (company-billed)
     # still hard-caps with a 429 past the allowance instead of overflowing onto
-    # the user — the defensive fallback. Use the native OpenAI id, which is in
-    # neither set by default, and force it into PREMIUM_MODEL_IDS only.
-    fake = "openai/gpt-5.5"
+    # the user — the defensive fallback.
+    fake = "company/premium-only"
     monkeypatch.setattr(agent, "PREMIUM_MODEL_IDS", agent.PREMIUM_MODEL_IDS | {fake})
 
     async def fake_persist_session_snapshot(_agent_session):

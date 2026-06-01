@@ -392,6 +392,9 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
     onError: (error) => {
       setProcessingState(false);
       logger.error('useChat error:', error);
+      callbacksRef.current.onError?.(
+        error instanceof Error ? error.message : String(error),
+      );
     },
   });
 

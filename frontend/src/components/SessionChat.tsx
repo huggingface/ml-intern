@@ -13,6 +13,7 @@ import MessageList from '@/components/Chat/MessageList';
 import ChatInput from '@/components/Chat/ChatInput';
 import ExpiredBanner from '@/components/Chat/ExpiredBanner';
 import BillingBanner from '@/components/Chat/BillingBanner';
+import ChatErrorBanner from '@/components/Chat/ChatErrorBanner';
 import { useUserQuota } from '@/hooks/useUserQuota';
 import { isPremiumPath } from '@/utils/model';
 import { apiFetch } from '@/utils/api';
@@ -29,6 +30,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
   const { updateSessionTitle, sessions, setSessionProcessing } = useSessionStore();
   const sessionMeta = sessions.find((s) => s.id === sessionId);
   const isExpired = sessionMeta?.expired === true;
+  const [chatError, setChatError] = useState<string | null>(null);
 
   const {
     messages,
@@ -47,7 +49,10 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
     // what stops app load from reactivating every historical runtime).
     isProcessing: sessionMeta?.isProcessing ?? false,
     onReady: () => logger.log(`Session ${sessionId} ready`),
-    onError: (error) => logger.error(`Session ${sessionId} error:`, error),
+    onError: (error) => {
+      logger.error(`Session ${sessionId} error:`, error);
+      setChatError(error);
+    },
     onSessionDead,
   });
 
@@ -128,6 +133,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
     async (text: string) => {
       if (!text.trim() || busy) return;
 
+      setChatError(null);
       updateSession(sessionId, { isProcessing: true, activityStatus: { type: 'thinking' } });
       setSessionProcessing(sessionId, true);
       sendMessage({ text: text.trim(), metadata: { createdAt: new Date().toISOString() } });
@@ -170,6 +176,14 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
       ) : (
         <>
           {premiumBillingNotice && <BillingBanner />}
+          {chatError && (
+            <ChatErrorBanner
+              error={chatError}
+              sessionId={sessionId}
+              model={sessionMeta?.model}
+              onDismiss={() => setChatError(null)}
+            />
+          )}
           <ChatInput
             sessionId={sessionId}
             initialModelPath={sessionMeta?.model}

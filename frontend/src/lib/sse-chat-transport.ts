@@ -54,6 +54,21 @@ function lastEventKey(sessionId: string): string {
   return `hf-agent-last-event:${sessionId}`;
 }
 
+async function readErrorResponse(response: Response): Promise<string> {
+  const raw = await response.text().catch(() => '');
+  if (!raw) return response.statusText || 'Request failed';
+  try {
+    const data = JSON.parse(raw);
+    const detail = data?.detail;
+    if (typeof detail === 'string') return detail;
+    if (detail?.message && typeof detail.message === 'string') return detail.message;
+    if (detail?.error && typeof detail.error === 'string') return detail.error;
+    return JSON.stringify(detail ?? data);
+  } catch {
+    return raw;
+  }
+}
+
 /** Parse an SSE text stream into AgentEvent objects. */
 function createSSEParserStream(sessionId: string): TransformStream<string, AgentEvent> {
   let buffer = '';
@@ -414,8 +429,8 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
       this.sideChannel.onSessionDead(sessionId);
     }
     if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Request failed');
-      throw new Error(`Chat request failed: ${response.status} ${errorText}`);
+      const errorText = await readErrorResponse(response);
+      throw new Error(`Chat request failed (${response.status}): ${errorText}`);
     }
 
     if (!response.body) {
