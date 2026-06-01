@@ -458,6 +458,57 @@ async def test_reap_aborts_when_message_write_fails_silently():
     assert agent_session.is_reaping is False
 
 
+# ── Reap / restore race ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_old_reaped_task_does_not_end_freshly_restored_session():
+    """If a user reopens after the reaper pops the old wrapper but before the
+    old task finishes sandbox cleanup, the old finally must not mark the fresh
+    wrapper ended."""
+    manager = _manager()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def slow_cleanup(session: Any) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    manager._cleanup_sandbox = slow_cleanup  # type: ignore[method-assign]
+
+    old = await _start_real_run_session(
+        manager,
+        "restore-race",
+        last_active_at=datetime.utcnow() - timedelta(hours=3),
+    )
+    cutoff = datetime.utcnow() - sm.REAPER_IDLE
+    reap_task = asyncio.create_task(manager._reap_one("restore-race", cutoff))
+
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if "restore-race" not in manager.sessions and cleanup_started.is_set():
+            break
+
+    assert "restore-race" not in manager.sessions
+    assert cleanup_started.is_set()
+
+    fresh = _make_agent_session("restore-race")
+    async with manager._lock:
+        manager.sessions["restore-race"] = fresh
+
+    release_cleanup.set()
+    assert await reap_task is True
+    if old.task is not None:
+        assert old.task.done()
+
+    assert manager.sessions["restore-race"] is fresh
+    assert fresh.is_active is True
+    assert all(
+        snapshot.get("status") != "ended"
+        for snapshot in manager.persistence_store.snapshots_for("restore-race")
+    )
+
+
 # ── Shutdown safety (cancellation must propagate) ────────────────────────
 
 
