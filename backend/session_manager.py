@@ -1076,10 +1076,11 @@ class SessionManager:
 
         Re-checks every idle condition under the lock (a user may have become
         active in the gap since selection), marks the session reaping, persists
-        a resumable snapshot, then evicts it. The runtime task is cancelled
-        *outside* the lock: its own ``finally`` frees the sandbox, and its
-        lock-gated persist no-ops because the session is already popped — so it
-        can't overwrite our resumable snapshot with ``"ended"`` and there's no
+        a resumable snapshot outside the lock, then does one final locked
+        re-check before eviction. The runtime task is cancelled *outside* the
+        lock: its own ``finally`` frees the sandbox, and its identity-gated
+        persist no-ops because the session is already popped — so it can't
+        overwrite our resumable snapshot with ``"ended"`` and there's no
         deadlock. Returns True if the session was reaped.
         """
         async with self._lock:
@@ -1095,25 +1096,42 @@ class SessionManager:
             ):
                 return False
             agent_session.is_reaping = True
-            # Persist a resumable snapshot *before* eviction so a concurrent
-            # reopen reloads clean state. status="active" (never "ended") keeps
-            # it a normal chat in the sidebar. If the write fails (store down or
-            # a transient error) abort the reap rather than destroy state we
-            # couldn't persist — leave the session live and retry next sweep.
-            try:
-                await self.persist_session_snapshot(
-                    agent_session,
-                    runtime_state="idle",
-                    status="active",
-                    raise_on_error=True,
-                )
-            except Exception as e:
+
+        # Persist a resumable snapshot *before* eviction so a concurrent reopen
+        # reloads clean state. status="active" (never "ended") keeps it a normal
+        # chat in the sidebar. Do this outside the manager lock: Mongo writes can
+        # take network round trips, and is_reaping=True is enough to block submit
+        # from enqueueing while the snapshot is in flight.
+        try:
+            await self.persist_session_snapshot(
+                agent_session,
+                runtime_state="idle",
+                status="active",
+                raise_on_error=True,
+            )
+        except Exception as e:
+            async with self._lock:
+                if self.sessions.get(session_id) is agent_session:
+                    agent_session.is_reaping = False
+            logger.warning(
+                "Skipping reap of %s: could not persist resumable snapshot: %s",
+                session_id,
+                e,
+            )
+            return False
+
+        async with self._lock:
+            current = self.sessions.get(session_id)
+            if current is not agent_session:
+                return False
+            if (
+                not agent_session.is_active
+                or agent_session.is_processing
+                or agent_session.session.pending_approval
+                or agent_session.last_active_at > cutoff
+                or not agent_session.submission_queue.empty()
+            ):
                 agent_session.is_reaping = False
-                logger.warning(
-                    "Skipping reap of %s: could not persist resumable snapshot: %s",
-                    session_id,
-                    e,
-                )
                 return False
             self.sessions.pop(session_id, None)
             task = agent_session.task
@@ -1227,10 +1245,10 @@ class SessionManager:
                     logger.warning(f"Final-flush failed for {session_id}: {e}")
 
             async with self._lock:
-                if session_id in self.sessions:
-                    self.sessions[session_id].is_active = False
+                if self.sessions.get(session_id) is agent_session:
+                    agent_session.is_active = False
                     await self.persist_session_snapshot(
-                        self.sessions[session_id],
+                        agent_session,
                         runtime_state="ended",
                         status="ended",
                     )

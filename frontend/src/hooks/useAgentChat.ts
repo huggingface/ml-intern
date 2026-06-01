@@ -53,17 +53,26 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
 
   // Helper: update this session's state (mirrors to globals if active)
   const updateSession = useAgentStore.getState().updateSession;
+  const setProcessingState = useCallback(
+    (
+      next: boolean,
+      updates: Partial<import('@/store/agentStore').PerSessionState> = {},
+    ) => {
+      updateSession(sessionId, { ...updates, isProcessing: next });
+      useSessionStore.getState().setSessionProcessing(sessionId, next);
+    },
+    [sessionId, updateSession],
+  );
 
   // -- Build side-channel callbacks (stable ref) --------------------------
   const sideChannel = useMemo<SideChannelCallbacks>(
     () => ({
       onReady: () => {
-        updateSession(sessionId, { isProcessing: false });
         // Mirror to the sidebar store too: agentStore drives the live UI, but
         // SessionMeta.isProcessing (sessionStore) is what feeds shouldReactivate.
         // Only mergeServerSessions sets it, so without clearing it here a
         // finished background task keeps reactivating until the next list fetch.
-        useSessionStore.getState().setSessionProcessing(sessionId, false);
+        setProcessingState(false);
         if (isActiveRef.current) {
           useAgentStore.getState().setConnected(true);
         }
@@ -71,31 +80,25 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         callbacksRef.current.onReady?.();
       },
       onShutdown: () => {
-        updateSession(sessionId, { isProcessing: false });
-        useSessionStore.getState().setSessionProcessing(sessionId, false);
+        setProcessingState(false);
         if (isActiveRef.current) {
           useAgentStore.getState().setConnected(false);
         }
       },
       onError: (error: string) => {
-        updateSession(sessionId, { isProcessing: false });
-        useSessionStore.getState().setSessionProcessing(sessionId, false);
+        setProcessingState(false);
         callbacksRef.current.onError?.(error);
       },
       onProcessing: () => {
-        updateSession(sessionId, {
-          isProcessing: true,
+        setProcessingState(true, {
           activityStatus: { type: 'thinking' },
         });
-        useSessionStore.getState().setSessionProcessing(sessionId, true);
       },
       onProcessingDone: () => {
-        updateSession(sessionId, { isProcessing: false });
-        useSessionStore.getState().setSessionProcessing(sessionId, false);
+        setProcessingState(false);
       },
       onUndoComplete: () => {
-        updateSession(sessionId, { isProcessing: false });
-        useSessionStore.getState().setSessionProcessing(sessionId, false);
+        setProcessingState(false);
       },
       onCompacted: (oldTokens: number, newTokens: number) => {
         logger.log(`Context compacted: ${oldTokens} -> ${newTokens} tokens`);
@@ -226,8 +229,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         // feeds shouldReactivate) so a backgrounded waiting-approval session
         // doesn't stay "processing" until the next /sessions merge —
         // activityStatus still surfaces the waiting-approval state.
-        updateSession(sessionId, { isProcessing: false, activityStatus: { type: 'waiting-approval' } });
-        useSessionStore.getState().setSessionProcessing(sessionId, false);
+        setProcessingState(false, { activityStatus: { type: 'waiting-approval' } });
 
         // Build panel data for this session's pending approval
         const firstTool = tools[0];
@@ -337,7 +339,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
       onInterrupted: () => { /* no-op — handled by stop() caller */ },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sessionId],
+    [sessionId, setProcessingState],
   );
 
   // -- Create transport (one per session, stable for lifetime) ------------
@@ -388,8 +390,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
     // sendMessages on the transport.
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
     onError: (error) => {
-      updateSession(sessionId, { isProcessing: false });
-      useSessionStore.getState().setSessionProcessing(sessionId, false);
+      setProcessingState(false);
       logger.error('useChat error:', error);
     },
   });
@@ -460,8 +461,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
           // atomic update so the UI never sees isProcessing=false with stale
           // tool states (which would coerce them to 'output-available').
           const savedResearch = loadResearch(sessionId);
-          updateSession(sessionId, {
-            isProcessing: true,
+          setProcessingState(true, {
             activityStatus: savedResearch?.stats.startedAt
               ? { type: 'tool', toolName: 'research', description: 'Resuming research...' }
               : { type: 'thinking' },
@@ -471,9 +471,10 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             }),
           });
         } else if (pendingIds && pendingIds.size > 0) {
-          updateSession(sessionId, { activityStatus: { type: 'waiting-approval' } });
+          setProcessingState(false, { activityStatus: { type: 'waiting-approval' } });
           clearResearch(sessionId);
         } else {
+          setProcessingState(false);
           clearResearch(sessionId);
         }
       } catch {
@@ -481,7 +482,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
       }
     })();
     return () => { cancelled = true; };
-  }, [sessionId, shouldReactivate]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId, shouldReactivate, setProcessingState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // -- Re-hydrate + reconnect on wake from sleep ----------------------------
   // The Vercel AI SDK only calls reconnectToStream() on mount, NOT on
@@ -676,7 +677,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
 
       // If the backend is still processing, reconnect to the live event stream
       if (info?.is_processing) {
-        updateSession(sessionId, { isProcessing: true, activityStatus: { type: 'thinking' } });
+        setProcessingState(true, { activityStatus: { type: 'thinking' } });
 
         // Stop any previous reconnection
         stopReconnect();
@@ -701,7 +702,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
 
           // If backend stopped processing, clean up
           if (fresh.info && !fresh.info.is_processing) {
-            updateSession(sessionId, { isProcessing: false });
+            setProcessingState(false);
             stopReconnect();
           }
         }, 3000);
@@ -713,7 +714,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
       document.removeEventListener('visibilitychange', onVisible);
       stopReconnect();
     };
-  }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId, setProcessingState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // -- Persist messages ---------------------------------------------------
   const prevLenRef = useRef(initialMessages.length);
@@ -748,11 +749,11 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         setMsgs(updated);
         saveMessages(sessionId, updated);
       }
-      updateSession(sessionId, { isProcessing: false });
+      setProcessingState(false);
     } catch (e) {
       logger.error('Undo failed:', e);
     }
-  }, [sessionId, updateSession]);
+  }, [sessionId, setProcessingState]);
 
   // -- Approve tools ------------------------------------------------------
   const approveTools = useCallback(
@@ -776,8 +777,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
       setNeedsAttention(sessionId, false);
       const hasApproved = approvals.some(a => a.approved);
       if (hasApproved) {
-        updateSession(sessionId, {
-          isProcessing: true,
+        setProcessingState(true, {
           activityStatus: { type: 'thinking' },
         });
       }
@@ -788,7 +788,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
 
       return true;
     },
-    [sessionId, chat, updateSession, setNeedsAttention],
+    [sessionId, chat, setProcessingState, setNeedsAttention],
   );
 
   // -- Stop (interrupt backend agent loop, keep SSE open for events) --------
@@ -796,9 +796,9 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
     // Don't call chat.stop() — keep the SSE stream open so the backend's
     // tool_state_change(cancelled) and interrupted events reach the frontend.
     // The stream closes naturally when the backend sends finish events.
-    updateSession(sessionId, { isProcessing: false });
+    setProcessingState(false);
     apiFetch(`/api/interrupt/${sessionId}`, { method: 'POST' }).catch(() => {});
-  }, [sessionId, updateSession]);
+  }, [sessionId, setProcessingState]);
 
   // -- Edit message + regenerate from that point ----------------------------
   const editAndRegenerate = useCallback(async (messageId: string, newText: string) => {
