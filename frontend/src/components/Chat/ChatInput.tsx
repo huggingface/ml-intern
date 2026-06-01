@@ -345,6 +345,7 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
 
   const handleModelClick = (event: React.MouseEvent<HTMLElement>) => {
     setModelAnchorEl(event.currentTarget);
+    void refreshQuota();
   };
 
   const handleModelClose = () => {
@@ -412,15 +413,12 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [awaitingTopUp, jobsUpgradeRequired, handleJobsRetry]);
 
-  // Hide the chip until the user has actually burned quota; opening a
-  // premium-model session without sending should not populate a counter.
+  // Show the remaining subsidized premium-session allowance for today.
   const premiumChip = (() => {
-    if (!quota || quota.premiumUsedToday === 0) return null;
-    // Past the subsidized daily allowance, further premium usage bills the
-    // user's own HF account — same for free and pro.
-    if (quota.premiumRemaining === 0) return 'Billed';
-    if (quota.plan === 'free') return 'Free today';
-    return `${quota.premiumUsedToday}/${quota.premiumDailyCap} today`;
+    if (!quota) return null;
+    const remaining = Math.max(0, quota.premiumRemaining);
+    if (remaining === 0) return '0 left - enable billing';
+    return `${remaining} left today`;
   })();
 
   return (
