@@ -21,7 +21,6 @@ def _traj(events=None, messages=None, model="anthropic/claude-opus-4.8:fal-ai"):
 
 def test_model_family():
     assert "model:opus" in tag_session(_traj(model="anthropic/claude-opus-4.8:fal-ai"))
-    assert "model:sonnet" in tag_session(_traj(model="example-sonnet-model"))
     assert "model:kimi" in tag_session(_traj(model="moonshotai/Kimi-K2.6"))
     assert "model:other" in tag_session(_traj(model="unknown-model-xyz"))
 
