@@ -3,108 +3,67 @@ from types import SimpleNamespace
 import pytest
 from litellm import ChatCompletionMessageToolCall, Message
 
-from agent.core import agent_loop
 from agent.core.agent_loop import (
     LLMResult,
-    _call_llm_streaming,
     _assistant_message_from_result,
-    _extract_thinking_state,
+    _call_llm_streaming,
+    _strip_thinking_state_from_messages,
 )
 
 
-def test_extract_thinking_state_from_litellm_message():
-    message = Message(
-        role="assistant",
-        content="working",
-        thinking_blocks=[{"type": "thinking", "thinking": "reasoned"}],
-        reasoning_content="reasoned",
-    )
-
-    thinking_blocks, reasoning_content = _extract_thinking_state(message)
-
-    assert thinking_blocks == [{"type": "thinking", "thinking": "reasoned"}]
-    assert reasoning_content == "reasoned"
-
-
-def test_extract_thinking_state_from_provider_fields():
-    message = SimpleNamespace(
-        provider_specific_fields={
-            "thinking_blocks": [{"type": "thinking", "thinking": "reasoned"}],
-            "reasoning_content": "reasoned",
-        },
-    )
-
-    thinking_blocks, reasoning_content = _extract_thinking_state(message)
-
-    assert thinking_blocks == [{"type": "thinking", "thinking": "reasoned"}]
-    assert reasoning_content == "reasoned"
-
-
-def test_assistant_message_from_result_strips_router_thinking_with_tool_calls():
+def test_assistant_message_from_result_keeps_content_and_tool_calls():
     tool_call = ChatCompletionMessageToolCall(
         id="call_1",
         type="function",
         function={"name": "bash", "arguments": '{"command": "date"}'},
     )
     result = LLMResult(
-        content=None,
+        content="working",
         tool_calls_acc={},
         token_count=12,
         finish_reason="tool_calls",
-        thinking_blocks=[{"type": "thinking", "thinking": "reasoned"}],
-        reasoning_content="reasoned",
     )
 
-    message = _assistant_message_from_result(
-        result,
-        model_name="anthropic/claude-opus-4.8:fal-ai",
-        tool_calls=[tool_call],
-    )
+    message = _assistant_message_from_result(result, tool_calls=[tool_call])
 
+    assert message.content == "working"
     assert message.tool_calls == [tool_call]
     assert getattr(message, "thinking_blocks", None) is None
     assert getattr(message, "reasoning_content", None) is None
 
 
-def test_assistant_message_from_result_strips_router_reasoning_content():
-    result = LLMResult(
-        content=None,
-        tool_calls_acc={},
-        token_count=12,
-        finish_reason="tool_calls",
-        thinking_blocks=[{"type": "thinking", "thinking": "reasoned"}],
-        reasoning_content="reasoned",
-    )
+def test_strip_thinking_state_from_saved_messages():
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "stale"},
+                {"type": "text", "text": "done"},
+            ],
+            "thinking_blocks": [{"type": "thinking", "thinking": "stale"}],
+            "reasoning_content": "stale",
+            "provider_specific_fields": {
+                "thinking_blocks": [{"type": "thinking", "thinking": "stale"}],
+                "reasoning_content": "stale",
+                "other": "kept",
+            },
+        }
+    ]
 
-    message = _assistant_message_from_result(
-        result,
-        model_name="openai/gpt-5.5:fal-ai",
-    )
+    stripped = _strip_thinking_state_from_messages(messages)
 
-    assert getattr(message, "thinking_blocks", None) is None
-    assert getattr(message, "reasoning_content", None) is None
-
-
-def test_assistant_message_from_result_omits_absent_thinking_fields():
-    result = LLMResult(
-        content="done",
-        tool_calls_acc={},
-        token_count=12,
-        finish_reason="stop",
-    )
-
-    message = _assistant_message_from_result(
-        result,
-        model_name="anthropic/claude-opus-4.8:fal-ai",
-    )
-
-    assert message.content == "done"
-    assert getattr(message, "thinking_blocks", None) is None
-    assert getattr(message, "reasoning_content", None) is None
+    assert stripped == 5
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+            "provider_specific_fields": {"other": "kept"},
+        }
+    ]
 
 
 @pytest.mark.asyncio
-async def test_streaming_call_skips_chunk_rebuild_for_router_models(monkeypatch):
+async def test_streaming_call_returns_wire_safe_result(monkeypatch):
     async def fake_stream():
         yield SimpleNamespace(
             choices=[
@@ -119,9 +78,6 @@ async def test_streaming_call_skips_chunk_rebuild_for_router_models(monkeypatch)
     async def fake_acompletion(**_kwargs):
         return fake_stream()
 
-    def fail_chunk_builder(*_args, **_kwargs):
-        raise AssertionError("stream_chunk_builder should not run")
-
     events = []
 
     async def send_event(event):
@@ -132,8 +88,7 @@ async def test_streaming_call_skips_chunk_rebuild_for_router_models(monkeypatch)
         is_cancelled=False,
         send_event=send_event,
     )
-    monkeypatch.setattr(agent_loop, "acompletion", fake_acompletion)
-    monkeypatch.setattr(agent_loop, "stream_chunk_builder", fail_chunk_builder)
+    monkeypatch.setattr("agent.core.agent_loop.acompletion", fake_acompletion)
 
     result = await _call_llm_streaming(
         session,
@@ -143,5 +98,4 @@ async def test_streaming_call_skips_chunk_rebuild_for_router_models(monkeypatch)
     )
 
     assert result.content == "done"
-    assert result.thinking_blocks is None
-    assert result.reasoning_content is None
+    assert result.token_count == 3

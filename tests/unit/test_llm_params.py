@@ -52,16 +52,6 @@ def test_hf_router_drops_unsupported_effort_in_non_strict_mode(monkeypatch):
     assert "extra_body" not in params
 
 
-def test_bedrock_native_provider_id_is_rejected():
-    with pytest.raises(ValueError, match="Native Anthropic"):
-        _resolve_llm_params("bedrock/us.anthropic.unknown-model")
-
-
-def test_direct_openai_provider_id_is_rejected():
-    with pytest.raises(ValueError, match="Native Anthropic"):
-        _resolve_llm_params("openai/gpt-5.5")
-
-
 def test_user_billed_premium_uses_session_token_without_bill_to(monkeypatch):
     monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
     monkeypatch.setenv("HF_BILL_TO", "smolagents")

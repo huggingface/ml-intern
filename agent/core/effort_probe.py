@@ -78,9 +78,7 @@ class ProbeOutcome:
 def _is_thinking_unsupported(e: Exception) -> bool:
     """Model rejected any thinking config.
 
-    Matches Anthropic's 'thinking.type.enabled is not supported for this
-    model' as well as the adaptive variant. Substring-match because the
-    exact wording shifts across API versions.
+    Substring-match because exact wording shifts across models and providers.
     """
     s = str(e).lower()
     return "thinking" in s and "not supported" in s
@@ -94,9 +92,7 @@ def _is_invalid_effort(e: Exception) -> bool:
     either.
 
     Explicitly returns False when the message is really about thinking
-    itself (e.g. Anthropic's 4.7 error mentions ``output_config.effort``
-    in its fix hint, but the actual failure is ``thinking.type.enabled``
-    being unsupported). That case is caught by ``_is_thinking_unsupported``.
+    itself. That case is caught by ``_is_thinking_unsupported``.
     """
     if _is_thinking_unsupported(e):
         return False

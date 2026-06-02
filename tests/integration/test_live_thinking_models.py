@@ -2,7 +2,7 @@
 
 These tests intentionally call paid model APIs and are skipped unless
 ``ML_INTERN_LIVE_LLM_TESTS=1`` plus ``HF_TOKEN`` are set. They verify the
-router-only request path without requiring Anthropic or OpenAI API keys.
+router-only request path without requiring provider-specific API keys.
 """
 
 from __future__ import annotations
@@ -97,11 +97,7 @@ async def test_live_default_router_model_does_not_replay_reasoning_metadata():
         llm_params=llm_params,
     )
 
-    result.reasoning_content = result.reasoning_content or "synthetic-reasoning"
-    replay = _assistant_message_from_result(
-        result,
-        model_name=DEFAULT_MODEL_ID,
-    )
+    replay = _assistant_message_from_result(result)
 
     assert result.content or result.tool_calls_acc
     assert getattr(replay, "thinking_blocks", None) is None

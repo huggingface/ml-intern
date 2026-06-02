@@ -10,7 +10,7 @@ def test_hf_token():
     assert "[REDACTED_HF_TOKEN]" in out
 
 
-def test_anthropic_key():
+def test_provider_key():
     s = "key=sk-ant-api03_" + "a" * 40
     out = scrub_string(s)
     # The env-var name prefix matches too; just verify we don't leave the body.

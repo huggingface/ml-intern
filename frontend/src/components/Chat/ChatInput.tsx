@@ -51,50 +51,50 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   {
     id: 'claude-opus-4-8',
     name: 'Claude Opus 4.8',
-    description: 'Anthropic',
+    description: 'Hugging Face',
     modelPath: CLAUDE_MODEL_PATH,
-    avatarUrl: 'https://huggingface.co/api/avatars/Anthropic',
+    avatarUrl: getHfAvatarUrl(CLAUDE_MODEL_PATH),
     recommended: true,
   },
   {
     id: 'claude-opus-4-6',
     name: 'Claude Opus 4.6',
-    description: 'Anthropic',
+    description: 'Hugging Face',
     modelPath: CLAUDE_OPUS_46_MODEL_PATH,
-    avatarUrl: 'https://huggingface.co/api/avatars/Anthropic',
+    avatarUrl: getHfAvatarUrl(CLAUDE_OPUS_46_MODEL_PATH),
   },
   {
     id: 'gpt-5.5',
     name: 'GPT-5.5',
-    description: 'OpenAI',
+    description: 'Hugging Face',
     modelPath: GPT_55_MODEL_PATH,
-    avatarUrl: 'https://huggingface.co/api/avatars/openai',
+    avatarUrl: getHfAvatarUrl(GPT_55_MODEL_PATH),
   },
   {
     id: 'kimi-k2.6',
     name: 'Kimi K2.6',
-    description: 'Novita',
+    description: 'Hugging Face',
     modelPath: 'moonshotai/Kimi-K2.6',
     avatarUrl: getHfAvatarUrl('moonshotai/Kimi-K2.6'),
   },
   {
     id: 'minimax-m2.7',
     name: 'MiniMax M2.7',
-    description: 'Novita',
+    description: 'Hugging Face',
     modelPath: 'MiniMaxAI/MiniMax-M2.7',
     avatarUrl: getHfAvatarUrl('MiniMaxAI/MiniMax-M2.7'),
   },
   {
     id: 'glm-5.1',
     name: 'GLM 5.1',
-    description: 'Together',
+    description: 'Hugging Face',
     modelPath: 'zai-org/GLM-5.1',
     avatarUrl: getHfAvatarUrl('zai-org/GLM-5.1'),
   },
   {
     id: 'deepseek-v4-pro',
     name: 'DeepSeek V4 Pro',
-    description: 'DeepInfra',
+    description: 'Hugging Face',
     modelPath: 'deepseek-ai/DeepSeek-V4-Pro:deepinfra',
     avatarUrl: getHfAvatarUrl('deepseek-ai/DeepSeek-V4-Pro'),
   },
@@ -132,14 +132,6 @@ const modelOptionId = (modelPath: string) => (
     .replace(/^-|-$/g, '')
 );
 
-const providerLabel = (provider: string | undefined) => {
-  if (!provider) return 'Hugging Face';
-  if (provider === 'anthropic') return 'Anthropic';
-  if (provider === 'openai') return 'OpenAI';
-  if (provider === 'huggingface') return 'Hugging Face';
-  return provider;
-};
-
 const modelOptionFromApi = (model: {
   id?: string;
   label?: string;
@@ -150,7 +142,7 @@ const modelOptionFromApi = (model: {
   return {
     id: modelOptionId(model.id),
     name: model.label ?? model.id,
-    description: providerLabel(model.provider),
+    description: 'Hugging Face',
     modelPath: model.id,
     avatarUrl: getHfAvatarUrl(model.id.replace(/^huggingface\//, '')),
     recommended: Boolean(model.recommended),

@@ -14,7 +14,6 @@ from litellm import (
     ChatCompletionMessageToolCall,
     Message,
     acompletion,
-    stream_chunk_builder,
 )
 from litellm.exceptions import ContextWindowExceededError
 
@@ -28,7 +27,6 @@ from agent.messaging.gateway import NotificationGateway
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
 from agent.core.llm_params import _resolve_llm_params
-from agent.core.prompt_caching import with_prompt_caching
 from agent.core.session import DEFAULT_SESSION_LOG_DIR, Event, OpType, Session
 from agent.core.tools import ToolRouter
 from agent.tools.jobs_tool import CPU_FLAVORS
@@ -695,35 +693,6 @@ class LLMResult:
     token_count: int
     finish_reason: str | None
     usage: dict = field(default_factory=dict)
-    thinking_blocks: list[dict[str, Any]] | None = None
-    reasoning_content: str | None = None
-
-
-def _extract_thinking_state(
-    message: Any,
-) -> tuple[list[dict[str, Any]] | None, str | None]:
-    """Return provider reasoning fields from a response message."""
-    provider_fields = getattr(message, "provider_specific_fields", None)
-    if not isinstance(provider_fields, dict):
-        provider_fields = {}
-
-    thinking_blocks = (
-        getattr(message, "thinking_blocks", None)
-        or provider_fields.get("thinking_blocks")
-        or None
-    )
-    reasoning_content = (
-        getattr(message, "reasoning_content", None)
-        or provider_fields.get("reasoning_content")
-        or None
-    )
-    return thinking_blocks, reasoning_content
-
-
-def _should_replay_thinking_state(model_name: str | None) -> bool:
-    """HF Router-compatible histories do not replay provider reasoning state."""
-    _ = model_name
-    return False
 
 
 def _is_invalid_thinking_signature_error(exc: Exception) -> bool:
@@ -828,7 +797,6 @@ async def _maybe_heal_invalid_thinking_signature(
 def _assistant_message_from_result(
     llm_result: LLMResult,
     *,
-    model_name: str | None,
     tool_calls: list[ToolCall] | None = None,
 ) -> Message:
     """Build an assistant history message for HF Router-compatible replay."""
@@ -838,11 +806,6 @@ def _assistant_message_from_result(
     }
     if tool_calls is not None:
         kwargs["tool_calls"] = tool_calls
-    if _should_replay_thinking_state(model_name):
-        if llm_result.thinking_blocks:
-            kwargs["thinking_blocks"] = llm_result.thinking_blocks
-        if llm_result.reasoning_content:
-            kwargs["reasoning_content"] = llm_result.reasoning_content
     return Message(**kwargs)
 
 
@@ -853,7 +816,6 @@ async def _call_llm_streaming(
     response = None
     _healed_effort = False  # one-shot safety net per call
     _healed_thinking_signature = False
-    messages, tools = with_prompt_caching(messages, tools, llm_params.get("model"))
     t_start = time.monotonic()
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
@@ -922,11 +884,8 @@ async def _call_llm_streaming(
     token_count = 0
     finish_reason = None
     final_usage_chunk = None
-    chunks = []
-    should_replay_thinking = _should_replay_thinking_state(llm_params.get("model"))
 
     async for chunk in response:
-        chunks.append(chunk)
         if session.is_cancelled:
             tool_calls_acc.clear()
             break
@@ -980,27 +939,12 @@ async def _call_llm_streaming(
         latency_ms=int((time.monotonic() - t_start) * 1000),
         finish_reason=finish_reason,
     )
-    thinking_blocks = None
-    reasoning_content = None
-    if chunks and should_replay_thinking:
-        try:
-            rebuilt = stream_chunk_builder(chunks, messages=messages)
-            if rebuilt and getattr(rebuilt, "choices", None):
-                rebuilt_msg = rebuilt.choices[0].message
-                thinking_blocks, reasoning_content = _extract_thinking_state(
-                    rebuilt_msg
-                )
-        except Exception:
-            logger.debug("Failed to rebuild streaming thinking state", exc_info=True)
-
     return LLMResult(
         content=full_content or None,
         tool_calls_acc=tool_calls_acc,
         token_count=token_count,
         finish_reason=finish_reason,
         usage=usage,
-        thinking_blocks=thinking_blocks,
-        reasoning_content=reasoning_content,
     )
 
 
@@ -1011,7 +955,6 @@ async def _call_llm_non_streaming(
     response = None
     _healed_effort = False
     _healed_thinking_signature = False
-    messages, tools = with_prompt_caching(messages, tools, llm_params.get("model"))
     t_start = time.monotonic()
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
@@ -1079,7 +1022,6 @@ async def _call_llm_non_streaming(
     content = message.content or None
     finish_reason = choice.finish_reason
     token_count = response.usage.total_tokens if response.usage else 0
-    thinking_blocks, reasoning_content = _extract_thinking_state(message)
 
     # Build tool_calls_acc in the same format as streaming
     tool_calls_acc: dict[int, dict] = {}
@@ -1114,8 +1056,6 @@ async def _call_llm_non_streaming(
         token_count=token_count,
         finish_reason=finish_reason,
         usage=usage,
-        thinking_blocks=thinking_blocks,
-        reasoning_content=reasoning_content,
     )
 
 
@@ -1295,10 +1235,7 @@ class Handlers:
                         "  • For other tools: reduce the size of your arguments or use bash."
                     )
                     if content:
-                        assistant_msg = _assistant_message_from_result(
-                            llm_result,
-                            model_name=llm_params.get("model"),
-                        )
+                        assistant_msg = _assistant_message_from_result(llm_result)
                         session.context_manager.add_message(assistant_msg, token_count)
                     session.context_manager.add_message(
                         Message(role="user", content=f"[SYSTEM: {truncation_hint}]")
@@ -1355,10 +1292,7 @@ class Handlers:
                             _NO_TOOL_INCOMPLETE_PLAN_RETRY_LIMIT,
                         )
                         if content:
-                            assistant_msg = _assistant_message_from_result(
-                                llm_result,
-                                model_name=llm_params.get("model"),
-                            )
+                            assistant_msg = _assistant_message_from_result(llm_result)
                             session.context_manager.add_message(
                                 assistant_msg, token_count
                             )
@@ -1402,10 +1336,7 @@ class Handlers:
                         (content or "")[:500],
                     )
                     if content:
-                        assistant_msg = _assistant_message_from_result(
-                            llm_result,
-                            model_name=llm_params.get("model"),
-                        )
+                        assistant_msg = _assistant_message_from_result(llm_result)
                         session.context_manager.add_message(assistant_msg, token_count)
                         final_response = content
                     break
@@ -1432,7 +1363,6 @@ class Handlers:
                 # Add assistant message with all tool calls to context
                 assistant_msg = _assistant_message_from_result(
                     llm_result,
-                    model_name=llm_params.get("model"),
                     tool_calls=tool_calls,
                 )
                 session.context_manager.add_message(assistant_msg, token_count)

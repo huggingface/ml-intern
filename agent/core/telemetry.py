@@ -30,10 +30,8 @@ logger = logging.getLogger(__name__)
 def extract_usage(response_or_chunk: Any) -> dict:
     """Flat usage dict from a litellm response or final-chunk usage object.
 
-    Normalizes across providers: Anthropic exposes cache tokens as
-    ``cache_read_input_tokens`` / ``cache_creation_input_tokens``; OpenAI uses
-    ``prompt_tokens_details.cached_tokens``. Exposed under the stable keys
-    ``cache_read_tokens`` / ``cache_creation_tokens``.
+    Normalizes cache-token details across provider response shapes. Exposed
+    under the stable keys ``cache_read_tokens`` / ``cache_creation_tokens``.
     """
     u = getattr(response_or_chunk, "usage", None)
     if u is None and isinstance(response_or_chunk, dict):

@@ -37,8 +37,7 @@ def test_premium_model_predicate_uses_router_ids_only():
     assert agent._is_premium_model(agent.DEFAULT_GPT_MODEL_ID)
     assert agent._is_user_billed(agent.DEFAULT_PREMIUM_MODEL_ID)
     assert not agent._is_premium_model("moonshotai/Kimi-K2.6")
-    assert not agent._is_premium_model("bedrock/us.anthropic.claude-opus-4-8")
-    assert not agent._is_premium_model("openai/gpt-5.5")
+    assert not agent._is_premium_model("unsupported/model")
 
 
 @pytest.mark.asyncio
@@ -91,7 +90,7 @@ async def test_switching_to_premium_model_is_allowed_for_authenticated_user(
 
 
 @pytest.mark.asyncio
-async def test_switching_to_old_native_model_id_is_rejected(monkeypatch):
+async def test_switching_to_unknown_model_id_is_rejected(monkeypatch):
     async def fake_check_session_access(session_id, user, request=None):
         return SimpleNamespace(user_id=user["user_id"])
 
@@ -100,7 +99,7 @@ async def test_switching_to_old_native_model_id_is_rejected(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         await agent.set_session_model(
             "s1",
-            {"model": "bedrock/us.anthropic.claude-opus-4-8"},
+            {"model": "unsupported/model"},
             request=None,
             user={"user_id": "u1", "plan": "free"},
         )

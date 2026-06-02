@@ -2,7 +2,7 @@
 
 Covers two regressions on 2026-04-25:
 
-1. Non-Anthropic context overflow (Kimi 365k > 262k) was not classified as
+1. Router context overflow (Kimi 365k > 262k) was not classified as
    ``_is_context_overflow_error``, so the recovery path didn't fire and
    session 62ccfdcb died with 68 wasted compaction events.
 

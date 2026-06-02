@@ -32,7 +32,6 @@ from agent.core.model_ids import (
     CLAUDE_OPUS_48_MODEL_ID,
     GPT_55_MODEL_ID,
     KIMI_K26_MODEL_ID,
-    is_native_provider_model_id,
     strip_huggingface_model_prefix,
 )
 
@@ -76,8 +75,6 @@ def is_valid_model_id(model_id: str) -> bool:
     if is_reserved_local_model_id(normalized_model_id):
         return False
     if any(normalized_model_id.startswith(prefix) for prefix in LOCAL_MODEL_PREFIXES):
-        return False
-    if is_native_provider_model_id(normalized_model_id):
         return False
     if "/" not in normalized_model_id:
         return False

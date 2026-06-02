@@ -21,7 +21,6 @@ from agent.core.model_ids import (
     CLAUDE_SONNET_46_MODEL_ID,
     strip_huggingface_model_prefix,
 )
-from agent.core.prompt_caching import with_prompt_caching
 from agent.core.session import Event
 
 logger = logging.getLogger(__name__)
@@ -344,10 +343,9 @@ async def research_handler(
                 )
             )
             try:
-                _msgs, _ = with_prompt_caching(messages, None, llm_params.get("model"))
                 _t0 = time.monotonic()
                 response = await acompletion(
-                    messages=_msgs,
+                    messages=messages,
                     tools=None,  # no tools — force text response
                     stream=False,
                     timeout=120,
@@ -392,13 +390,10 @@ async def research_handler(
             )
 
         try:
-            _msgs, _tools = with_prompt_caching(
-                messages, tool_specs if tool_specs else None, llm_params.get("model")
-            )
             _t0 = time.monotonic()
             response = await acompletion(
-                messages=_msgs,
-                tools=_tools,
+                messages=messages,
+                tools=tool_specs if tool_specs else None,
                 tool_choice="auto",
                 stream=False,
                 timeout=120,
@@ -511,10 +506,9 @@ async def research_handler(
         )
     )
     try:
-        _msgs, _ = with_prompt_caching(messages, None, llm_params.get("model"))
         _t0 = time.monotonic()
         response = await acompletion(
-            messages=_msgs,
+            messages=messages,
             tools=None,
             stream=False,
             timeout=120,

@@ -34,16 +34,13 @@ def test_suggested_models_include_router_opus48_and_no_native_ids():
     ids = {m["id"] for m in model_switcher.SUGGESTED_MODELS}
 
     assert "anthropic/claude-opus-4.8:fal-ai" in ids
-    assert "bedrock/us.anthropic.claude-opus-4-8" not in ids
-    assert "anthropic/claude-opus-4-8" not in ids
+    assert all(model_id.count("/") >= 1 for model_id in ids)
 
 
-def test_model_switcher_rejects_old_native_provider_ids():
-    assert not model_switcher.is_valid_model_id("bedrock/us.anthropic.claude-opus-4-8")
-    assert not model_switcher.is_valid_model_id("anthropic/claude-opus-4-8")
-    assert not model_switcher.is_valid_model_id("openai/gpt-5.5")
+def test_model_switcher_accepts_router_model_ids():
     assert model_switcher.is_valid_model_id("openai/gpt-5.5:fal-ai")
     assert model_switcher.is_valid_model_id("openai/gpt-oss-120b")
+    assert model_switcher.is_valid_model_id("moonshotai/Kimi-K2.6")
 
 
 def test_local_models_skip_hf_router_catalog_output():

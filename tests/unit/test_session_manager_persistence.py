@@ -128,10 +128,10 @@ def _runtime_agent_session(
     )
 
 
-def test_invalid_saved_native_model_defaults_to_claude():
+def test_unknown_saved_model_defaults_to_claude():
     model, premium_user_billed, claude_counted = (
         SessionManager._model_from_saved_metadata(
-            "bedrock/us.anthropic.claude-opus-4-7-v1",
+            "unsupported/model",
             premium_user_billed=False,
             claude_counted=False,
         )
@@ -142,10 +142,10 @@ def test_invalid_saved_native_model_defaults_to_claude():
     assert claude_counted is False
 
 
-def test_invalid_saved_user_billed_model_defaults_to_free_model():
+def test_unknown_saved_user_billed_model_defaults_to_free_model():
     model, premium_user_billed, claude_counted = (
         SessionManager._model_from_saved_metadata(
-            "bedrock/us.anthropic.claude-opus-4-7-v1",
+            "unsupported/model",
             premium_user_billed=True,
             claude_counted=True,
         )

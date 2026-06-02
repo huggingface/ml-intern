@@ -56,9 +56,12 @@ from agent.core.hf_tokens import resolve_hf_request_token
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import (
     CLAUDE_OPUS_46_MODEL_ID,
+    DEEPSEEK_V4_PRO_MODEL_ID,
     DEFAULT_MODEL_ID,
+    GLM_51_MODEL_ID,
     GPT_55_MODEL_ID,
     KIMI_K26_MODEL_ID,
+    MINIMAX_M27_MODEL_ID,
     is_premium_model_id,
 )
 
@@ -78,20 +81,20 @@ def _available_models() -> list[dict[str, Any]]:
         {
             "id": DEFAULT_PREMIUM_MODEL_ID,
             "label": "Claude Opus 4.8",
-            "provider": "anthropic",
+            "provider": "huggingface",
             "tier": "pro",
             "recommended": True,
         },
         {
             "id": CLAUDE_OPUS_46_MODEL_ID,
             "label": "Claude Opus 4.6",
-            "provider": "anthropic",
+            "provider": "huggingface",
             "tier": "pro",
         },
         {
             "id": DEFAULT_GPT_MODEL_ID,
             "label": "GPT-5.5",
-            "provider": "openai",
+            "provider": "huggingface",
             "tier": "pro",
         },
         {
@@ -101,19 +104,19 @@ def _available_models() -> list[dict[str, Any]]:
             "tier": "free",
         },
         {
-            "id": "MiniMaxAI/MiniMax-M2.7",
+            "id": MINIMAX_M27_MODEL_ID,
             "label": "MiniMax M2.7",
             "provider": "huggingface",
             "tier": "free",
         },
         {
-            "id": "zai-org/GLM-5.1",
+            "id": GLM_51_MODEL_ID,
             "label": "GLM 5.1",
             "provider": "huggingface",
             "tier": "free",
         },
         {
-            "id": "deepseek-ai/DeepSeek-V4-Pro:deepinfra",
+            "id": DEEPSEEK_V4_PRO_MODEL_ID,
             "label": "DeepSeek V4 Pro",
             "provider": "huggingface",
             "tier": "free",

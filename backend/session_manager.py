@@ -15,9 +15,9 @@ from agent.core.agent_loop import process_submission
 from agent.core.model_ids import (
     DEFAULT_MODEL_ID,
     KIMI_K26_MODEL_ID,
+    is_known_router_model_id,
     strip_huggingface_model_prefix,
 )
-from agent.core.model_switcher import is_valid_model_id
 from agent.core.session import Event, OpType, Session
 from agent.core.session_persistence import get_session_store
 from agent.core.tools import ToolRouter
@@ -217,7 +217,7 @@ class SessionManager:
         claude_counted: bool,
     ) -> tuple[str, bool, bool]:
         normalized = strip_huggingface_model_prefix(model)
-        if normalized and is_valid_model_id(normalized):
+        if normalized and is_known_router_model_id(normalized):
             return normalized, premium_user_billed, claude_counted
 
         fallback_model = KIMI_K26_MODEL_ID if premium_user_billed else DEFAULT_MODEL_ID

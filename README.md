@@ -33,9 +33,6 @@ Create a `.env` file in the project root (or export these in your shell):
 ```bash
 HF_TOKEN=<your-hugging-face-token> # HF Router inference + Hub actions
 GITHUB_TOKEN=<github-personal-access-token>
-ML_INTERN_DEFAULT_MODEL_ID=anthropic/claude-opus-4.8:fal-ai # optional
-LOCAL_LLM_BASE_URL=http://localhost:8000 # optional local model endpoint
-LOCAL_LLM_API_KEY=<optional-local-api-key>
 ```
 
 All non-local model calls go through the Hugging Face Router at
@@ -45,6 +42,8 @@ Inference Provider calls. If no `HF_TOKEN` is set, the CLI will prompt you to
 paste one on first launch unless you start on a local model. To get a
 `GITHUB_TOKEN` follow the tutorial
 [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token).
+Set `ML_INTERN_DEFAULT_MODEL_ID` only if you need to override the default HF
+Router model.
 
 Hosted Space operators should also set:
 
@@ -109,11 +108,18 @@ Inside interactive mode, switch with `/model`:
 ```
 
 Supported local prefixes are `ollama/`, `vllm/`, `lm_studio/`, and
-`llamacpp/`. Set `LOCAL_LLM_BASE_URL` and optional `LOCAL_LLM_API_KEY` to use
-one shared local endpoint, or override a specific provider with its matching
-`*_BASE_URL` / `*_API_KEY` variable, such as `OLLAMA_BASE_URL` or
-`VLLM_API_KEY`. Provider-specific variables take precedence over the shared
-local variables. Base URLs may include or omit `/v1`.
+`llamacpp/`.
+
+```bash
+LOCAL_LLM_BASE_URL=http://localhost:8000
+LOCAL_LLM_API_KEY=<optional-local-api-key>
+```
+
+Set `LOCAL_LLM_BASE_URL` and optional `LOCAL_LLM_API_KEY` to use one shared
+local endpoint, or override a specific provider with its matching `*_BASE_URL`
+/ `*_API_KEY` variable, such as `OLLAMA_BASE_URL` or `VLLM_API_KEY`.
+Provider-specific variables take precedence over the shared local variables.
+Base URLs may include or omit `/v1`.
 
 **CLI tool runtime:**
 
