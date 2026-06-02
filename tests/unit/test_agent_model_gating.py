@@ -31,14 +31,14 @@ def _premium_session(model: str = agent.DEFAULT_PREMIUM_MODEL_ID):
     )
 
 
-def test_premium_model_predicate_uses_router_ids_and_legacy_normalization():
+def test_premium_model_predicate_uses_router_ids_only():
     assert agent._is_premium_model(agent.DEFAULT_PREMIUM_MODEL_ID)
     assert agent._is_premium_model(agent.CLAUDE_OPUS_46_MODEL_ID)
     assert agent._is_premium_model(agent.DEFAULT_GPT_MODEL_ID)
-    assert agent._is_premium_model("bedrock/us.anthropic.claude-opus-4-8")
-    assert agent._is_premium_model("openai/gpt-5.5")
     assert agent._is_user_billed(agent.DEFAULT_PREMIUM_MODEL_ID)
     assert not agent._is_premium_model("moonshotai/Kimi-K2.6")
+    assert not agent._is_premium_model("bedrock/us.anthropic.claude-opus-4-8")
+    assert not agent._is_premium_model("openai/gpt-5.5")
 
 
 @pytest.mark.asyncio
@@ -220,6 +220,55 @@ async def test_pro_user_billable_overflow_also_bills_user(monkeypatch):
     over = _premium_session()
     await agent._enforce_premium_model_quota({"user_id": "p1", "plan": "pro"}, over)
     assert over.session.premium_user_billed is True
+
+
+@pytest.mark.asyncio
+async def test_restore_summary_enforces_premium_quota_before_seed(monkeypatch):
+    events = []
+    agent_session = _premium_session()
+
+    class Request:
+        headers = {}
+        cookies = {}
+
+    async def fake_create_session(**kwargs):
+        events.append(("create", kwargs["model"]))
+        return "s1"
+
+    async def fake_check_session_access(
+        session_id, user, request, preload_sandbox=True
+    ):
+        events.append(("check", session_id, preload_sandbox))
+        return agent_session
+
+    async def fake_enforce_quota(user, session):
+        assert user["user_id"] == "u1"
+        assert session is agent_session
+        session.session.premium_user_billed = True
+        events.append(("quota", session.session.config.model_name))
+
+    async def fake_seed(session_id, messages):
+        events.append(("seed", session_id, agent_session.session.premium_user_billed))
+        return len(messages)
+
+    monkeypatch.setattr(agent.session_manager, "create_session", fake_create_session)
+    monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
+    monkeypatch.setattr(agent, "_enforce_premium_model_quota", fake_enforce_quota)
+    monkeypatch.setattr(agent.session_manager, "seed_from_summary", fake_seed)
+
+    response = await agent.restore_session_summary(
+        Request(),
+        {"messages": [{"role": "user", "content": "resume this"}]},
+        {"user_id": "u1", "plan": "free"},
+    )
+
+    assert response.session_id == "s1"
+    assert events == [
+        ("create", None),
+        ("check", "s1", False),
+        ("quota", agent.DEFAULT_PREMIUM_MODEL_ID),
+        ("seed", "s1", True),
+    ]
 
 
 @pytest.mark.asyncio

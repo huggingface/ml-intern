@@ -28,7 +28,7 @@ from agent.core.agent_loop import submission_loop
 from agent.core import model_switcher
 from agent.core.hf_tokens import resolve_hf_token
 from agent.core.local_models import is_local_model_id
-from agent.core.model_ids import normalize_legacy_model_id
+from agent.core.model_ids import strip_huggingface_model_prefix
 from agent.core.session import OpType
 from agent.core.tools import ToolRouter
 from agent.messaging.gateway import NotificationGateway
@@ -76,7 +76,7 @@ def _tool_runtime_label(local_mode: bool) -> str:
 
 
 def _normalize_config_model(config: Any) -> None:
-    normalized = normalize_legacy_model_id(getattr(config, "model_name", None))
+    normalized = strip_huggingface_model_prefix(getattr(config, "model_name", None))
     if normalized:
         config.model_name = normalized
 

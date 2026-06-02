@@ -31,7 +31,7 @@ def _write_session_log(
         "user_id": user_id,
         "session_start_time": "2026-01-01T00:00:00",
         "session_end_time": "2026-01-01T00:05:00",
-        "model_name": "openai/gpt-5.5",
+        "model_name": ROUTER_GPT_55,
         "messages": [
             {"role": "system", "content": "old system"},
             {"role": "user", "content": content},

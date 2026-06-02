@@ -16,6 +16,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent / "backend"
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+from agent.core.model_ids import DEFAULT_MODEL_ID, KIMI_K26_MODEL_ID  # noqa: E402
 from agent.core.session_persistence import NoopSessionStore  # noqa: E402
 from session_manager import AgentSession, SessionManager  # noqa: E402
 
@@ -125,6 +126,34 @@ def _runtime_agent_session(
         user_id=user_id,
         hf_token=hf_token,
     )
+
+
+def test_invalid_saved_native_model_defaults_to_claude():
+    model, premium_user_billed, claude_counted = (
+        SessionManager._model_from_saved_metadata(
+            "bedrock/us.anthropic.claude-opus-4-7-v1",
+            premium_user_billed=False,
+            claude_counted=False,
+        )
+    )
+
+    assert model == DEFAULT_MODEL_ID
+    assert premium_user_billed is False
+    assert claude_counted is False
+
+
+def test_invalid_saved_user_billed_model_defaults_to_free_model():
+    model, premium_user_billed, claude_counted = (
+        SessionManager._model_from_saved_metadata(
+            "bedrock/us.anthropic.claude-opus-4-7-v1",
+            premium_user_billed=True,
+            claude_counted=True,
+        )
+    )
+
+    assert model == KIMI_K26_MODEL_ID
+    assert premium_user_billed is False
+    assert claude_counted is False
 
 
 @pytest.mark.asyncio

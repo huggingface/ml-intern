@@ -12,7 +12,7 @@ from typing import Any
 
 from litellm import Message
 
-from agent.core.model_ids import normalize_legacy_model_id
+from agent.core.model_ids import strip_huggingface_model_prefix
 from agent.core.model_switcher import is_valid_model_id
 from agent.core.session import DEFAULT_SESSION_LOG_DIR
 
@@ -225,7 +225,7 @@ def restore_session_from_log(session: Any, path: Path) -> dict[str, Any]:
     saved_model = data.get("model_name")
     invalid_saved_model: str | None = None
     if isinstance(saved_model, str) and saved_model:
-        normalized_model = normalize_legacy_model_id(saved_model)
+        normalized_model = strip_huggingface_model_prefix(saved_model)
         if normalized_model and is_valid_model_id(normalized_model):
             session.update_model(normalized_model)
         else:

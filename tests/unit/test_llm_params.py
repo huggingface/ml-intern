@@ -52,36 +52,14 @@ def test_hf_router_drops_unsupported_effort_in_non_strict_mode(monkeypatch):
     assert "extra_body" not in params
 
 
-def test_legacy_bedrock_id_normalizes_to_router(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "bedrock/us.anthropic.claude-opus-4-8",
-        "session-token",
-        reasoning_effort="high",
-        strict=True,
-    )
-
-    assert params["model"] == "openai/anthropic/claude-opus-4.8:fal-ai"
-    assert params["api_base"] == HF_ROUTER_BASE_URL
-    assert params["api_key"] == "inference-token"
-    assert params["extra_headers"] == {"X-HF-Bill-To": "smolagents"}
-
-
-def test_legacy_direct_openai_id_normalizes_to_router(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-
-    params = _resolve_llm_params("openai/gpt-5.5", "session-token")
-
-    assert params["model"] == "openai/openai/gpt-5.5:fal-ai"
-    assert params["api_base"] == HF_ROUTER_BASE_URL
-    assert params["api_key"] == "inference-token"
-
-
-def test_unknown_native_provider_id_is_rejected():
+def test_bedrock_native_provider_id_is_rejected():
     with pytest.raises(ValueError, match="Native Anthropic"):
         _resolve_llm_params("bedrock/us.anthropic.unknown-model")
+
+
+def test_direct_openai_provider_id_is_rejected():
+    with pytest.raises(ValueError, match="Native Anthropic"):
+        _resolve_llm_params("openai/gpt-5.5")
 
 
 def test_user_billed_premium_uses_session_token_without_bill_to(monkeypatch):

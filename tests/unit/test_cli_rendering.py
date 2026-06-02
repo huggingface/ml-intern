@@ -20,18 +20,11 @@ def test_router_anthropic_research_downgrades_to_router_sonnet():
     )
 
 
-def test_legacy_bedrock_research_model_normalizes_to_router_sonnet():
-    assert (
-        _get_research_model("bedrock/us.anthropic.claude-opus-4-6-v1")
-        == "anthropic/claude-sonnet-4-6:fal-ai"
-    )
-
-
 def test_non_anthropic_research_model_is_unchanged():
     assert _get_research_model("openai/gpt-oss-120b") == "openai/gpt-oss-120b"
 
 
-def test_huggingface_prefix_research_model_normalizes_to_router_sonnet():
+def test_huggingface_prefix_research_model_strips_prefix():
     assert (
         _get_research_model("huggingface/anthropic/claude-opus-4.6:fal-ai")
         == "anthropic/claude-sonnet-4-6:fal-ai"

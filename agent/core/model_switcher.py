@@ -32,7 +32,8 @@ from agent.core.model_ids import (
     CLAUDE_OPUS_48_MODEL_ID,
     GPT_55_MODEL_ID,
     KIMI_K26_MODEL_ID,
-    is_legacy_native_model_id,
+    is_native_provider_model_id,
+    strip_huggingface_model_prefix,
 )
 
 
@@ -62,24 +63,25 @@ def is_valid_model_id(model_id: str) -> bool:
     Accepts:
       • ollama/<model>, vllm/<model>, lm_studio/<model>, llamacpp/<model>
       • <org>/<model>[:<tag>]            (HF router; tag = provider or policy)
-      • huggingface/<org>/<model>[:<tag>] (same, accepts legacy prefix)
+      • huggingface/<org>/<model>[:<tag>] (same, optional LiteLLM prefix)
 
     Actual availability is verified against the HF router catalog on
     switch, and by the provider on the probe's ping call.
     """
     if not model_id:
         return False
-    if is_local_model_id(model_id):
+    normalized_model_id = strip_huggingface_model_prefix(model_id) or model_id
+    if is_local_model_id(normalized_model_id):
         return True
-    if is_reserved_local_model_id(model_id):
+    if is_reserved_local_model_id(normalized_model_id):
         return False
-    if any(model_id.startswith(prefix) for prefix in LOCAL_MODEL_PREFIXES):
+    if any(normalized_model_id.startswith(prefix) for prefix in LOCAL_MODEL_PREFIXES):
         return False
-    if is_legacy_native_model_id(model_id):
+    if is_native_provider_model_id(normalized_model_id):
         return False
-    if "/" not in model_id:
+    if "/" not in normalized_model_id:
         return False
-    head = model_id.split(":", 1)[0]
+    head = normalized_model_id.split(":", 1)[0]
     parts = head.split("/")
     return len(parts) >= 2 and all(parts)
 

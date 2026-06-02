@@ -328,9 +328,9 @@ class Session:
 
     def update_model(self, model_name: str) -> None:
         """Switch the active model and update the context window limit."""
-        from agent.core.model_ids import normalize_legacy_model_id
+        from agent.core.model_ids import strip_huggingface_model_prefix
 
-        normalized = normalize_legacy_model_id(model_name) or model_name
+        normalized = strip_huggingface_model_prefix(model_name) or model_name
         self.config.model_name = normalized
         self.context_manager.model_max_tokens = _get_max_tokens_safe(normalized)
 

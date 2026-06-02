@@ -499,7 +499,8 @@ async def restore_session_summary(
     session's context as a user-role system note.
 
     Optional ``"model"`` in the body overrides the session's LLM. The
-    premium-model quota runs at message-submit time, not here.
+    premium-model quota runs before summarization because that call uses the
+    session model immediately.
     """
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -524,6 +525,14 @@ async def restore_session_summary(
         )
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+    agent_session = await _check_session_access(
+        session_id,
+        user,
+        request,
+        preload_sandbox=False,
+    )
+    await _enforce_premium_model_quota(user, agent_session)
 
     try:
         summarized = await session_manager.seed_from_summary(session_id, messages)

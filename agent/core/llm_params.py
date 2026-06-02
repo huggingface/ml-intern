@@ -22,9 +22,9 @@ from agent.core.local_models import (
 )
 from agent.core.model_ids import (
     HF_ROUTER_BASE_URL,
-    is_legacy_native_model_id,
+    is_native_provider_model_id,
     is_premium_model_id,
-    normalize_legacy_model_id,
+    strip_huggingface_model_prefix,
 )
 
 
@@ -113,9 +113,10 @@ def _resolve_llm_params(
       OpenAI-compatible endpoint at ``https://router.huggingface.co/v1``.
       The id can be bare or carry an HF routing suffix (``:fastest`` /
       ``:cheapest`` / ``:<provider>``). A leading ``huggingface/`` is
-      stripped. Known legacy Bedrock/direct-provider ids are normalized to
-      their router equivalents before the call. ``reasoning_effort`` is
-      forwarded via ``extra_body``. "minimal" normalizes to "low".
+      stripped. Native provider ids such as ``bedrock/...`` or direct
+      ``anthropic/...`` ids without a router provider suffix are rejected.
+      ``reasoning_effort`` is forwarded via ``extra_body``. "minimal"
+      normalizes to "low".
 
     ``strict=True`` raises ``UnsupportedEffortError`` when the requested
     effort isn't in the provider's accepted set, instead of silently
@@ -135,7 +136,7 @@ def _resolve_llm_params(
     spent. Premium router ids then use the caller's own token, skip
     ``INFERENCE_TOKEN``, and omit ``X-HF-Bill-To``.
     """
-    normalized_model = normalize_legacy_model_id(model_name) or model_name
+    normalized_model = strip_huggingface_model_prefix(model_name) or model_name
 
     if is_reserved_local_model_id(normalized_model):
         raise ValueError(f"Unsupported local model id: {normalized_model}")
@@ -143,13 +144,13 @@ def _resolve_llm_params(
     if local_model_provider(normalized_model) is not None:
         return _resolve_local_model_params(normalized_model, reasoning_effort, strict)
 
-    if is_legacy_native_model_id(normalized_model):
+    if is_native_provider_model_id(normalized_model):
         raise ValueError(
             "Native Anthropic, OpenAI, and Bedrock model ids are no longer "
             "supported. Use an HF Router model id instead."
         )
 
-    hf_model = normalized_model.removeprefix("huggingface/")
+    hf_model = normalized_model
     bill_user = bill_to_user and is_premium_model_id(hf_model)
     api_key = (
         resolve_hf_token(session_hf_token, include_cached=False)

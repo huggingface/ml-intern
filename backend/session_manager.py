@@ -12,7 +12,12 @@ from typing import Any, Optional
 
 from agent.config import load_config
 from agent.core.agent_loop import process_submission
-from agent.core.model_ids import normalize_legacy_model_id
+from agent.core.model_ids import (
+    DEFAULT_MODEL_ID,
+    KIMI_K26_MODEL_ID,
+    strip_huggingface_model_prefix,
+)
+from agent.core.model_switcher import is_valid_model_id
 from agent.core.session import Event, OpType, Session
 from agent.core.session_persistence import get_session_store
 from agent.core.tools import ToolRouter
@@ -148,7 +153,7 @@ class SessionManager:
 
     def __init__(self, config_path: str | None = None) -> None:
         self.config = load_config(config_path or DEFAULT_CONFIG_PATH)
-        normalized_default = normalize_legacy_model_id(self.config.model_name)
+        normalized_default = strip_huggingface_model_prefix(self.config.model_name)
         if normalized_default:
             self.config.model_name = normalized_default
         self.messaging_gateway = NotificationGateway(self.config.messaging)
@@ -204,6 +209,27 @@ class SessionManager:
         """
         agent_session.last_active_at = datetime.utcnow()
 
+    @staticmethod
+    def _model_from_saved_metadata(
+        model: str | None,
+        *,
+        premium_user_billed: bool,
+        claude_counted: bool,
+    ) -> tuple[str, bool, bool]:
+        normalized = strip_huggingface_model_prefix(model)
+        if normalized and is_valid_model_id(normalized):
+            return normalized, premium_user_billed, claude_counted
+
+        fallback_model = KIMI_K26_MODEL_ID if premium_user_billed else DEFAULT_MODEL_ID
+        logger.warning(
+            "Saved session model %r failed validation; using %r",
+            model,
+            fallback_model,
+        )
+        if fallback_model == KIMI_K26_MODEL_ID:
+            return fallback_model, False, False
+        return fallback_model, premium_user_billed, claude_counted
+
     def _create_session_sync(
         self,
         *,
@@ -223,7 +249,7 @@ class SessionManager:
         # Deep-copy config so each session's model switches independently —
         # tab A picking GLM doesn't flip tab B off the default model.
         session_config = self.config.model_copy(deep=True)
-        normalized_model = normalize_legacy_model_id(model)
+        normalized_model = strip_huggingface_model_prefix(model)
         if normalized_model:
             session_config.model_name = normalized_model
         session = Session(
@@ -665,7 +691,11 @@ class SessionManager:
 
         from litellm import Message
 
-        model = normalize_legacy_model_id(meta.get("model") or self.config.model_name)
+        model, premium_user_billed, claude_counted = self._model_from_saved_metadata(
+            meta.get("model") or self.config.model_name,
+            premium_user_billed=bool(meta.get("premium_user_billed", False)),
+            claude_counted=bool(meta.get("claude_counted")),
+        )
         event_queue: asyncio.Queue = asyncio.Queue()
         submission_queue: asyncio.Queue = asyncio.Queue()
         tool_router, session = await asyncio.to_thread(
@@ -724,7 +754,7 @@ class SessionManager:
         self._restore_pending_approval(session, meta.get("pending_approval") or [])
         session.turn_count = int(meta.get("turn_count") or 0)
         session.auto_approval_enabled = bool(meta.get("auto_approval_enabled", False))
-        session.premium_user_billed = bool(meta.get("premium_user_billed", False))
+        session.premium_user_billed = premium_user_billed
         raw_cap = meta.get("auto_approval_cost_cap_usd")
         session.auto_approval_cost_cap_usd = (
             float(raw_cap) if isinstance(raw_cap, int | float) else None
@@ -748,7 +778,7 @@ class SessionManager:
             created_at=created_at,
             is_active=True,
             is_processing=False,
-            claude_counted=bool(meta.get("claude_counted")),
+            claude_counted=claude_counted,
             title=meta.get("title"),
         )
         started = await self._start_agent_session(
