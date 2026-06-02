@@ -17,10 +17,7 @@ from litellm import Message, acompletion
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
 from agent.core.llm_params import _resolve_llm_params
-from agent.core.model_ids import (
-    CLAUDE_SONNET_46_MODEL_ID,
-    strip_huggingface_model_prefix,
-)
+from agent.core.model_ids import strip_huggingface_model_prefix
 from agent.core.session import Event
 
 logger = logging.getLogger(__name__)
@@ -223,11 +220,8 @@ RESEARCH_TOOL_SPEC = {
 
 
 def _get_research_model(main_model: str) -> str:
-    """Pick a cheaper model for research based on the main model."""
-    normalized = strip_huggingface_model_prefix(main_model) or main_model
-    if normalized.startswith("anthropic/claude-opus"):
-        return CLAUDE_SONNET_46_MODEL_ID
-    return normalized
+    """Normalize the main model id for the research sub-call."""
+    return strip_huggingface_model_prefix(main_model) or main_model
 
 
 async def research_handler(
@@ -252,13 +246,11 @@ async def research_handler(
         user_content = f"Context: {context}\n\n{user_content}"
     messages.append(Message(role="user", content=user_content))
 
-    # Use a cheaper/faster model for research
+    # Use the normalized router model for research
     main_model = session.config.model_name
     research_model = _get_research_model(main_model)
-    # Research is a cheap sub-call — cap the main session's effort at "high"
-    # so a user preference of ``max``/``xhigh`` (valid for Opus 4.8) doesn't
-    # propagate to a Sonnet research model that may not accept those levels.
-    # We also haven't probed this sub-model so we don't know its ceiling.
+    # Research is a cheap sub-call — cap the main session's effort at "high".
+    # We also haven't probed this sub-call's model so we don't know its ceiling.
     _pref = getattr(session.config, "reasoning_effort", None)
     _capped = "high" if _pref in ("max", "xhigh") else _pref
     llm_params = _resolve_llm_params(

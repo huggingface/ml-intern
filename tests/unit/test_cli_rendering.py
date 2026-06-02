@@ -13,10 +13,10 @@ from agent.tools.research_tool import _get_research_model
 from agent.utils import terminal_display
 
 
-def test_router_anthropic_research_downgrades_to_router_sonnet():
+def test_router_anthropic_research_model_is_unchanged():
     assert (
         _get_research_model("anthropic/claude-opus-4.8:fal-ai")
-        == "anthropic/claude-sonnet-4-6:fal-ai"
+        == "anthropic/claude-opus-4.8:fal-ai"
     )
 
 
@@ -27,12 +27,11 @@ def test_non_anthropic_research_model_is_unchanged():
 def test_huggingface_prefix_research_model_strips_prefix():
     assert (
         _get_research_model("huggingface/anthropic/claude-opus-4.8:fal-ai")
-        == "anthropic/claude-sonnet-4-6:fal-ai"
+        == "anthropic/claude-opus-4.8:fal-ai"
     )
 
 
 def test_hf_router_openai_research_model_is_unchanged():
-    # No Sonnet equivalent for GPT — research stays on the same router model.
     assert (
         _get_research_model("huggingface/openai/gpt-5.5:fal-ai")
         == "openai/gpt-5.5:fal-ai"
