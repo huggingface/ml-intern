@@ -103,7 +103,7 @@ def test_claude_code_jsonl_uses_message_timestamps():
     events = to_claude_code_jsonl(
         {
             "session_id": "session-123",
-            "model_name": "anthropic/claude-opus-4-6",
+            "model_name": "anthropic/claude-opus-4.8:fal-ai",
             "session_start_time": "2026-01-01T00:00:00",
             "messages": [
                 {
@@ -140,7 +140,7 @@ def test_row_payload_scrubs_messages_events_and_tools(tmp_path):
         "user_id": "lewtun",
         "session_start_time": "2026-01-01T00:00:00",
         "session_end_time": "2026-01-01T00:00:03",
-        "model_name": "anthropic/claude-opus-4-6",
+        "model_name": "anthropic/claude-opus-4.8:fal-ai",
         "total_cost_usd": 0.01,
         "messages": [{"role": "user", "content": f"token {HF_SECRET}"}],
         "events": [{"type": "debug", "content": f"key {ANTHROPIC_SECRET}"}],
@@ -162,7 +162,7 @@ def test_claude_code_payload_scrubs_messages_before_conversion(tmp_path):
     tmp_file = tmp_path / "claude_code.jsonl"
     data = {
         "session_id": "session-123",
-        "model_name": "anthropic/claude-opus-4-6",
+        "model_name": "anthropic/claude-opus-4.8:fal-ai",
         "session_start_time": "2026-01-01T00:00:00",
         "messages": [
             {

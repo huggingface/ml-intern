@@ -1,4 +1,4 @@
-"""Tests for backend/user_quotas.py — the in-memory Claude daily-quota store."""
+"""Tests for backend/user_quotas.py — the in-memory premium quota store."""
 
 import asyncio
 import sys
@@ -121,11 +121,13 @@ async def test_refund_on_stale_day_resets_rather_than_underflow():
 
 
 @pytest.mark.asyncio
-async def test_free_user_cap_reached_at_one():
+async def test_free_user_cap_reached_at_two():
     cap = user_quotas.daily_cap_for("free")
+    assert cap == 2
+    assert await user_quotas.increment_claude("freebie") == 1
     used = await user_quotas.increment_claude("freebie")
-    assert used == 1
-    assert used >= cap  # first bump exhausts the free tier (cap=1)
+    assert used == 2
+    assert used >= cap
 
 
 @pytest.mark.asyncio

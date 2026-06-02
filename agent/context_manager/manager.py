@@ -91,8 +91,8 @@ class CompactionFailedError(Exception):
 
     Typically means an individual preserved message (system, first user, or
     untouched tail) exceeds what truncation can fix in one pass. The caller
-    must terminate the session — retrying produces an infinite loop that
-    burns Bedrock budget for free (~$3 per re-attempt on Opus).
+    must terminate the session; retrying produces an infinite loop that burns
+    premium inference budget.
     """
 
 
@@ -133,9 +133,8 @@ async def summarize_messages(
     ``session`` is optional; when provided, the call is recorded via
     ``telemetry.record_llm_call`` so its cost lands in the session's
     ``total_cost_usd``. Without it, the call still happens but is
-    invisible in telemetry — which used to be the case for every
-    compaction call until 2026-04-29 (~30-50% of Bedrock spend was
-    attributed to this single source of dark cost).
+    invisible in telemetry, which used to hide a significant share of premium
+    inference spend.
 
     Returns ``(summary_text, completion_tokens)``.
     """
@@ -474,9 +473,8 @@ class ContextManager:
             )
             # Preserve all known assistant-side fields (tool_calls, thinking_blocks,
             # reasoning_content, provider_specific_fields) even when content is
-            # replaced. Anthropic extended-thinking models reject the next request
-            # with "Invalid signature in thinking block" if thinking_blocks is
-            # dropped from a prior assistant message.
+            # replaced. Historical traces may still contain provider reasoning
+            # metadata, and truncation should not silently discard it.
             kept = {
                 k: getattr(msg, k, None)
                 for k in (
@@ -526,7 +524,7 @@ class ContextManager:
         a giant tool output stuck in the untouched tail) is too large for
         truncation to fix. The caller must terminate the session — retrying
         is what caused the 2026-05-03 infinite-compaction-loop pattern that
-        burned Bedrock budget invisibly.
+        burned premium inference budget invisibly.
         """
         if not self.needs_compaction:
             return
@@ -554,7 +552,7 @@ class ContextManager:
         # otherwise recent_messages overlaps with the messages we put in
         # head". The walk-back's `idx > 1` guard is necessary (no system in
         # recent) but insufficient (first_user is also in head and would be
-        # duplicated). Anthropic API rejects two consecutive user messages
+        # duplicated). Chat providers can reject two consecutive user messages
         # with a 400 — bot review on PR #213 caught this on the second clamp
         # iteration.
         if idx <= first_user_idx:
@@ -616,7 +614,7 @@ class ContextManager:
 
         # Hard verify: if compaction didn't bring us below the threshold even
         # after truncating oversized preserved messages, retrying just burns
-        # Bedrock budget on the same useless compaction call. Raise so the
+        # premium inference budget on the same useless compaction call. Raise so the
         # caller can terminate the session cleanly. Pre-2026-05-04, the
         # caller looped indefinitely (~$3/Opus retry) until the pod was
         # killed — invisible to the dataset because the session never

@@ -17,6 +17,7 @@ from litellm import Message, acompletion
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
 from agent.core.llm_params import _resolve_llm_params
+from agent.core.model_ids import CLAUDE_SONNET_46_MODEL_ID, normalize_legacy_model_id
 from agent.core.prompt_caching import with_prompt_caching
 from agent.core.session import Event
 
@@ -221,17 +222,10 @@ RESEARCH_TOOL_SPEC = {
 
 def _get_research_model(main_model: str) -> str:
     """Pick a cheaper model for research based on the main model."""
-    # HF-router Anthropic (used for user-billed overflow) downgrades to Sonnet
-    # on the same router, so research keeps the user's billing path instead of
-    # running full Opus.
-    if main_model.startswith("huggingface/anthropic/"):
-        return "huggingface/anthropic/claude-sonnet-4-6:fal-ai"
-    if main_model.startswith("anthropic/"):
-        return "anthropic/claude-sonnet-4-6"
-    if main_model.startswith("bedrock/") and "anthropic" in main_model:
-        return "bedrock/us.anthropic.claude-sonnet-4-6"
-    # For non-Anthropic models (HF router etc.), use the same model
-    return main_model
+    normalized = normalize_legacy_model_id(main_model) or main_model
+    if normalized.startswith("anthropic/claude-opus"):
+        return CLAUDE_SONNET_46_MODEL_ID
+    return normalized
 
 
 async def research_handler(

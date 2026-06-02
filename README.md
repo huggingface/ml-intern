@@ -31,16 +31,32 @@ ml-intern
 Create a `.env` file in the project root (or export these in your shell):
 
 ```bash
-ANTHROPIC_API_KEY=<your-anthropic-api-key> # if using anthropic models
-OPENAI_API_KEY=<your-openai-api-key> # if using openai models
-LOCAL_LLM_BASE_URL=http://localhost:8000 # shared fallback for local model prefixes
-LOCAL_LLM_API_KEY=<optional-local-api-key> # optional shared local API key
-HF_TOKEN=<your-hugging-face-token>
-GITHUB_TOKEN=<github-personal-access-token> 
+HF_TOKEN=<your-hugging-face-token> # HF Router inference + Hub actions
+GITHUB_TOKEN=<github-personal-access-token>
+ML_INTERN_DEFAULT_MODEL_ID=anthropic/claude-opus-4.8:fal-ai # optional
+LOCAL_LLM_BASE_URL=http://localhost:8000 # optional local model endpoint
+LOCAL_LLM_API_KEY=<optional-local-api-key>
 ```
-If no `HF_TOKEN` is set, the CLI will prompt you to paste one on first launch
-unless you start on a local model. To get a GITHUB_TOKEN follow the tutorial
+
+All non-local model calls go through the Hugging Face Router at
+`https://router.huggingface.co/v1`. The default model is Claude Opus 4.8
+(`anthropic/claude-opus-4.8:fal-ai`). Your `HF_TOKEN` must be allowed to make
+Inference Provider calls. If no `HF_TOKEN` is set, the CLI will prompt you to
+paste one on first launch unless you start on a local model. To get a
+`GITHUB_TOKEN` follow the tutorial
 [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token).
+
+Hosted Space operators should also set:
+
+```bash
+INFERENCE_TOKEN=<org-or-space-hf-token>
+HF_BILL_TO=smolagents # optional, defaults to smolagents
+```
+
+Subsidized premium sessions use `INFERENCE_TOKEN` and send `X-HF-Bill-To`.
+Free users get 2 subsidized premium sessions per day and Pro users get 20.
+After that allowance, premium calls use the user's own HF token and omit
+`X-HF-Bill-To`.
 
 ### Usage
 
@@ -59,8 +75,9 @@ ml-intern "fine-tune llama on my dataset"
 **Options:**
 
 ```bash
-ml-intern --model anthropic/claude-opus-4-7 "your prompt"   # requires ANTHROPIC_API_KEY
-ml-intern --model openai/gpt-5.5 "your prompt"              # requires OPENAI_API_KEY
+ml-intern --model anthropic/claude-opus-4.8:fal-ai "your prompt"
+ml-intern --model moonshotai/Kimi-K2.6 "your prompt"
+ml-intern --model openai/gpt-5.5:fal-ai "your prompt"
 ml-intern --model ollama/llama3.1:8b "your prompt"
 ml-intern --model vllm/meta-llama/Llama-3.1-8B-Instruct "your prompt"
 ml-intern --sandbox-tools "your prompt"                         # use HF Space sandbox tools
@@ -69,7 +86,7 @@ ml-intern --no-stream "your prompt"
 ```
 
 Run `ml-intern` then `/model` to see the full list of suggested model ids
-(Claude, GPT, HF-router models like MiniMax, Kimi, GLM, DeepSeek, and local
+(Claude, GPT, HF Router models like MiniMax, Kimi, GLM, DeepSeek, and local
 model prefixes).
 
 **Local models:**
@@ -380,7 +397,7 @@ Edit `configs/cli_agent_config.json` for CLI defaults, or
 
 ```json
 {
-  "model_name": "anthropic/claude-sonnet-4-5-20250929",
+  "model_name": "anthropic/claude-opus-4.8:fal-ai",
   "mcpServers": {
     "your-server-name": {
       "transport": "http",

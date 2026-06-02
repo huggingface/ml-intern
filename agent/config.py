@@ -51,12 +51,11 @@ class Config(BaseModel):
     # Reasoning effort *preference* — the ceiling the user wants. The probe
     # on `/model` walks a cascade down from here (``max`` → ``xhigh`` → ``high``
     # → …) and caches per-model what the provider actually accepted in
-    # ``Session.model_effective_effort``. Default ``max`` because we'd rather
-    # burn tokens thinking than ship a wrong ML recipe; the cascade lands on
-    # whichever level the model supports (``high`` for GPT-5 / HF router,
-    # ``xhigh`` or ``max`` for Anthropic 4.6 / 4.7). ``None`` = thinking off.
+    # ``Session.model_effective_effort``. Default ``high`` because HF Router
+    # accepts low/medium/high generically and provider-specific higher levels
+    # should be discovered through explicit probes. ``None`` = thinking off.
     # Valid values: None | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-    reasoning_effort: str | None = "max"
+    reasoning_effort: str | None = "high"
     messaging: MessagingConfig = MessagingConfig()
 
 

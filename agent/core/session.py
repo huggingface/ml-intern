@@ -29,12 +29,10 @@ DEFAULT_SESSION_LOG_DIR = Path("session_logs")
 def _get_max_tokens_safe(model_name: str) -> int:
     """Return the max input-context tokens for a model.
 
-    Primary source: ``litellm.get_model_info(model)['max_input_tokens']`` —
-    LiteLLM maintains an upstream catalog that knows Claude Opus 4.6 is
-    1M, GPT-5 is 272k, Sonnet 4.5 is 200k, and so on. Strips any HF routing
-    suffix / huggingface/ prefix so tagged ids ('moonshotai/Kimi-K2.6:cheapest')
-    look up the bare model. Falls back to a conservative 200k default for
-    models not in the catalog (typically HF-router-only models).
+    Primary source: ``litellm.get_model_info(model)['max_input_tokens']``.
+    Strips any HF routing suffix / huggingface/ prefix so tagged ids
+    ('moonshotai/Kimi-K2.6:cheapest') look up the bare model. Falls back to a
+    conservative 200k default for models not in the catalog.
     """
     from litellm import get_model_info
 
@@ -121,10 +119,10 @@ class Session:
         self.session_id = session_id or str(uuid.uuid4())
         self.config = config
         self.is_running = True
-        # Billing mode for premium (HF-router Anthropic) usage. The backend
-        # quota gate flips this on once the user is past their subsidized daily
-        # allowance, so the LLM call bills the user's own HF token instead of
-        # the Space. Persisted with the session so it survives idle-reclaim.
+        # Billing mode for premium HF Router usage. The backend quota gate
+        # flips this on once the user is past their subsidized daily allowance,
+        # so the LLM call bills the user's own HF token instead of the Space.
+        # Persisted with the session so it survives idle-reclaim.
         self.premium_user_billed: bool = False
         self.current_plan: list[dict[str, str]] = []
         self._cancelled = asyncio.Event()
@@ -330,8 +328,11 @@ class Session:
 
     def update_model(self, model_name: str) -> None:
         """Switch the active model and update the context window limit."""
-        self.config.model_name = model_name
-        self.context_manager.model_max_tokens = _get_max_tokens_safe(model_name)
+        from agent.core.model_ids import normalize_legacy_model_id
+
+        normalized = normalize_legacy_model_id(model_name) or model_name
+        self.config.model_name = normalized
+        self.context_manager.model_max_tokens = _get_max_tokens_safe(normalized)
 
     def set_auto_approval_policy(
         self, *, enabled: bool, cost_cap_usd: float | None

@@ -6,8 +6,8 @@ Covers two regressions on 2026-04-25:
    ``_is_context_overflow_error``, so the recovery path didn't fire and
    session 62ccfdcb died with 68 wasted compaction events.
 
-2. Bedrock TPM rate limit (`Too many tokens, please wait before trying
-   again.`) needs the longer rate-limit retry schedule. The old schedule
+2. Provider token-bucket rate limits (`Too many tokens, please wait before
+   trying again.`) need the longer rate-limit retry schedule. The old schedule
    ([5, 15, 30] = 50s) burned through 6 sessions costing >$2,400 combined
    on the same day.
 """
@@ -48,10 +48,10 @@ def test_random_error_is_not_context_overflow():
 # ── rate limit ──────────────────────────────────────────────────────────
 
 
-def test_bedrock_too_many_tokens_is_rate_limit():
+def test_provider_too_many_tokens_is_rate_limit():
     # Verbatim from sessions b37a3823, c4d7a831, b63c4933 (2026-04-25).
     err = Exception(
-        'litellm.RateLimitError: BedrockException - {"message":"Too many '
+        'litellm.RateLimitError: ProviderException - {"message":"Too many '
         'tokens, please wait before trying again."}'
     )
     assert _is_rate_limit_error(err)
@@ -95,8 +95,8 @@ def test_non_transient_returns_none():
     assert _retry_delay_for(err, 0) is None
 
 
-def test_rate_limit_total_budget_covers_bedrock_bucket_recovery():
+def test_rate_limit_total_budget_covers_token_bucket_recovery():
     """The whole point of the rate-limit schedule: total wait time should
-    exceed the ~60s Bedrock TPM bucket recovery window."""
+    exceed a typical ~60s provider token-bucket recovery window."""
     assert len(_LLM_RATE_LIMIT_RETRY_DELAYS) == _MAX_LLM_RETRIES - 1
     assert sum(_LLM_RATE_LIMIT_RETRY_DELAYS) > 60

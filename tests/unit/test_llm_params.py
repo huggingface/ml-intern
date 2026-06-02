@@ -6,30 +6,139 @@ from agent.core.llm_params import (
     _resolve_hf_router_token,
     _resolve_llm_params,
 )
+from agent.core.model_ids import HF_ROUTER_BASE_URL
 
 
-def test_openai_xhigh_effort_is_forwarded():
+def test_hf_router_params_for_default_premium_model(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+
     params = _resolve_llm_params(
-        "openai/gpt-5.5",
-        reasoning_effort="xhigh",
+        "anthropic/claude-opus-4.8:fal-ai",
+        "session-token",
+        reasoning_effort="high",
         strict=True,
     )
 
-    assert params["model"] == "openai/gpt-5.5"
-    assert params["reasoning_effort"] == "xhigh"
+    assert params == {
+        "model": "openai/anthropic/claude-opus-4.8:fal-ai",
+        "api_base": HF_ROUTER_BASE_URL,
+        "api_key": "inference-token",
+        "extra_headers": {"X-HF-Bill-To": "smolagents"},
+        "extra_body": {"reasoning_effort": "high"},
+    }
 
 
-def test_openai_max_effort_is_still_rejected():
-    try:
+def test_hf_router_rejects_max_effort_in_strict_mode():
+    with pytest.raises(UnsupportedEffortError, match="HF Router"):
         _resolve_llm_params(
-            "openai/gpt-5.4",
+            "anthropic/claude-opus-4.8:fal-ai",
             reasoning_effort="max",
             strict=True,
         )
-    except UnsupportedEffortError as exc:
-        assert "OpenAI doesn't accept effort='max'" in str(exc)
-    else:
-        raise AssertionError("Expected UnsupportedEffortError for max effort")
+
+
+def test_hf_router_drops_unsupported_effort_in_non_strict_mode(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-token")
+
+    params = _resolve_llm_params(
+        "anthropic/claude-opus-4.8:fal-ai",
+        reasoning_effort="max",
+        strict=False,
+    )
+
+    assert params["api_base"] == HF_ROUTER_BASE_URL
+    assert params["api_key"] == "hf-token"
+    assert "extra_body" not in params
+
+
+def test_legacy_bedrock_id_normalizes_to_router(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+
+    params = _resolve_llm_params(
+        "bedrock/us.anthropic.claude-opus-4-8",
+        "session-token",
+        reasoning_effort="high",
+        strict=True,
+    )
+
+    assert params["model"] == "openai/anthropic/claude-opus-4.8:fal-ai"
+    assert params["api_base"] == HF_ROUTER_BASE_URL
+    assert params["api_key"] == "inference-token"
+    assert params["extra_headers"] == {"X-HF-Bill-To": "smolagents"}
+
+
+def test_legacy_direct_openai_id_normalizes_to_router(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+
+    params = _resolve_llm_params("openai/gpt-5.5", "session-token")
+
+    assert params["model"] == "openai/openai/gpt-5.5:fal-ai"
+    assert params["api_base"] == HF_ROUTER_BASE_URL
+    assert params["api_key"] == "inference-token"
+
+
+def test_unknown_native_provider_id_is_rejected():
+    with pytest.raises(ValueError, match="Native Anthropic"):
+        _resolve_llm_params("bedrock/us.anthropic.unknown-model")
+
+
+def test_user_billed_premium_uses_session_token_without_bill_to(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+
+    params = _resolve_llm_params(
+        "anthropic/claude-opus-4.8:fal-ai",
+        "session-token",
+        reasoning_effort="high",
+        strict=True,
+        bill_to_user=True,
+    )
+
+    assert params["model"] == "openai/anthropic/claude-opus-4.8:fal-ai"
+    assert params["api_base"] == HF_ROUTER_BASE_URL
+    assert params["api_key"] == "session-token"
+    assert "extra_headers" not in params
+    assert params["extra_body"] == {"reasoning_effort": "high"}
+
+
+def test_user_billed_premium_does_not_fall_back_to_cached_token(monkeypatch):
+    import huggingface_hub
+
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_TOKEN", "server-token")
+    monkeypatch.setattr(huggingface_hub, "get_token", lambda: "cached-token")
+
+    params = _resolve_llm_params(
+        "anthropic/claude-opus-4.8:fal-ai",
+        None,
+        bill_to_user=True,
+    )
+
+    assert params["api_key"] is None
+    assert "extra_headers" not in params
+
+
+def test_bill_to_user_ignored_for_free_models(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+
+    params = _resolve_llm_params(
+        "moonshotai/Kimi-K2.6", "session-token", bill_to_user=True
+    )
+
+    assert params["api_key"] == "inference-token"
+    assert params["extra_headers"] == {"X-HF-Bill-To": "smolagents"}
+
+
+def test_huggingface_prefix_is_stripped_for_router_calls(monkeypatch):
+    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
+
+    params = _resolve_llm_params("huggingface/openai/gpt-5.5:fal-ai")
+
+    assert params["model"] == "openai/openai/gpt-5.5:fal-ai"
+    assert params["api_base"] == HF_ROUTER_BASE_URL
 
 
 def test_resolve_ollama_params_adds_v1_and_uses_default_key(monkeypatch):
@@ -161,208 +270,6 @@ def test_hf_router_token_swallows_huggingface_hub_errors(monkeypatch):
     monkeypatch.setattr(huggingface_hub, "get_token", fail)
 
     assert _resolve_hf_router_token(None) is None
-
-
-def test_subsidized_bedrock_claude_stays_on_bedrock_by_default(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "bedrock/us.anthropic.claude-opus-4-6-v1", "session-token"
-    )
-
-    assert params == {"model": "bedrock/us.anthropic.claude-opus-4-6-v1"}
-
-
-def test_subsidized_openai_gpt55_stays_direct_by_default(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "openai/gpt-5.5", "session-token", reasoning_effort="xhigh"
-    )
-
-    assert params == {"model": "openai/gpt-5.5", "reasoning_effort": "xhigh"}
-
-
-def test_bedrock_claude_user_billed_maps_to_hf_router_when_flagged(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "bedrock/us.anthropic.claude-opus-4-6-v1",
-        "session-token",
-        bill_to_user=True,
-    )
-
-    # Over the allowance: billed to the user's own token, no bill-to override.
-    assert params["model"] == "openai/anthropic/claude-opus-4.6:fal-ai"
-    assert params["api_base"] == "https://router.huggingface.co/v1"
-    assert params["api_key"] == "session-token"
-    assert "extra_headers" not in params
-
-
-def test_bedrock_claude_user_billed_preserves_subsidized_effort(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "bedrock/us.anthropic.claude-opus-4-6-v1",
-        "session-token",
-        reasoning_effort="max",
-        strict=True,
-        bill_to_user=True,
-    )
-
-    assert params["model"] == "openai/anthropic/claude-opus-4.6:fal-ai"
-    assert params["api_key"] == "session-token"
-    assert params["extra_body"] == {"reasoning_effort": "max"}
-
-
-def test_bedrock_claude48_user_billed_maps_to_hf_router_when_flagged(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "bedrock/us.anthropic.claude-opus-4-8",
-        "session-token",
-        reasoning_effort="max",
-        strict=True,
-        bill_to_user=True,
-    )
-
-    assert params["model"] == "openai/anthropic/claude-opus-4.8:fal-ai"
-    assert params["api_base"] == "https://router.huggingface.co/v1"
-    assert params["api_key"] == "session-token"
-    assert params["extra_body"] == {"reasoning_effort": "max"}
-    assert "extra_headers" not in params
-
-
-def test_openai_gpt55_user_billed_preserves_subsidized_effort(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "openai/gpt-5.5",
-        "session-token",
-        reasoning_effort="xhigh",
-        strict=True,
-        bill_to_user=True,
-    )
-
-    assert params["model"] == "openai/openai/gpt-5.5:fal-ai"
-    assert params["api_key"] == "session-token"
-    assert params["extra_body"] == {"reasoning_effort": "xhigh"}
-
-
-def test_bedrock_research_sonnet_user_billed_maps_to_hf_router(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "bedrock/us.anthropic.claude-sonnet-4-6",
-        "session-token",
-        bill_to_user=True,
-    )
-
-    assert params["model"] == "openai/anthropic/claude-sonnet-4-6:fal-ai"
-    assert params["api_base"] == "https://router.huggingface.co/v1"
-    assert params["api_key"] == "session-token"
-    assert "extra_headers" not in params
-
-
-def test_hf_router_legacy_anthropic_subsidized_maps_back_to_bedrock(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "huggingface/anthropic/claude-opus-4.6:fal-ai", "session-token"
-    )
-
-    assert params == {"model": "bedrock/us.anthropic.claude-opus-4-6-v1"}
-
-
-def test_hf_router_legacy_anthropic48_subsidized_maps_back_to_bedrock(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "huggingface/anthropic/claude-opus-4.8:fal-ai", "session-token"
-    )
-
-    assert params == {"model": "bedrock/us.anthropic.claude-opus-4-8"}
-
-
-def test_hf_router_legacy_openai_subsidized_maps_back_to_direct_openai(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params("huggingface/openai/gpt-5.5:fal-ai", "session-token")
-
-    assert params == {"model": "openai/gpt-5.5"}
-
-
-def test_hf_router_anthropic_user_billed_when_flagged(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "huggingface/anthropic/claude-opus-4.6:fal-ai",
-        "session-token",
-        bill_to_user=True,
-    )
-
-    assert params["model"] == "openai/anthropic/claude-opus-4.6:fal-ai"
-    assert params["api_base"] == "https://router.huggingface.co/v1"
-    assert params["api_key"] == "session-token"
-    assert "extra_headers" not in params
-
-
-def test_hf_router_user_billed_does_not_fall_back_to_cached_token(monkeypatch):
-    import huggingface_hub
-
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-    monkeypatch.setenv("HF_TOKEN", "server-token")
-    monkeypatch.setattr(huggingface_hub, "get_token", lambda: "cached-token")
-
-    params = _resolve_llm_params(
-        "bedrock/us.anthropic.claude-opus-4-6-v1",
-        None,
-        bill_to_user=True,
-    )
-
-    assert params["api_key"] is None
-    assert "extra_headers" not in params
-
-
-def test_bill_to_user_ignored_for_free_models(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "moonshotai/Kimi-K2.6", "session-token", bill_to_user=True
-    )
-
-    # Free models stay subsidized even if the user-billing flag is set.
-    assert params["api_key"] == "inference-token"
-    assert params["extra_headers"] == {"X-HF-Bill-To": "smolagents"}
-
-
-def test_openai_gpt55_user_billed_maps_to_hf_router_when_flagged(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "openai/gpt-5.5",
-        "session-token",
-        bill_to_user=True,
-    )
-
-    # GPT-5.5 via the router bills the user's own token, no bill-to override.
-    assert params["model"] == "openai/openai/gpt-5.5:fal-ai"
-    assert params["api_key"] == "session-token"
-    assert "extra_headers" not in params
 
 
 def test_hf_router_params_set_bill_to_only_for_inference_token(monkeypatch):

@@ -26,36 +26,33 @@ from agent.core.local_models import (
     is_local_model_id,
     is_reserved_local_model_id,
 )
+from agent.core.model_ids import (
+    CLAUDE_OPUS_46_MODEL_ID,
+    CLAUDE_OPUS_47_MODEL_ID,
+    CLAUDE_OPUS_48_MODEL_ID,
+    GPT_55_MODEL_ID,
+    KIMI_K26_MODEL_ID,
+    is_legacy_native_model_id,
+)
 
 
 # Suggested models shown by `/model` (not a gate). Users can paste any HF
-# model id (e.g. "MiniMaxAI/MiniMax-M2.7") or an `anthropic/` / `openai/`
-# prefix for direct API access. For HF ids, append ":fastest" /
-# ":cheapest" / ":preferred" / ":<provider>" to override the default
-# routing policy (auto = fastest with failover).
+# Router model id (e.g. "MiniMaxAI/MiniMax-M2.7"). Append ":fastest",
+# ":cheapest", ":preferred", or ":<provider>" to override the default routing
+# policy (auto = fastest with failover).
 SUGGESTED_MODELS = [
-    {"id": "openai/gpt-5.5", "label": "GPT-5.5"},
-    {"id": "openai/gpt-5.4", "label": "GPT-5.4"},
-    {"id": "anthropic/claude-opus-4-8", "label": "Claude Opus 4.8"},
-    {"id": "anthropic/claude-opus-4-7", "label": "Claude Opus 4.7"},
-    {"id": "anthropic/claude-opus-4-6", "label": "Claude Opus 4.6"},
-    {
-        "id": "bedrock/us.anthropic.claude-opus-4-8",
-        "label": "Claude Opus 4.8 via Bedrock",
-    },
-    {
-        "id": "bedrock/us.anthropic.claude-opus-4-6-v1",
-        "label": "Claude Opus 4.6 via Bedrock",
-    },
+    {"id": CLAUDE_OPUS_48_MODEL_ID, "label": "Claude Opus 4.8"},
+    {"id": CLAUDE_OPUS_47_MODEL_ID, "label": "Claude Opus 4.7"},
+    {"id": CLAUDE_OPUS_46_MODEL_ID, "label": "Claude Opus 4.6"},
+    {"id": GPT_55_MODEL_ID, "label": "GPT-5.5"},
     {"id": "MiniMaxAI/MiniMax-M2.7", "label": "MiniMax M2.7"},
-    {"id": "moonshotai/Kimi-K2.6", "label": "Kimi K2.6"},
+    {"id": KIMI_K26_MODEL_ID, "label": "Kimi K2.6"},
     {"id": "zai-org/GLM-5.1", "label": "GLM 5.1"},
     {"id": "deepseek-ai/DeepSeek-V4-Pro:deepinfra", "label": "DeepSeek V4 Pro"},
 ]
 
 
 _ROUTING_POLICIES = {"fastest", "cheapest", "preferred"}
-_DIRECT_PREFIXES = ("anthropic/", "openai/", *LOCAL_MODEL_PREFIXES)
 _LOCAL_PROBE_TIMEOUT = 15.0
 
 
@@ -63,8 +60,6 @@ def is_valid_model_id(model_id: str) -> bool:
     """Loose format check — lets users pick any model id.
 
     Accepts:
-      • anthropic/<model>
-      • openai/<model>
       • ollama/<model>, vllm/<model>, lm_studio/<model>, llamacpp/<model>
       • <org>/<model>[:<tag>]            (HF router; tag = provider or policy)
       • huggingface/<org>/<model>[:<tag>] (same, accepts legacy prefix)
@@ -80,6 +75,8 @@ def is_valid_model_id(model_id: str) -> bool:
         return False
     if any(model_id.startswith(prefix) for prefix in LOCAL_MODEL_PREFIXES):
         return False
+    if is_legacy_native_model_id(model_id):
+        return False
     if "/" not in model_id:
         return False
     head = model_id.split(":", 1)[0]
@@ -93,10 +90,11 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
     proceed with the switch, ``False`` to indicate a hard problem the user
     should notice before we fire the effort probe.
 
-    Anthropic / OpenAI ids return ``True`` without printing anything —
-    the probe below covers "does this model exist".
+    Local ids return ``True`` without printing anything. Router ids are checked
+    against the router catalog when possible; the probe below covers provider
+    availability for uncataloged ids.
     """
-    if model_id.startswith(_DIRECT_PREFIXES):
+    if is_local_model_id(model_id):
         return True
 
     from agent.core import hf_router_catalog as cat
@@ -167,7 +165,6 @@ def print_model_listing(config, console) -> None:
     console.print(
         "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M2.7').\n"
         "Add ':fastest', ':cheapest', ':preferred', or ':<provider>' to override routing.\n"
-        "Use 'anthropic/<model>' or 'openai/<model>' for direct API access.\n"
         "Use 'ollama/<model>', 'vllm/<model>', 'lm_studio/<model>', or "
         "'llamacpp/<model>' for local OpenAI-compatible endpoints.[/dim]"
     )
@@ -178,8 +175,6 @@ def print_invalid_id(arg: str, console) -> None:
     console.print(
         "[dim]Expected:\n"
         "  • <org>/<model>[:tag]    (HF router — paste from huggingface.co)\n"
-        "  • anthropic/<model>\n"
-        "  • openai/<model>\n"
         "  • ollama/<model> | vllm/<model> | lm_studio/<model> | llamacpp/<model>[/dim]"
     )
 

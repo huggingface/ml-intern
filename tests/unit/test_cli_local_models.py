@@ -30,11 +30,20 @@ def test_openai_compat_prefix_is_not_supported():
     assert not model_switcher.is_valid_model_id("openai-compat/custom-model")
 
 
-def test_suggested_models_include_opus48_direct_and_bedrock_ids():
+def test_suggested_models_include_router_opus48_and_no_native_ids():
     ids = {m["id"] for m in model_switcher.SUGGESTED_MODELS}
 
-    assert "anthropic/claude-opus-4-8" in ids
-    assert "bedrock/us.anthropic.claude-opus-4-8" in ids
+    assert "anthropic/claude-opus-4.8:fal-ai" in ids
+    assert "bedrock/us.anthropic.claude-opus-4-8" not in ids
+    assert "anthropic/claude-opus-4-8" not in ids
+
+
+def test_model_switcher_rejects_old_native_provider_ids():
+    assert not model_switcher.is_valid_model_id("bedrock/us.anthropic.claude-opus-4-8")
+    assert not model_switcher.is_valid_model_id("anthropic/claude-opus-4-8")
+    assert not model_switcher.is_valid_model_id("openai/gpt-5.5")
+    assert model_switcher.is_valid_model_id("openai/gpt-5.5:fal-ai")
+    assert model_switcher.is_valid_model_id("openai/gpt-oss-120b")
 
 
 def test_local_models_skip_hf_router_catalog_output():
@@ -59,8 +68,8 @@ async def test_probe_and_switch_local_model_uses_no_effort(monkeypatch):
     monkeypatch.setattr(model_switcher, "acompletion", fake_acompletion)
 
     class Config:
-        model_name = "openai/gpt-5.5"
-        reasoning_effort = "max"
+        model_name = "anthropic/claude-opus-4.8:fal-ai"
+        reasoning_effort = "high"
 
     class Session:
         def __init__(self):
@@ -98,7 +107,7 @@ async def test_probe_and_switch_local_model_rejects_probe_errors(monkeypatch):
     monkeypatch.setattr(model_switcher, "acompletion", failing_acompletion)
 
     class Config:
-        model_name = "openai/gpt-5.5"
+        model_name = "anthropic/claude-opus-4.8:fal-ai"
         reasoning_effort = None
 
     class Session:
@@ -123,6 +132,6 @@ async def test_probe_and_switch_local_model_rejects_probe_errors(monkeypatch):
         hf_token=None,
     )
 
-    assert config.model_name == "openai/gpt-5.5"
+    assert config.model_name == "anthropic/claude-opus-4.8:fal-ai"
     assert session.model_id is None
     assert "ollama/llama3.1:8b" not in session.model_effective_effort

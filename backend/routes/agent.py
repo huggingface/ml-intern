@@ -52,78 +52,39 @@ from session_manager import (
 import user_quotas
 
 from agent.core.hf_access import get_jobs_access
-from agent.core.hf_tokens import resolve_hf_request_token, resolve_hf_router_token
+from agent.core.hf_tokens import resolve_hf_request_token
 from agent.core.llm_params import _resolve_llm_params
+from agent.core.model_ids import (
+    CLAUDE_OPUS_46_MODEL_ID,
+    DEFAULT_MODEL_ID,
+    GPT_55_MODEL_ID,
+    KIMI_K26_MODEL_ID,
+    is_premium_model_id,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["agent"])
 _background_teardown_tasks: set[asyncio.Task] = set()
 
-CLAUDE_OPUS_46_MODEL_ID = "bedrock/us.anthropic.claude-opus-4-6-v1"
-CLAUDE_OPUS_48_MODEL_ID = "bedrock/us.anthropic.claude-opus-4-8"
-DEFAULT_CLAUDE_MODEL_ID = CLAUDE_OPUS_46_MODEL_ID
-DEFAULT_GPT_MODEL_ID = "openai/gpt-5.5"
-USER_BILLED_CLAUDE_OPUS_46_MODEL_ID = "huggingface/anthropic/claude-opus-4.6:fal-ai"
-USER_BILLED_CLAUDE_OPUS_48_MODEL_ID = "huggingface/anthropic/claude-opus-4.8:fal-ai"
-USER_BILLED_CLAUDE_MODEL_ID = USER_BILLED_CLAUDE_OPUS_46_MODEL_ID
-USER_BILLED_GPT_MODEL_ID = "huggingface/openai/gpt-5.5:fal-ai"
-DEFAULT_FREE_MODEL_ID = "moonshotai/Kimi-K2.6"
-PREMIUM_MODEL_IDS = {
-    DEFAULT_CLAUDE_MODEL_ID,
-    CLAUDE_OPUS_48_MODEL_ID,
-    DEFAULT_GPT_MODEL_ID,
-    # Backward-compatible for sessions created while the FAL ids were exposed.
-    USER_BILLED_CLAUDE_MODEL_ID,
-    USER_BILLED_CLAUDE_OPUS_48_MODEL_ID,
-    USER_BILLED_GPT_MODEL_ID,
-}
-# Premium models that can switch to the user's own HF account past the
-# subsidized daily allowance. The selectable/default ids stay on the old
-# subsidized endpoints; ``agent.core.llm_params`` maps them to the FAL router
-# ids only when ``premium_user_billed`` is true.
-USER_BILLED_MODEL_IDS = {
-    DEFAULT_CLAUDE_MODEL_ID,
-    CLAUDE_OPUS_48_MODEL_ID,
-    DEFAULT_GPT_MODEL_ID,
-    USER_BILLED_CLAUDE_MODEL_ID,
-    USER_BILLED_CLAUDE_OPUS_48_MODEL_ID,
-    USER_BILLED_GPT_MODEL_ID,
-}
+DEFAULT_PREMIUM_MODEL_ID = DEFAULT_MODEL_ID
+DEFAULT_GPT_MODEL_ID = GPT_55_MODEL_ID
+DEFAULT_FREE_MODEL_ID = KIMI_K26_MODEL_ID
 DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
-
-
-def _claude_picker_model_id() -> str:
-    """Return the model ID used by the Claude option in the UI.
-
-    The frontend config sets ``session_manager.config.model_name`` from
-    ``ML_INTERN_CLAUDE_MODEL_ID`` when that env var is present, otherwise it
-    falls back to the production Bedrock Claude model. This function only
-    exposes that resolved config value for the Claude picker; non-Claude models
-    are listed separately in the model switcher.
-    """
-    return session_manager.config.model_name
 
 
 def _available_models() -> list[dict[str, Any]]:
     models = [
         {
-            "id": "moonshotai/Kimi-K2.6",
-            "label": "Kimi K2.6",
-            "provider": "huggingface",
-            "tier": "free",
-            "recommended": True,
-        },
-        {
-            "id": _claude_picker_model_id(),
-            "label": "Claude Opus 4.6",
+            "id": DEFAULT_PREMIUM_MODEL_ID,
+            "label": "Claude Opus 4.8",
             "provider": "anthropic",
             "tier": "pro",
             "recommended": True,
         },
         {
-            "id": CLAUDE_OPUS_48_MODEL_ID,
-            "label": "Claude Opus 4.8",
+            "id": CLAUDE_OPUS_46_MODEL_ID,
+            "label": "Claude Opus 4.6",
             "provider": "anthropic",
             "tier": "pro",
         },
@@ -132,6 +93,12 @@ def _available_models() -> list[dict[str, Any]]:
             "label": "GPT-5.5",
             "provider": "openai",
             "tier": "pro",
+        },
+        {
+            "id": DEFAULT_FREE_MODEL_ID,
+            "label": "Kimi K2.6",
+            "provider": "huggingface",
+            "tier": "free",
         },
         {
             "id": "MiniMaxAI/MiniMax-M2.7",
@@ -159,11 +126,11 @@ AVAILABLE_MODELS = _available_models()
 
 
 def _is_premium_model(model_id: str) -> bool:
-    return model_id in PREMIUM_MODEL_IDS
+    return is_premium_model_id(model_id)
 
 
 def _is_user_billed(model_id: str) -> bool:
-    return model_id in USER_BILLED_MODEL_IDS
+    return _is_premium_model(model_id)
 
 
 async def _model_override_for_new_session(
@@ -172,24 +139,10 @@ async def _model_override_for_new_session(
 ) -> str | None:
     """Return the model override to use when creating a new session.
 
-    Explicit premium model requests are allowed and charged at message-submit
-    time. Implicit default sessions are more forgiving: when the configured
-    default is premium, start them on the first free model instead of spending
-    premium quota accidentally.
+    Explicit model requests are allowed and charged at message-submit time
+    when premium. Empty requests use the configured default model.
     """
-    resolved_model = requested_model or session_manager.config.model_name
-    if not _is_premium_model(resolved_model):
-        return requested_model
-    if requested_model:
-        return requested_model
-
-    logger.info(
-        "Default premium model %s would spend quota; "
-        "creating session with free fallback %s",
-        resolved_model,
-        DEFAULT_FREE_MODEL_ID,
-    )
-    return DEFAULT_FREE_MODEL_ID
+    return requested_model
 
 
 def _premium_cap_message(plan: str) -> str:
@@ -219,13 +172,11 @@ async def _enforce_premium_model_quota(
     ``claude_counted`` flag on ``AgentSession`` guards against re-counting the
     same session; the stored field name is kept for persistence compatibility.
 
-    Subsidizes the same daily allowance as before (free = 1, pro = 20),
-    company-billed. Past the allowance, a user-billable model (Claude or GPT-5.5
-    via the HF router) flips the session to ``premium_user_billed`` so the call
-    bills the user's own HF (OAuth) token instead of blocking. A premium model
-    that is *not* user-billable hard-caps with a 429 — defensive only, as every
-    current premium model is user-billable. No-ops when the model isn't premium
-    or when this session's billing has already been decided.
+    Subsidizes the daily allowance (free = 2, pro = 20), organization-billed
+    through the HF Router. Past the allowance, premium router models flip the
+    session to ``premium_user_billed`` so the call bills the user's own HF
+    token instead of blocking. No-ops when the model isn't premium or when this
+    session's billing has already been decided.
     """
     if agent_session.claude_counted:
         return
@@ -433,14 +384,13 @@ async def generate_title(
     reasoning model — reasoning_effort=low keeps the reasoning budget small
     so the 60-token output budget isn't consumed before the title is written.
     """
-    api_key = resolve_hf_router_token(_user_hf_token(user))
     try:
+        llm_params = _resolve_llm_params(
+            "openai/gpt-oss-120b:cerebras",
+            _user_hf_token(user),
+            reasoning_effort="low",
+        )
         response = await acompletion(
-            # Double openai/ prefix: LiteLLM strips the first as its provider
-            # prefix, leaving the HF model id on the wire for the router.
-            model="openai/openai/gpt-oss-120b:cerebras",
-            api_base="https://router.huggingface.co/v1",
-            api_key=api_key,
             messages=[
                 {
                     "role": "system",
@@ -457,7 +407,7 @@ async def generate_title(
             max_tokens=60,
             temperature=0.3,
             timeout=10,
-            reasoning_effort="low",
+            **llm_params,
         )
         title = response.choices[0].message.content.strip().strip('"').strip("'")
         title = title.translate(_TITLE_STRIP_CHARS).strip()
@@ -518,8 +468,7 @@ async def create_session(
     if model and model not in valid_ids:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model}")
 
-    # Explicit premium selections are allowed. If the implicit configured
-    # default is premium, start the session on a free model instead.
+    # Empty requests use the configured default, which may be premium.
     model = await _model_override_for_new_session(request, model)
 
     try:

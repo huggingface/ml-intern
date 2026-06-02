@@ -28,7 +28,7 @@ def _session(events, user_id="u1", start="2026-04-24T09:59:00"):
         "session_id": "sess-" + user_id,
         "session_start_time": start,
         "session_end_time": "2026-04-24T10:05:00",
-        "model_name": "claude-opus-4-6",
+        "model_name": "anthropic/claude-opus-4.8:fal-ai",
         "messages": [{"role": "user", "content": "hi"}],
         "events": events,
         "user_id": user_id,
@@ -213,7 +213,7 @@ def test_per_tool_counts_in_session_metrics():
     assert m["_research_calls"] == 1
     assert m["_distinct_tools_used"] == 3
     assert m["_total_named_tool_calls"] == 4
-    assert m["_model_name"] == "claude-opus-4-6"
+    assert m["_model_name"] == "anthropic/claude-opus-4.8:fal-ai"
 
 
 def test_aggregate_research_kpis_only_count_doer_sessions():
@@ -366,22 +366,22 @@ def test_aggregate_sessions_by_model_split():
     import json as _json
 
     mod = _load()
-    s_anthropic = _session([], user_id="a")
-    s_anthropic["model_name"] = "anthropic/claude-opus-4-6"
-    s_bedrock = _session([], user_id="b")
-    s_bedrock["model_name"] = "bedrock/us.anthropic.claude-opus-4-6-v1"
-    s_bedrock2 = _session([], user_id="c")
-    s_bedrock2["model_name"] = "bedrock/us.anthropic.claude-opus-4-6-v1"
+    s_claude = _session([], user_id="a")
+    s_claude["model_name"] = "anthropic/claude-opus-4.8:fal-ai"
+    s_kimi = _session([], user_id="b")
+    s_kimi["model_name"] = "moonshotai/Kimi-K2.6"
+    s_kimi2 = _session([], user_id="c")
+    s_kimi2["model_name"] = "moonshotai/Kimi-K2.6"
     row = mod._aggregate(
         [
-            mod._session_metrics(s_anthropic),
-            mod._session_metrics(s_bedrock),
-            mod._session_metrics(s_bedrock2),
+            mod._session_metrics(s_claude),
+            mod._session_metrics(s_kimi),
+            mod._session_metrics(s_kimi2),
         ]
     )
     assert _json.loads(row["sessions_by_model_json"]) == {
-        "anthropic/claude-opus-4-6": 1,
-        "bedrock/us.anthropic.claude-opus-4-6-v1": 2,
+        "anthropic/claude-opus-4.8:fal-ai": 1,
+        "moonshotai/Kimi-K2.6": 2,
     }
 
 

@@ -1,5 +1,5 @@
 {
-  "model_name": "anthropic/claude-opus-4-6",
+  "model_name": "anthropic/claude-opus-4.8:fal-ai",
   "save_sessions": true,
   "session_dataset_repo": "smolagents/ml-intern-sessions",
   "share_traces": true,

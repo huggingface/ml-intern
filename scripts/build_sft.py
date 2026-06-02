@@ -13,7 +13,7 @@ Output row schema::
 
     {
       "session_id": "...",
-      "model": "claude-opus-4-6",
+      "model": "anthropic/claude-opus-4.8:fal-ai",
       "timestamp": "2026-04-24T...",
       "tags": ["tool:hf_jobs", "gpu:a100", "hf_job:succeeded", ...],
       "messages": [...],   # OpenAI / TRL SFTTrainer format

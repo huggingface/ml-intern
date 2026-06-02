@@ -56,7 +56,7 @@ export default function BillingBanner() {
           >
             Hugging Face account
           </Link>{' '}
-          (shown under huggingface/ml-intern-models).
+          through Hugging Face Inference Providers.
         </Typography>
         <Box
           component="button"

@@ -691,7 +691,7 @@ def test_render_markdown_report_from_sample_ranking():
         ranking,
         records,
         generated_at="2026-05-04T10:00:00+00:00",
-        model="openai/gpt-5.5",
+        model="openai/gpt-5.5:fal-ai",
     )
 
     assert "# ML Intern Backlog Prioritization" in report

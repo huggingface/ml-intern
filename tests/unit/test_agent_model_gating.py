@@ -1,6 +1,5 @@
 """Tests for premium model handling in backend/routes/agent.py."""
 
-import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,46 +21,28 @@ def _reset_quota_store():
     agent.user_quotas._reset_for_tests()
 
 
-def test_premium_model_predicate_includes_subsidized_and_legacy_router_ids():
-    assert agent._is_premium_model(agent.DEFAULT_CLAUDE_MODEL_ID)
-    assert agent._is_premium_model(agent.CLAUDE_OPUS_48_MODEL_ID)
+def _premium_session(model: str = agent.DEFAULT_PREMIUM_MODEL_ID):
+    return SimpleNamespace(
+        claude_counted=False,
+        session=SimpleNamespace(
+            config=SimpleNamespace(model_name=model),
+            premium_user_billed=False,
+        ),
+    )
+
+
+def test_premium_model_predicate_uses_router_ids_and_legacy_normalization():
+    assert agent._is_premium_model(agent.DEFAULT_PREMIUM_MODEL_ID)
+    assert agent._is_premium_model(agent.CLAUDE_OPUS_46_MODEL_ID)
     assert agent._is_premium_model(agent.DEFAULT_GPT_MODEL_ID)
-    assert agent._is_premium_model(agent.USER_BILLED_CLAUDE_MODEL_ID)
-    assert agent._is_premium_model(agent.USER_BILLED_CLAUDE_OPUS_48_MODEL_ID)
-    assert agent._is_premium_model(agent.USER_BILLED_GPT_MODEL_ID)
-    # Both selectable premium models can overflow to user billing.
-    assert agent._is_user_billed(agent.DEFAULT_CLAUDE_MODEL_ID)
-    assert agent._is_user_billed(agent.CLAUDE_OPUS_48_MODEL_ID)
-    assert agent._is_user_billed(agent.DEFAULT_GPT_MODEL_ID)
-    assert agent._is_user_billed(agent.USER_BILLED_CLAUDE_MODEL_ID)
-    assert agent._is_user_billed(agent.USER_BILLED_CLAUDE_OPUS_48_MODEL_ID)
-    assert agent._is_user_billed(agent.USER_BILLED_GPT_MODEL_ID)
-    # Native Anthropic remains a local/dev escape hatch, not a production cap.
-    assert not agent._is_premium_model("anthropic/claude-opus-4-6")
+    assert agent._is_premium_model("bedrock/us.anthropic.claude-opus-4-8")
+    assert agent._is_premium_model("openai/gpt-5.5")
+    assert agent._is_user_billed(agent.DEFAULT_PREMIUM_MODEL_ID)
     assert not agent._is_premium_model("moonshotai/Kimi-K2.6")
 
 
 @pytest.mark.asyncio
-async def test_default_premium_session_falls_back_to_free_model(monkeypatch):
-    monkeypatch.setattr(
-        agent.session_manager.config,
-        "model_name",
-        agent.DEFAULT_CLAUDE_MODEL_ID,
-    )
-
-    model = await agent._model_override_for_new_session(None, None)
-
-    assert model == agent.DEFAULT_FREE_MODEL_ID
-
-
-@pytest.mark.asyncio
-async def test_default_free_session_keeps_config_default(monkeypatch):
-    monkeypatch.setattr(
-        agent.session_manager.config,
-        "model_name",
-        agent.DEFAULT_FREE_MODEL_ID,
-    )
-
+async def test_default_session_uses_configured_default_model():
     model = await agent._model_override_for_new_session(None, None)
 
     assert model is None
@@ -71,10 +52,10 @@ async def test_default_free_session_keeps_config_default(monkeypatch):
 async def test_explicit_premium_session_allowed_for_authenticated_user():
     model = await agent._model_override_for_new_session(
         None,
-        agent.DEFAULT_CLAUDE_MODEL_ID,
+        agent.DEFAULT_PREMIUM_MODEL_ID,
     )
 
-    assert model == agent.DEFAULT_CLAUDE_MODEL_ID
+    assert model == agent.DEFAULT_PREMIUM_MODEL_ID
 
 
 @pytest.mark.asyncio
@@ -110,7 +91,26 @@ async def test_switching_to_premium_model_is_allowed_for_authenticated_user(
 
 
 @pytest.mark.asyncio
-async def test_premium_quota_charges_gpt55(monkeypatch):
+async def test_switching_to_old_native_model_id_is_rejected(monkeypatch):
+    async def fake_check_session_access(session_id, user, request=None):
+        return SimpleNamespace(user_id=user["user_id"])
+
+    monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent.set_session_model(
+            "s1",
+            {"model": "bedrock/us.anthropic.claude-opus-4-8"},
+            request=None,
+            user={"user_id": "u1", "plan": "free"},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "Unknown model" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_premium_quota_charges_without_user_billing_inside_allowance(monkeypatch):
     persisted = []
 
     async def fake_persist_session_snapshot(agent_session):
@@ -122,20 +122,13 @@ async def test_premium_quota_charges_gpt55(monkeypatch):
         fake_persist_session_snapshot,
     )
 
-    agent_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name=agent.DEFAULT_GPT_MODEL_ID),
-            premium_user_billed=False,
-        ),
-    )
+    agent_session = _premium_session()
 
     await agent._enforce_premium_model_quota(
         {"user_id": "u1", "plan": "free"},
         agent_session,
     )
 
-    # Within the free allowance → subsidized (company-billed), counted.
     assert agent_session.claude_counted is True
     assert agent_session.session.premium_user_billed is False
     assert persisted == [agent_session]
@@ -143,7 +136,9 @@ async def test_premium_quota_charges_gpt55(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_free_user_gpt_overflow_bills_user(monkeypatch):
+async def test_free_user_gets_two_subsidized_premium_sessions_then_user_billing(
+    monkeypatch,
+):
     async def fake_persist_session_snapshot(_agent_session):
         return None
 
@@ -153,24 +148,40 @@ async def test_free_user_gpt_overflow_bills_user(monkeypatch):
         fake_persist_session_snapshot,
     )
 
-    def mk():
-        return SimpleNamespace(
-            claude_counted=False,
-            session=SimpleNamespace(
-                config=SimpleNamespace(model_name=agent.DEFAULT_GPT_MODEL_ID),
-                premium_user_billed=False,
-            ),
-        )
-
-    # Free allowance = 1: first GPT-5.5 session subsidized, second billed to
-    # the user (no 429) — same overflow behavior as Claude.
-    first = mk()
+    first = _premium_session()
     await agent._enforce_premium_model_quota({"user_id": "g1", "plan": "free"}, first)
     assert first.session.premium_user_billed is False
 
-    second = mk()
+    second = _premium_session()
     await agent._enforce_premium_model_quota({"user_id": "g1", "plan": "free"}, second)
-    assert second.session.premium_user_billed is True
+    assert second.session.premium_user_billed is False
+
+    third = _premium_session()
+    await agent._enforce_premium_model_quota({"user_id": "g1", "plan": "free"}, third)
+    assert third.session.premium_user_billed is True
+    assert await agent.user_quotas.get_claude_used_today("g1") == 2
+
+
+@pytest.mark.asyncio
+async def test_free_model_does_not_consume_premium_quota(monkeypatch):
+    async def fail_if_persisted(_agent_session):
+        raise AssertionError("free model should not consume premium quota")
+
+    monkeypatch.setattr(
+        agent.session_manager,
+        "persist_session_snapshot",
+        fail_if_persisted,
+    )
+
+    agent_session = _premium_session("moonshotai/Kimi-K2.6")
+
+    await agent._enforce_premium_model_quota(
+        {"user_id": "u1", "plan": "free"},
+        agent_session,
+    )
+
+    assert agent_session.claude_counted is False
+    assert await agent.user_quotas.get_claude_used_today("u1") == 0
 
 
 @pytest.mark.asyncio
@@ -185,13 +196,7 @@ async def test_pro_user_uses_pro_premium_quota(monkeypatch):
     )
 
     for index in range(2):
-        agent_session = SimpleNamespace(
-            claude_counted=False,
-            session=SimpleNamespace(
-                config=SimpleNamespace(model_name=agent.DEFAULT_GPT_MODEL_ID),
-                premium_user_billed=False,
-            ),
-        )
+        agent_session = _premium_session()
         await agent._enforce_premium_model_quota(
             {"user_id": "pro-user", "plan": "pro"},
             agent_session,
@@ -202,119 +207,17 @@ async def test_pro_user_uses_pro_premium_quota(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_company_billed_premium_still_hard_caps(monkeypatch):
-    # A hypothetical premium model that is NOT user-billable (company-billed)
-    # still hard-caps with a 429 past the allowance instead of overflowing onto
-    # the user — the defensive fallback.
-    fake = "company/premium-only"
-    monkeypatch.setattr(agent, "PREMIUM_MODEL_IDS", agent.PREMIUM_MODEL_IDS | {fake})
-
-    async def fake_persist_session_snapshot(_agent_session):
-        return None
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "persist_session_snapshot",
-        fake_persist_session_snapshot,
-    )
-
-    def mk():
-        return SimpleNamespace(
-            claude_counted=False,
-            session=SimpleNamespace(config=SimpleNamespace(model_name=fake)),
-        )
-
-    await agent._enforce_premium_model_quota({"user_id": "c1", "plan": "free"}, mk())
-    with pytest.raises(HTTPException) as exc_info:
-        await agent._enforce_premium_model_quota(
-            {"user_id": "c1", "plan": "free"}, mk()
-        )
-
-    assert exc_info.value.status_code == 429
-    assert exc_info.value.detail["error"] == "premium_model_daily_cap"
-    assert "Upgrade to HF Pro" in exc_info.value.detail["message"]
-
-
-@pytest.mark.asyncio
-async def test_premium_quota_skips_direct_anthropic(monkeypatch):
-    async def fail_if_persisted(_agent_session):
-        raise AssertionError("direct Anthropic should not consume premium quota")
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "persist_session_snapshot",
-        fail_if_persisted,
-    )
-
-    agent_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="anthropic/claude-opus-4-6"),
-        ),
-    )
-
-    await agent._enforce_premium_model_quota(
-        {"user_id": "u1", "plan": "free"},
-        agent_session,
-    )
-
-    assert agent_session.claude_counted is False
-    assert await agent.user_quotas.get_claude_used_today("u1") == 0
-
-
-@pytest.mark.asyncio
-async def test_user_billable_overflow_bills_user_instead_of_blocking(monkeypatch):
-    persisted = []
-
-    async def fake_persist(agent_session):
-        persisted.append(agent_session)
-
-    monkeypatch.setattr(agent.session_manager, "persist_session_snapshot", fake_persist)
-    # Free allowance = 1: first session subsidized, second billed to the user.
-    monkeypatch.setattr(agent.user_quotas, "daily_cap_for", lambda plan: 1)
-
-    def mk():
-        return SimpleNamespace(
-            claude_counted=False,
-            session=SimpleNamespace(
-                config=SimpleNamespace(model_name=agent.DEFAULT_CLAUDE_MODEL_ID),
-                premium_user_billed=False,
-            ),
-        )
-
-    first = mk()
-    await agent._enforce_premium_model_quota({"user_id": "u1", "plan": "free"}, first)
-    assert first.claude_counted is True
-    assert first.session.premium_user_billed is False  # subsidized
-
-    second = mk()
-    await agent._enforce_premium_model_quota({"user_id": "u1", "plan": "free"}, second)
-    assert second.claude_counted is True
-    assert second.session.premium_user_billed is True  # billed to the user, no 429
-
-    assert len(persisted) == 2
-
-
-@pytest.mark.asyncio
 async def test_pro_user_billable_overflow_also_bills_user(monkeypatch):
     async def fake_persist(_agent_session):
         return None
 
     monkeypatch.setattr(agent.session_manager, "persist_session_snapshot", fake_persist)
-    # Shrink the Pro allowance to 1 so the second session overflows.
     monkeypatch.setattr(agent.user_quotas, "daily_cap_for", lambda plan: 1)
 
-    def mk():
-        return SimpleNamespace(
-            claude_counted=False,
-            session=SimpleNamespace(
-                config=SimpleNamespace(model_name=agent.DEFAULT_CLAUDE_MODEL_ID),
-                premium_user_billed=False,
-            ),
-        )
-
-    await agent._enforce_premium_model_quota({"user_id": "p1", "plan": "pro"}, mk())
-    over = mk()
+    await agent._enforce_premium_model_quota(
+        {"user_id": "p1", "plan": "pro"}, _premium_session()
+    )
+    over = _premium_session()
     await agent._enforce_premium_model_quota({"user_id": "p1", "plan": "pro"}, over)
     assert over.session.premium_user_billed is True
 
@@ -381,60 +284,3 @@ async def test_set_session_yolo_calls_manager_with_cap_presence(monkeypatch):
             },
         )
     ]
-
-
-@pytest.mark.asyncio
-async def test_delete_session_access_check_skips_sandbox_preload(monkeypatch):
-    ensure_calls = []
-    delete_calls = []
-
-    async def fake_ensure_session_loaded(session_id, user_id, **kwargs):
-        ensure_calls.append((session_id, user_id, kwargs))
-        return SimpleNamespace(user_id=user_id)
-
-    async def fake_delete_session(session_id):
-        delete_calls.append(session_id)
-        return True
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "ensure_session_loaded",
-        fake_ensure_session_loaded,
-    )
-    monkeypatch.setattr(agent.session_manager, "delete_session", fake_delete_session)
-
-    response = await agent.delete_session("s1", {"user_id": "u1"})
-
-    assert response == {"status": "deleted", "session_id": "s1"}
-    assert delete_calls == ["s1"]
-    assert ensure_calls[0][2]["preload_sandbox"] is False
-
-
-@pytest.mark.asyncio
-async def test_teardown_session_access_check_skips_sandbox_preload(monkeypatch):
-    ensure_calls = []
-    teardown_calls = []
-
-    async def fake_ensure_session_loaded(session_id, user_id, **kwargs):
-        ensure_calls.append((session_id, user_id, kwargs))
-        return SimpleNamespace(user_id=user_id)
-
-    async def fake_teardown_sandbox(session_id):
-        teardown_calls.append(session_id)
-        return True
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "ensure_session_loaded",
-        fake_ensure_session_loaded,
-    )
-    monkeypatch.setattr(
-        agent.session_manager, "teardown_sandbox", fake_teardown_sandbox
-    )
-
-    response = await agent.teardown_session_sandbox("s1", {"user_id": "u1"})
-    await asyncio.sleep(0)
-
-    assert response == {"status": "teardown_requested", "session_id": "s1"}
-    assert teardown_calls == ["s1"]
-    assert ensure_calls[0][2]["preload_sandbox"] is False

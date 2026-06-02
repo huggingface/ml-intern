@@ -13,28 +13,28 @@ from agent.tools.research_tool import _get_research_model
 from agent.utils import terminal_display
 
 
-def test_direct_anthropic_research_model_stays_off_bedrock():
+def test_router_anthropic_research_downgrades_to_router_sonnet():
     assert (
-        _get_research_model("anthropic/claude-opus-4-6")
-        == "anthropic/claude-sonnet-4-6"
+        _get_research_model("anthropic/claude-opus-4.8:fal-ai")
+        == "anthropic/claude-sonnet-4-6:fal-ai"
     )
 
 
-def test_bedrock_anthropic_research_model_stays_on_bedrock():
+def test_legacy_bedrock_research_model_normalizes_to_router_sonnet():
     assert (
         _get_research_model("bedrock/us.anthropic.claude-opus-4-6-v1")
-        == "bedrock/us.anthropic.claude-sonnet-4-6"
+        == "anthropic/claude-sonnet-4-6:fal-ai"
     )
 
 
 def test_non_anthropic_research_model_is_unchanged():
-    assert _get_research_model("openai/gpt-5.4") == "openai/gpt-5.4"
+    assert _get_research_model("openai/gpt-oss-120b") == "openai/gpt-oss-120b"
 
 
-def test_hf_router_anthropic_research_downgrades_to_router_sonnet():
+def test_huggingface_prefix_research_model_normalizes_to_router_sonnet():
     assert (
         _get_research_model("huggingface/anthropic/claude-opus-4.6:fal-ai")
-        == "huggingface/anthropic/claude-sonnet-4-6:fal-ai"
+        == "anthropic/claude-sonnet-4-6:fal-ai"
     )
 
 
@@ -42,7 +42,7 @@ def test_hf_router_openai_research_model_is_unchanged():
     # No Sonnet equivalent for GPT — research stays on the same router model.
     assert (
         _get_research_model("huggingface/openai/gpt-5.5:fal-ai")
-        == "huggingface/openai/gpt-5.5:fal-ai"
+        == "openai/gpt-5.5:fal-ai"
     )
 
 
@@ -119,12 +119,12 @@ def test_cli_forwards_model_flag_to_interactive_main(monkeypatch):
         seen["model"] = model
         seen["sandbox_tools"] = sandbox_tools
 
-    monkeypatch.setattr(sys, "argv", ["ml-intern", "--model", "openai/gpt-5.5"])
+    monkeypatch.setattr(sys, "argv", ["ml-intern", "--model", "openai/gpt-5.5:fal-ai"])
     monkeypatch.setattr(main_mod, "main", fake_main)
 
     main_mod.cli()
 
-    assert seen["model"] == "openai/gpt-5.5"
+    assert seen["model"] == "openai/gpt-5.5:fal-ai"
     assert seen["sandbox_tools"] is False
 
 
@@ -188,7 +188,7 @@ async def test_interactive_main_applies_model_override_before_banner(monkeypatch
         pass
 
     def fake_banner(*, model=None, hf_user=None, tool_runtime=None):
-        assert model == "openai/gpt-5.5"
+        assert model == "openai/gpt-5.5:fal-ai"
         assert hf_user == "tester"
         assert tool_runtime == "local filesystem"
         raise StopAfterBanner
@@ -209,7 +209,7 @@ async def test_interactive_main_applies_model_override_before_banner(monkeypatch
     monkeypatch.setattr(main_mod, "print_banner", fake_banner)
 
     with pytest.raises(StopAfterBanner):
-        await main_mod.main(model="openai/gpt-5.5")
+        await main_mod.main(model="openai/gpt-5.5:fal-ai")
 
 
 @pytest.mark.asyncio

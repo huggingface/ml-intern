@@ -19,7 +19,7 @@ def _session_row():
         "session_id": "abc",
         "session_start_time": "2026-04-24T10:00:00",
         "session_end_time": "2026-04-24T10:05:00",
-        "model_name": "claude-opus-4-6",
+        "model_name": "anthropic/claude-opus-4.8:fal-ai",
         "messages": [
             {"role": "system", "content": "You are an agent"},
             {"role": "user", "content": "fine-tune llama"},
@@ -77,7 +77,7 @@ def test_reshape_preserves_messages_and_tools_and_adds_tags():
     mod = _load()
     row = mod._reshape_to_sft(_session_row())
     assert row["session_id"] == "abc"
-    assert row["model"] == "claude-opus-4-6"
+    assert row["model"] == "anthropic/claude-opus-4.8:fal-ai"
     assert row["timestamp"] == "2026-04-24T10:00:00"
     # Messages preserved verbatim, in order, with tool_calls + tool role rows.
     assert len(row["messages"]) == 5

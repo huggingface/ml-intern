@@ -97,11 +97,10 @@ async def record_llm_call(
     Pre-2026-04-29 only ``main`` calls were instrumented; observed gap on
     Cost Explorer was ~67%, with the other 5 call sites accounting for
     the rest. Tagging lets us split the dataset's ``total_cost_usd`` by
-    category and validate against AWS billing.
+    category and validate against billing data.
 
-    The ``/title`` (HF Router, not Bedrock) and ``/health/llm`` (diagnostic
-    endpoint, no session context) call sites are intentionally not
-    instrumented — together they're <1% of spend.
+    The ``/title`` and ``/health/llm`` diagnostic call sites are intentionally
+    not instrumented because they have no session context and are tiny.
     """
     usage = extract_usage(response) if response is not None else {}
     cost_usd = 0.0

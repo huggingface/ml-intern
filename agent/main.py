@@ -28,6 +28,7 @@ from agent.core.agent_loop import submission_loop
 from agent.core import model_switcher
 from agent.core.hf_tokens import resolve_hf_token
 from agent.core.local_models import is_local_model_id
+from agent.core.model_ids import normalize_legacy_model_id
 from agent.core.session import OpType
 from agent.core.tools import ToolRouter
 from agent.messaging.gateway import NotificationGateway
@@ -72,6 +73,21 @@ def _is_local_tool_runtime(config: Any) -> bool:
 
 def _tool_runtime_label(local_mode: bool) -> str:
     return "local filesystem" if local_mode else "HF sandbox"
+
+
+def _normalize_config_model(config: Any) -> None:
+    normalized = normalize_legacy_model_id(getattr(config, "model_name", None))
+    if normalized:
+        config.model_name = normalized
+
+
+def _validate_cli_model_override(model: str) -> str:
+    if not model_switcher.is_valid_model_id(model):
+        raise ValueError(
+            "Invalid model id. Use an HF Router id like "
+            "'anthropic/claude-opus-4.8:fal-ai' or a supported local prefix."
+        )
+    return model.removeprefix("huggingface/")
 
 
 async def _wait_for_initial_sandbox_preload(session_holder: list | None) -> None:
@@ -993,9 +1009,9 @@ async def _handle_slash_command(
                     console.print(f"  [dim]{m}: {eff or 'off'}[/dim]")
             console.print(
                 "[dim]Set with '/effort minimal|low|medium|high|xhigh|max|off'. "
-                "'max' is Anthropic-only; 'xhigh' is also supported by current "
-                "OpenAI GPT-5 models. The cascade falls back to whatever the "
-                "model actually accepts.[/dim]"
+                "HF Router accepts low|medium|high generically; higher preferences "
+                "are probed and the cascade falls back to whatever the selected "
+                "provider accepts.[/dim]"
             )
             return None
         level = arg.lower()
@@ -1150,8 +1166,9 @@ async def main(model: str | None = None, sandbox_tools: bool = False):
     prompt_session = PromptSession()
 
     config = load_config(CLI_CONFIG_PATH, include_user_defaults=True)
+    _normalize_config_model(config)
     if model:
-        config.model_name = model
+        config.model_name = _validate_cli_model_override(model)
     _apply_tool_runtime_override(config, sandbox_tools=sandbox_tools)
     local_mode = _is_local_tool_runtime(config)
 
@@ -1394,10 +1411,15 @@ async def headless_main(
     _configure_runtime_logging()
 
     config = load_config(CLI_CONFIG_PATH, include_user_defaults=True)
+    _normalize_config_model(config)
     config.yolo_mode = True  # Auto-approve everything in headless mode
 
     if model:
-        config.model_name = model
+        try:
+            config.model_name = _validate_cli_model_override(model)
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
     _apply_tool_runtime_override(config, sandbox_tools=sandbox_tools)
     local_mode = _is_local_tool_runtime(config)
 

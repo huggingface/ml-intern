@@ -298,9 +298,7 @@ def _extract_token(request: Request) -> str | None:
 async def require_huggingface_org_member(request: Request) -> bool:
     """Return True if the caller is a member of the ``huggingface`` org.
 
-    Used to gate endpoints that can push a session onto an Anthropic model
-    billed to the Space's ``ANTHROPIC_API_KEY``. Returns True unconditionally
-    in dev mode so local testing isn't blocked.
+    Returns True unconditionally in dev mode so local testing isn't blocked.
     """
     if not AUTH_ENABLED:
         return True

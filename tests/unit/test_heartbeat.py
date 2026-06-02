@@ -14,7 +14,7 @@ from agent.core.session import Event, Session
 
 
 class _FakeConfig:
-    model_name = "claude-opus-4-6"
+    model_name = "anthropic/claude-opus-4.8:fal-ai"
     save_sessions = True
     session_dataset_repo = "fake/repo"
     auto_save_interval = 1

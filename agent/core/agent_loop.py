@@ -405,7 +405,7 @@ async def _record_manual_approved_spend_if_needed(
 # -- LLM retry constants --------------------------------------------------
 _MAX_LLM_RETRIES = 3
 _LLM_RETRY_DELAYS = [5, 15, 30]  # seconds between retries
-_LLM_RATE_LIMIT_RETRY_DELAYS = [30, 60]  # exceed Bedrock's ~60s TPM bucket window
+_LLM_RATE_LIMIT_RETRY_DELAYS = [30, 60]
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
@@ -555,11 +555,8 @@ def _friendly_error_message(error: Exception) -> str | None:
         or "invalid x-api-key" in err_str
     ):
         return (
-            "Authentication failed — your API key is missing or invalid.\n\n"
-            "To fix this, set the API key for your model provider:\n"
-            "  • Anthropic:   export ANTHROPIC_API_KEY=sk-...\n"
-            "  • OpenAI:      export OPENAI_API_KEY=sk-...\n"
-            "  • HF Router:   export HF_TOKEN=hf_...\n\n"
+            "Authentication failed - your Hugging Face token is missing or invalid.\n\n"
+            "To fix this, set HF_TOKEN=hf_... or run `hf auth login`.\n\n"
             "You can also add it to a .env file in the project root.\n"
             "To switch models, use the /model command."
         )
@@ -595,9 +592,8 @@ async def _compact_and_notify(session: Session) -> None:
 
     Catches ``CompactionFailedError`` and ends the session cleanly instead
     of letting the caller retry. Pre-2026-05-04 the caller looped on
-    ContextWindowExceededError → compact → re-trigger, burning Bedrock
-    budget at ~$3/Opus retry while the session never reached the upload
-    path (so the cost was invisible in the dataset).
+    ContextWindowExceededError → compact → re-trigger, burning premium
+    inference budget while the session never reached the upload path.
     """
     from agent.context_manager.manager import CompactionFailedError
 
@@ -706,7 +702,7 @@ class LLMResult:
 def _extract_thinking_state(
     message: Any,
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
-    """Return provider reasoning fields that must be replayed after tool calls."""
+    """Return provider reasoning fields from a response message."""
     provider_fields = getattr(message, "provider_specific_fields", None)
     if not isinstance(provider_fields, dict):
         provider_fields = {}
@@ -725,12 +721,13 @@ def _extract_thinking_state(
 
 
 def _should_replay_thinking_state(model_name: str | None) -> bool:
-    """Only Anthropic's native adapter accepts replayed thinking metadata."""
-    return bool(model_name and model_name.startswith("anthropic/"))
+    """HF Router-compatible histories do not replay provider reasoning state."""
+    _ = model_name
+    return False
 
 
 def _is_invalid_thinking_signature_error(exc: Exception) -> bool:
-    """Return True when Anthropic rejected replayed extended-thinking state."""
+    """Return True when a provider rejected replayed thinking metadata."""
     text = str(exc)
     return (
         "Invalid `signature` in `thinking` block" in text
@@ -819,7 +816,7 @@ async def _maybe_heal_invalid_thinking_signature(
             data={
                 "tool": "system",
                 "log": (
-                    "Anthropic rejected stale thinking signatures; retrying "
+                    "The inference provider rejected stale thinking signatures; retrying "
                     "without replayed thinking metadata."
                 ),
             },
@@ -834,7 +831,7 @@ def _assistant_message_from_result(
     model_name: str | None,
     tool_calls: list[ToolCall] | None = None,
 ) -> Message:
-    """Build an assistant history message without dropping reasoning state."""
+    """Build an assistant history message for HF Router-compatible replay."""
     kwargs: dict[str, Any] = {
         "role": "assistant",
         "content": llm_result.content,

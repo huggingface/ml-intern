@@ -11,7 +11,7 @@ from agent.tools import plan_tool
 
 
 class _FakeConfig:
-    model_name = "openai/gpt-5.5"
+    model_name = "openai/gpt-5.5:fal-ai"
     save_sessions = False
     session_dataset_repo = "fake/repo"
     auto_save_interval = 1

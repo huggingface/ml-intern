@@ -34,10 +34,9 @@ logger = logging.getLogger(__name__)
 
 
 # Cascade: for each user-stated preference, the ordered list of levels to
-# try. First success wins. ``max`` is Anthropic-only; ``xhigh`` is also
-# supported on current OpenAI GPT-5 models. Providers that don't accept a
-# requested level raise ``UnsupportedEffortError`` synchronously (no wasted
-# network round-trip) and we advance to the next level.
+# try. First success wins. HF Router accepts low/medium/high generically;
+# higher preferences are kept in the cascade for future/provider-specific
+# support and are skipped synchronously when unsupported.
 _EFFORT_CASCADE: dict[str, list[str]] = {
     "max": ["max", "xhigh", "high", "medium", "low"],
     "xhigh": ["xhigh", "high", "medium", "low"],
@@ -90,11 +89,9 @@ def _is_thinking_unsupported(e: Exception) -> bool:
 def _is_invalid_effort(e: Exception) -> bool:
     """The requested effort level isn't accepted for this model.
 
-    Covers both API responses (Anthropic/OpenAI 400 with "invalid", "must
-    be one of", etc.) and LiteLLM's local validation that fires *before*
-    the request (e.g. "effort='max' is only supported by Claude Opus 4.6"
-    — LiteLLM knows max is Opus-4.6-only and raises synchronously). The
-    cascade walks down on either.
+    Covers API responses with "invalid", "must be one of", etc. and local
+    validation that fires *before* the request. The cascade walks down on
+    either.
 
     Explicitly returns False when the message is really about thinking
     itself (e.g. Anthropic's 4.7 error mentions ``output_config.effort``

@@ -40,7 +40,7 @@ def test_extract_thinking_state_from_provider_fields():
     assert reasoning_content == "reasoned"
 
 
-def test_assistant_message_from_result_preserves_thinking_with_tool_calls():
+def test_assistant_message_from_result_strips_router_thinking_with_tool_calls():
     tool_call = ChatCompletionMessageToolCall(
         id="call_1",
         type="function",
@@ -57,16 +57,16 @@ def test_assistant_message_from_result_preserves_thinking_with_tool_calls():
 
     message = _assistant_message_from_result(
         result,
-        model_name="anthropic/claude-opus-4-6",
+        model_name="anthropic/claude-opus-4.8:fal-ai",
         tool_calls=[tool_call],
     )
 
     assert message.tool_calls == [tool_call]
-    assert message.thinking_blocks == [{"type": "thinking", "thinking": "reasoned"}]
-    assert message.reasoning_content == "reasoned"
+    assert getattr(message, "thinking_blocks", None) is None
+    assert getattr(message, "reasoning_content", None) is None
 
 
-def test_assistant_message_from_result_strips_non_anthropic_reasoning_content():
+def test_assistant_message_from_result_strips_router_reasoning_content():
     result = LLMResult(
         content=None,
         tool_calls_acc={},
@@ -78,7 +78,7 @@ def test_assistant_message_from_result_strips_non_anthropic_reasoning_content():
 
     message = _assistant_message_from_result(
         result,
-        model_name="openai/Qwen/Qwen3-Next-80B-A3B-Instruct",
+        model_name="openai/gpt-5.5:fal-ai",
     )
 
     assert getattr(message, "thinking_blocks", None) is None
@@ -95,7 +95,7 @@ def test_assistant_message_from_result_omits_absent_thinking_fields():
 
     message = _assistant_message_from_result(
         result,
-        model_name="anthropic/claude-opus-4-6",
+        model_name="anthropic/claude-opus-4.8:fal-ai",
     )
 
     assert message.content == "done"
@@ -104,7 +104,7 @@ def test_assistant_message_from_result_omits_absent_thinking_fields():
 
 
 @pytest.mark.asyncio
-async def test_streaming_call_rebuilds_anthropic_thinking_state(monkeypatch):
+async def test_streaming_call_skips_chunk_rebuild_for_router_models(monkeypatch):
     async def fake_stream():
         yield SimpleNamespace(
             choices=[
@@ -115,161 +115,6 @@ async def test_streaming_call_rebuilds_anthropic_thinking_state(monkeypatch):
             ],
         )
         yield SimpleNamespace(choices=[], usage=SimpleNamespace(total_tokens=3))
-
-    async def fake_acompletion(**_kwargs):
-        return fake_stream()
-
-    def fake_chunk_builder(chunks, **_kwargs):
-        assert len(chunks) == 2
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=Message(
-                        role="assistant",
-                        content="done",
-                        thinking_blocks=[{"type": "thinking", "thinking": "reasoned"}],
-                        reasoning_content="reasoned",
-                    )
-                )
-            ]
-        )
-
-    events = []
-
-    async def send_event(event):
-        events.append(event)
-
-    session = SimpleNamespace(
-        config=SimpleNamespace(model_name="anthropic/claude-opus-4-6"),
-        is_cancelled=False,
-        send_event=send_event,
-    )
-    monkeypatch.setattr(agent_loop, "acompletion", fake_acompletion)
-    monkeypatch.setattr(agent_loop, "stream_chunk_builder", fake_chunk_builder)
-
-    result = await _call_llm_streaming(
-        session,
-        messages=[Message(role="user", content="hi")],
-        tools=[],
-        llm_params={"model": "anthropic/claude-opus-4-6"},
-    )
-
-    assert result.content == "done"
-    assert result.thinking_blocks == [{"type": "thinking", "thinking": "reasoned"}]
-    assert result.reasoning_content == "reasoned"
-
-
-@pytest.mark.asyncio
-async def test_streaming_call_rebuilds_anthropic_delta_thinking_state(monkeypatch):
-    async def fake_stream():
-        yield SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    delta=SimpleNamespace(
-                        content=None,
-                        tool_calls=None,
-                        thinking_blocks=[
-                            {
-                                "type": "thinking",
-                                "thinking": "reasoned",
-                                "signature": "",
-                            }
-                        ],
-                    ),
-                    finish_reason=None,
-                )
-            ],
-        )
-        yield SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    delta=SimpleNamespace(
-                        content=None,
-                        tool_calls=None,
-                        thinking_blocks=[
-                            {
-                                "type": "thinking",
-                                "thinking": "",
-                                "signature": "signed",
-                            }
-                        ],
-                    ),
-                    finish_reason=None,
-                )
-            ],
-        )
-        yield SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    delta=SimpleNamespace(content="done", tool_calls=None),
-                    finish_reason="stop",
-                )
-            ],
-        )
-        yield SimpleNamespace(choices=[], usage=SimpleNamespace(total_tokens=3))
-
-    async def fake_acompletion(**_kwargs):
-        return fake_stream()
-
-    def fake_chunk_builder(chunks, **_kwargs):
-        assert len(chunks) == 4
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=Message(
-                        role="assistant",
-                        content="done",
-                        thinking_blocks=[
-                            {
-                                "type": "thinking",
-                                "thinking": "reasoned",
-                                "signature": "signed",
-                            }
-                        ],
-                        reasoning_content="reasoned",
-                    )
-                )
-            ]
-        )
-
-    events = []
-
-    async def send_event(event):
-        events.append(event)
-
-    session = SimpleNamespace(
-        config=SimpleNamespace(model_name="anthropic/claude-opus-4-7"),
-        is_cancelled=False,
-        send_event=send_event,
-    )
-    monkeypatch.setattr(agent_loop, "acompletion", fake_acompletion)
-    monkeypatch.setattr(agent_loop, "stream_chunk_builder", fake_chunk_builder)
-
-    result = await _call_llm_streaming(
-        session,
-        messages=[Message(role="user", content="hi")],
-        tools=[],
-        llm_params={"model": "anthropic/claude-opus-4-7"},
-    )
-
-    assert result.content == "done"
-    assert result.thinking_blocks == [
-        {"type": "thinking", "thinking": "reasoned", "signature": "signed"}
-    ]
-    assert result.reasoning_content == "reasoned"
-
-
-@pytest.mark.asyncio
-async def test_streaming_call_skips_chunk_rebuild_for_non_anthropic(monkeypatch):
-    async def fake_stream():
-        yield SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    delta=SimpleNamespace(content="done", tool_calls=None),
-                    finish_reason="stop",
-                )
-            ],
-        )
 
     async def fake_acompletion(**_kwargs):
         return fake_stream()
@@ -283,7 +128,7 @@ async def test_streaming_call_skips_chunk_rebuild_for_non_anthropic(monkeypatch)
         events.append(event)
 
     session = SimpleNamespace(
-        config=SimpleNamespace(model_name="openai/Qwen/Qwen3"),
+        config=SimpleNamespace(model_name="anthropic/claude-opus-4.8:fal-ai"),
         is_cancelled=False,
         send_event=send_event,
     )
@@ -294,7 +139,7 @@ async def test_streaming_call_skips_chunk_rebuild_for_non_anthropic(monkeypatch)
         session,
         messages=[Message(role="user", content="hi")],
         tools=[],
-        llm_params={"model": "openai/Qwen/Qwen3"},
+        llm_params={"model": "openai/anthropic/claude-opus-4.8:fal-ai"},
     )
 
     assert result.content == "done"

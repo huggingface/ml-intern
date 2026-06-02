@@ -25,8 +25,8 @@ import JobsUpgradeDialog from '@/components/JobsUpgradeDialog';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import {
+  CLAUDE_OPUS_46_MODEL_PATH,
   CLAUDE_MODEL_PATH,
-  CLAUDE_OPUS_48_MODEL_PATH,
   GPT_55_MODEL_PATH,
   isClaudePath,
   isPremiumPath,
@@ -49,26 +49,18 @@ const getHfAvatarUrl = (modelId: string) => {
 
 const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   {
-    id: 'kimi-k2.6',
-    name: 'Kimi K2.6',
-    description: 'Novita',
-    modelPath: 'moonshotai/Kimi-K2.6',
-    avatarUrl: getHfAvatarUrl('moonshotai/Kimi-K2.6'),
-    recommended: true,
-  },
-  {
-    id: 'claude-opus-4-6',
-    name: 'Claude Opus 4.6',
+    id: 'claude-opus-4-8',
+    name: 'Claude Opus 4.8',
     description: 'Anthropic',
     modelPath: CLAUDE_MODEL_PATH,
     avatarUrl: 'https://huggingface.co/api/avatars/Anthropic',
     recommended: true,
   },
   {
-    id: 'claude-opus-4-8',
-    name: 'Claude Opus 4.8',
+    id: 'claude-opus-4-6',
+    name: 'Claude Opus 4.6',
     description: 'Anthropic',
-    modelPath: CLAUDE_OPUS_48_MODEL_PATH,
+    modelPath: CLAUDE_OPUS_46_MODEL_PATH,
     avatarUrl: 'https://huggingface.co/api/avatars/Anthropic',
   },
   {
@@ -77,6 +69,13 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
     description: 'OpenAI',
     modelPath: GPT_55_MODEL_PATH,
     avatarUrl: 'https://huggingface.co/api/avatars/openai',
+  },
+  {
+    id: 'kimi-k2.6',
+    name: 'Kimi K2.6',
+    description: 'Novita',
+    modelPath: 'moonshotai/Kimi-K2.6',
+    avatarUrl: getHfAvatarUrl('moonshotai/Kimi-K2.6'),
   },
   {
     id: 'minimax-m2.7',
@@ -125,6 +124,37 @@ const findModelByPath = (path: string, options: ModelOption[]): ModelOption | un
     if (claude) return claude;
   }
   return undefined;
+};
+
+const modelOptionId = (modelPath: string) => (
+  normalizeModelPath(modelPath)
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+);
+
+const providerLabel = (provider: string | undefined) => {
+  if (!provider) return 'Hugging Face';
+  if (provider === 'anthropic') return 'Anthropic';
+  if (provider === 'openai') return 'OpenAI';
+  if (provider === 'huggingface') return 'Hugging Face';
+  return provider;
+};
+
+const modelOptionFromApi = (model: {
+  id?: string;
+  label?: string;
+  provider?: string;
+  recommended?: boolean;
+}): ModelOption | null => {
+  if (!model.id) return null;
+  return {
+    id: modelOptionId(model.id),
+    name: model.label ?? model.id,
+    description: providerLabel(model.provider),
+    modelPath: model.id,
+    avatarUrl: getHfAvatarUrl(model.id.replace(/^huggingface\//, '')),
+    recommended: Boolean(model.recommended),
+  };
 };
 
 const readApiErrorMessage = async (res: Response, fallback: string): Promise<string> => {
@@ -221,16 +251,10 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (cancelled || !data?.available) return;
-        const claude = data.available.find((m: { provider?: string; id?: string }) => (
-          m.provider === 'anthropic' && m.id
-        ));
-        if (!claude?.id) return;
-
-        const next = DEFAULT_MODEL_OPTIONS.map((option) => (
-          option.id === 'claude-opus-4-6'
-            ? { ...option, modelPath: claude.id, name: claude.label ?? option.name }
-            : option
-        ));
+        const next = data.available
+          .map(modelOptionFromApi)
+          .filter((model: ModelOption | null): model is ModelOption => model !== null);
+        if (!next.length) return;
         modelOptionsRef.current = next;
         setModelOptions(next);
         if (!sessionIdRef.current) {

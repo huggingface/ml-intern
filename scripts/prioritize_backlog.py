@@ -7,7 +7,7 @@ likely product impact.
 
 Usage:
     uv run python scripts/prioritize_backlog.py
-    uv run python scripts/prioritize_backlog.py --model openai/gpt-5.5
+    uv run python scripts/prioritize_backlog.py --model openai/gpt-5.5:fal-ai
 
 Outputs:
     scratch/backlog-prioritization/<timestamp>/sources.json
@@ -1277,7 +1277,7 @@ def _response_content(response: Any) -> str:
 
 
 def _temperature_for_params(llm_params: dict[str, Any]) -> float:
-    # Anthropic requires temperature=1 when adaptive/extended thinking is active.
+    # Some providers require temperature=1 when adaptive reasoning is active.
     if llm_params.get("thinking") or llm_params.get("output_config"):
         return 1.0
     return 0.2

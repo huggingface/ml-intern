@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from agent.config import load_config
 from agent.core.agent_loop import process_submission
+from agent.core.model_ids import normalize_legacy_model_id
 from agent.core.session import Event, OpType, Session
 from agent.core.session_persistence import get_session_store
 from agent.core.tools import ToolRouter
@@ -107,9 +108,8 @@ class AgentSession:
     is_reaping: bool = False
     broadcaster: Any = None
     title: str | None = None
-    # True once this session has been counted against the user's daily
-    # Claude quota. Guards double-counting when the user re-selects an
-    # Anthropic model mid-session.
+    # True once this session has been counted against the user's daily premium
+    # quota. The field name is kept for persistence compatibility.
     claude_counted: bool = False
 
 
@@ -148,6 +148,9 @@ class SessionManager:
 
     def __init__(self, config_path: str | None = None) -> None:
         self.config = load_config(config_path or DEFAULT_CONFIG_PATH)
+        normalized_default = normalize_legacy_model_id(self.config.model_name)
+        if normalized_default:
+            self.config.model_name = normalized_default
         self.messaging_gateway = NotificationGateway(self.config.messaging)
         self.sessions: dict[str, AgentSession] = {}
         self._lock = asyncio.Lock()
@@ -218,10 +221,11 @@ class SessionManager:
         t0 = _time.monotonic()
         tool_router = ToolRouter(self.config.mcpServers, hf_token=hf_token)
         # Deep-copy config so each session's model switches independently —
-        # tab A picking GLM doesn't flip tab B off Claude.
+        # tab A picking GLM doesn't flip tab B off the default model.
         session_config = self.config.model_copy(deep=True)
-        if model:
-            session_config.model_name = model
+        normalized_model = normalize_legacy_model_id(model)
+        if normalized_model:
+            session_config.model_name = normalized_model
         session = Session(
             event_queue=event_queue,
             config=session_config,
@@ -661,7 +665,7 @@ class SessionManager:
 
         from litellm import Message
 
-        model = meta.get("model") or self.config.model_name
+        model = normalize_legacy_model_id(meta.get("model") or self.config.model_name)
         event_queue: asyncio.Queue = asyncio.Queue()
         submission_queue: asyncio.Queue = asyncio.Queue()
         tool_router, session = await asyncio.to_thread(
@@ -931,9 +935,8 @@ class SessionManager:
 
         session = agent_session.session
         # Pass the real tool specs so the summarizer sees what the agent
-        # actually has — otherwise Anthropic's modify_params injects a
-        # dummy tool and the summarizer editorializes that the original
-        # tool calls were fabricated.
+        # actually has. Without them, the summarizer can editorialize that
+        # original tool calls were fabricated.
         tool_specs = None
         try:
             tool_specs = agent_session.tool_router.get_tool_specs_for_llm()
