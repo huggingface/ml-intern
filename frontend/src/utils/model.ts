@@ -6,13 +6,11 @@
  * AVAILABLE_MODELS in backend/routes/agent.py.
  */
 
-export const CLAUDE_OPUS_46_MODEL_PATH = 'anthropic/claude-opus-4.6:fal-ai';
 export const CLAUDE_OPUS_48_MODEL_PATH = 'anthropic/claude-opus-4.8:fal-ai';
 export const CLAUDE_MODEL_PATH = CLAUDE_OPUS_48_MODEL_PATH;
 export const GPT_55_MODEL_PATH = 'openai/gpt-5.5:fal-ai';
 
 const PREMIUM_MODEL_PATHS = new Set([
-  CLAUDE_OPUS_46_MODEL_PATH,
   CLAUDE_OPUS_48_MODEL_PATH,
   GPT_55_MODEL_PATH,
 ]);

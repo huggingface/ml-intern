@@ -33,7 +33,6 @@ def _premium_session(model: str = agent.DEFAULT_PREMIUM_MODEL_ID):
 
 def test_premium_model_predicate_uses_router_ids_only():
     assert agent._is_premium_model(agent.DEFAULT_PREMIUM_MODEL_ID)
-    assert agent._is_premium_model(agent.CLAUDE_OPUS_46_MODEL_ID)
     assert agent._is_premium_model(agent.DEFAULT_GPT_MODEL_ID)
     assert agent._is_user_billed(agent.DEFAULT_PREMIUM_MODEL_ID)
     assert not agent._is_premium_model("moonshotai/Kimi-K2.6")

@@ -55,7 +55,6 @@ from agent.core.hf_access import get_jobs_access
 from agent.core.hf_tokens import resolve_hf_request_token
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import (
-    CLAUDE_OPUS_46_MODEL_ID,
     DEEPSEEK_V4_PRO_MODEL_ID,
     DEFAULT_MODEL_ID,
     GLM_51_MODEL_ID,
@@ -84,12 +83,6 @@ def _available_models() -> list[dict[str, Any]]:
             "provider": "huggingface",
             "tier": "pro",
             "recommended": True,
-        },
-        {
-            "id": CLAUDE_OPUS_46_MODEL_ID,
-            "label": "Claude Opus 4.6",
-            "provider": "huggingface",
-            "tier": "pro",
         },
         {
             "id": DEFAULT_GPT_MODEL_ID,

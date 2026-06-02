@@ -25,7 +25,6 @@ import JobsUpgradeDialog from '@/components/JobsUpgradeDialog';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import {
-  CLAUDE_OPUS_46_MODEL_PATH,
   CLAUDE_MODEL_PATH,
   GPT_55_MODEL_PATH,
   isClaudePath,
@@ -55,13 +54,6 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
     modelPath: CLAUDE_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(CLAUDE_MODEL_PATH),
     recommended: true,
-  },
-  {
-    id: 'claude-opus-4-6',
-    name: 'Claude Opus 4.6',
-    description: 'Hugging Face',
-    modelPath: CLAUDE_OPUS_46_MODEL_PATH,
-    avatarUrl: getHfAvatarUrl(CLAUDE_OPUS_46_MODEL_PATH),
   },
   {
     id: 'gpt-5.5',

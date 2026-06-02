@@ -26,7 +26,7 @@ def test_non_anthropic_research_model_is_unchanged():
 
 def test_huggingface_prefix_research_model_strips_prefix():
     assert (
-        _get_research_model("huggingface/anthropic/claude-opus-4.6:fal-ai")
+        _get_research_model("huggingface/anthropic/claude-opus-4.8:fal-ai")
         == "anthropic/claude-sonnet-4-6:fal-ai"
     )
 

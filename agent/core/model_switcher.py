@@ -27,7 +27,6 @@ from agent.core.local_models import (
     is_reserved_local_model_id,
 )
 from agent.core.model_ids import (
-    CLAUDE_OPUS_46_MODEL_ID,
     CLAUDE_OPUS_47_MODEL_ID,
     CLAUDE_OPUS_48_MODEL_ID,
     GPT_55_MODEL_ID,
@@ -43,7 +42,6 @@ from agent.core.model_ids import (
 SUGGESTED_MODELS = [
     {"id": CLAUDE_OPUS_48_MODEL_ID, "label": "Claude Opus 4.8"},
     {"id": CLAUDE_OPUS_47_MODEL_ID, "label": "Claude Opus 4.7"},
-    {"id": CLAUDE_OPUS_46_MODEL_ID, "label": "Claude Opus 4.6"},
     {"id": GPT_55_MODEL_ID, "label": "GPT-5.5"},
     {"id": "MiniMaxAI/MiniMax-M2.7", "label": "MiniMax M2.7"},
     {"id": KIMI_K26_MODEL_ID, "label": "Kimi K2.6"},
