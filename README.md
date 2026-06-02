@@ -35,37 +35,17 @@ HF_TOKEN=<your-hugging-face-token> # HF Router inference + Hub actions
 GITHUB_TOKEN=<github-personal-access-token>
 ```
 
-All non-local model calls go through the Hugging Face Router at
-`https://router.huggingface.co/v1`. The default model is Claude Opus 4.8
-(`anthropic/claude-opus-4.8:fal-ai`). Your `HF_TOKEN` must be allowed to make
-Inference Provider calls. If no `HF_TOKEN` is set, the CLI will prompt you to
-paste one on first launch unless you start on a local model. To get a
-`GITHUB_TOKEN` follow the tutorial
-[here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token).
-Set `ML_INTERN_DEFAULT_MODEL_ID` only if you need to override the default HF
-Router model.
-
-Hosted Space operators should also set:
-
-```bash
-INFERENCE_TOKEN=<org-or-space-hf-token>
-HF_BILL_TO=smolagents # optional, defaults to smolagents
-```
-
-Subsidized premium sessions use `INFERENCE_TOKEN` and send `X-HF-Bill-To`.
-Free users get 2 subsidized premium sessions per day and Pro users get 20.
-After that allowance, premium calls use the user's own HF token and omit
-`X-HF-Bill-To`.
+All API-based model calls go through Hugging Face [Inference Providers](https://huggingface.co/docs/inference-providers/en/index), so your `HF_TOKEN` must be allowed to make Inference Provider calls. If no `HF_TOKEN` is set, the CLI will prompt you to paste one on first launch unless you start on a local model. To get a `GITHUB_TOKEN` follow the tutorial [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token). See the [local models section below](#local-models) for instructions on using agents that run on your hardware.
 
 ### Usage
 
-**Interactive mode** (start a chat session):
+#### Interactive mode (start a chat session):
 
 ```bash
 ml-intern
 ```
 
-**Headless mode** (single prompt, auto-approve):
+#### Headless mode (single prompt, auto-approve):
 
 ```bash
 ml-intern "fine-tune llama on my dataset"
@@ -88,7 +68,7 @@ Run `ml-intern` then `/model` to see the full list of suggested model ids
 (Claude, GPT, HF Router models like MiniMax, Kimi, GLM, DeepSeek, and local
 model prefixes).
 
-**Local models:**
+#### Local models
 
 Local model support uses OpenAI-compatible HTTP endpoints through LiteLLM. The
 agent does not load model weights directly from disk; start your inference
