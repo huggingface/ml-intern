@@ -256,7 +256,7 @@ async def research_handler(
     main_model = session.config.model_name
     research_model = _get_research_model(main_model)
     # Research is a cheap sub-call — cap the main session's effort at "high"
-    # so a user preference of ``max``/``xhigh`` (valid for Opus 4.7/4.8) doesn't
+    # so a user preference of ``max``/``xhigh`` (valid for Opus 4.8) doesn't
     # propagate to a Sonnet research model that may not accept those levels.
     # We also haven't probed this sub-model so we don't know its ceiling.
     _pref = getattr(session.config, "reasoning_effort", None)
