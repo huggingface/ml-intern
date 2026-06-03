@@ -27,7 +27,7 @@ from agent.messaging.gateway import NotificationGateway
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
 from agent.core.llm_params import _resolve_llm_params
-from agent.core.prompt_caching import with_prompt_caching
+from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
 from agent.core.session import DEFAULT_SESSION_LOG_DIR, Event, OpType, Session
 from agent.core.tools import ToolRouter
 from agent.tools.jobs_tool import CPU_FLAVORS
@@ -820,8 +820,11 @@ async def _call_llm_streaming(
     t_start = time.monotonic()
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
+            request_llm_params = with_prompt_cache_params(
+                llm_params, session_id=getattr(session, "session_id", None)
+            )
             cached_messages, cached_tools = with_prompt_caching(
-                messages, tools, llm_params
+                messages, tools, request_llm_params
             )
             response = await acompletion(
                 messages=cached_messages,
@@ -830,7 +833,7 @@ async def _call_llm_streaming(
                 stream=True,
                 stream_options={"include_usage": True},
                 timeout=600,
-                **llm_params,
+                **request_llm_params,
             )
             break
         except ContextWindowExceededError:
@@ -962,8 +965,11 @@ async def _call_llm_non_streaming(
     t_start = time.monotonic()
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
+            request_llm_params = with_prompt_cache_params(
+                llm_params, session_id=getattr(session, "session_id", None)
+            )
             cached_messages, cached_tools = with_prompt_caching(
-                messages, tools, llm_params
+                messages, tools, request_llm_params
             )
             response = await acompletion(
                 messages=cached_messages,
@@ -971,7 +977,7 @@ async def _call_llm_non_streaming(
                 tool_choice="auto",
                 stream=False,
                 timeout=600,
-                **llm_params,
+                **request_llm_params,
             )
             break
         except ContextWindowExceededError:

@@ -1,8 +1,10 @@
-"""Prompt-cache breakpoints for HF Router FAL requests.
+"""Prompt-cache helpers for HF Router FAL requests.
 
-The HF Router/OpenRouter path accepts Anthropic prompt caching as JSON
-``cache_control`` content blocks. Headers like ``X-OpenRouter-Cache`` do not
-produce cache usage counters through this route.
+The HF Router/OpenRouter path uses provider-native prompt caching. Anthropic
+models need explicit JSON ``cache_control`` content blocks; OpenAI models cache
+eligible prefixes automatically and accept routing/retention hints in the body.
+Headers like ``X-OpenRouter-Cache`` control response caching, not prompt
+caching through this route.
 """
 
 from typing import Any
@@ -11,12 +13,64 @@ from agent.core.model_ids import HF_ROUTER_BASE_URL
 
 _CACHE_CONTROL = {"type": "ephemeral"}
 _CACHEABLE_ROLES = {"system", "user"}
+_OPENROUTER_SESSION_ID_MAX_LENGTH = 256
 
 
 def _is_fal_router_request(llm_params: dict[str, Any]) -> bool:
-    model = str(llm_params.get("model") or "")
     api_base = str(llm_params.get("api_base") or "").rstrip("/")
-    return api_base == HF_ROUTER_BASE_URL and ":fal" in model
+    return api_base == HF_ROUTER_BASE_URL and ":fal" in _router_model(llm_params)
+
+
+def _router_model(llm_params: dict[str, Any]) -> str:
+    model = str(llm_params.get("model") or "")
+    return model.removeprefix("openai/")
+
+
+def _uses_explicit_cache_control(llm_params: dict[str, Any]) -> bool:
+    if not _is_fal_router_request(llm_params):
+        return False
+    return _router_model(llm_params).startswith("anthropic/")
+
+
+def _is_openai_gpt55(llm_params: dict[str, Any]) -> bool:
+    if not _is_fal_router_request(llm_params):
+        return False
+    return _router_model(llm_params).startswith("openai/gpt-5.5")
+
+
+def _merge_extra_body(
+    llm_params: dict[str, Any], updates: dict[str, Any]
+) -> dict[str, Any]:
+    if not updates:
+        return llm_params
+
+    cached_params = dict(llm_params)
+    extra_body = dict(cached_params.get("extra_body") or {})
+    extra_body.update(updates)
+    cached_params["extra_body"] = extra_body
+    return cached_params
+
+
+def with_prompt_cache_params(
+    llm_params: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Return LiteLLM params with provider-native prompt-cache body hints."""
+    if not _is_fal_router_request(llm_params):
+        return llm_params
+
+    updates: dict[str, Any] = {}
+    if session_id:
+        stable_session_id = session_id[:_OPENROUTER_SESSION_ID_MAX_LENGTH]
+        updates["session_id"] = stable_session_id
+        if _is_openai_gpt55(llm_params):
+            updates["prompt_cache_key"] = stable_session_id
+
+    if _is_openai_gpt55(llm_params):
+        updates["prompt_cache_retention"] = "24h"
+
+    return _merge_extra_body(llm_params, updates)
 
 
 def _message_role(message: Any) -> str | None:
@@ -106,14 +160,15 @@ def with_prompt_caching(
     tools: list[dict] | None,
     llm_params: dict[str, Any],
 ) -> tuple[list[Any], list[dict] | None]:
-    """Return outgoing messages with a cache breakpoint for HF Router FAL.
+    """Return outgoing messages with explicit cache breakpoints when needed.
 
-    The newest message is treated as dynamic. The cache breakpoint is placed
-    on the closest earlier system/user text block so provider-side caching
-    covers the stable prefix without changing persisted conversation history.
-    The final tool spec is also marked so stable tool definitions are cached.
+    The newest message is treated as dynamic. For Anthropic FAL models, the
+    cache breakpoint is placed on the closest earlier system/user text block so
+    provider-side caching covers the stable prefix without changing persisted
+    conversation history. The final tool spec is also marked so stable tool
+    definitions are cached.
     """
-    if not _is_fal_router_request(llm_params):
+    if not _uses_explicit_cache_control(llm_params):
         return messages, tools
 
     cached_tools = _tools_with_cache_control(tools)

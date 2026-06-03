@@ -1,12 +1,19 @@
 from litellm import Message
 
 from agent.core.model_ids import HF_ROUTER_BASE_URL
-from agent.core.prompt_caching import with_prompt_caching
+from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
 
 
-def _fal_params() -> dict:
+def _anthropic_fal_params() -> dict:
     return {
         "model": "openai/anthropic/claude-sonnet-4-6:fal-ai",
+        "api_base": HF_ROUTER_BASE_URL,
+    }
+
+
+def _gpt55_fal_params() -> dict:
+    return {
+        "model": "openai/openai/gpt-5.5:fal-ai",
         "api_base": HF_ROUTER_BASE_URL,
     }
 
@@ -21,7 +28,9 @@ def test_prompt_caching_marks_system_prefix_and_tools_for_fal_router_model():
         {"type": "function", "function": {"name": "write"}},
     ]
 
-    cached_messages, cached_tools = with_prompt_caching(messages, tools, _fal_params())
+    cached_messages, cached_tools = with_prompt_caching(
+        messages, tools, _anthropic_fal_params()
+    )
 
     assert cached_tools is not tools
     assert cached_tools == [
@@ -55,7 +64,7 @@ def test_prompt_caching_marks_last_stable_user_before_current_message():
         {"role": "user", "content": "current question"},
     ]
 
-    cached_messages, _ = with_prompt_caching(messages, None, _fal_params())
+    cached_messages, _ = with_prompt_caching(messages, None, _anthropic_fal_params())
 
     assert cached_messages[0]["content"] == "stable system"
     assert cached_messages[1]["content"] == [
@@ -84,7 +93,7 @@ def test_prompt_caching_marks_last_text_block_in_content_list():
         {"role": "user", "content": "current question"},
     ]
 
-    cached_messages, _ = with_prompt_caching(messages, None, _fal_params())
+    cached_messages, _ = with_prompt_caching(messages, None, _anthropic_fal_params())
 
     assert cached_messages[0]["content"][0] == {
         "type": "text",
@@ -106,7 +115,9 @@ def test_prompt_caching_marks_tools_without_message_prefix():
     messages = [{"role": "user", "content": "current question"}]
     tools = [{"type": "function", "function": {"name": "read"}}]
 
-    cached_messages, cached_tools = with_prompt_caching(messages, tools, _fal_params())
+    cached_messages, cached_tools = with_prompt_caching(
+        messages, tools, _anthropic_fal_params()
+    )
 
     assert cached_messages is messages
     assert cached_tools == [
@@ -135,6 +146,21 @@ def test_prompt_caching_is_noop_for_non_fal_router_model():
     assert cached_tools is None
 
 
+def test_prompt_caching_is_noop_for_gpt55_fal_router_model():
+    messages = [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "current question"},
+    ]
+    tools = [{"type": "function", "function": {"name": "read"}}]
+
+    cached_messages, cached_tools = with_prompt_caching(
+        messages, tools, _gpt55_fal_params()
+    )
+
+    assert cached_messages is messages
+    assert cached_tools is tools
+
+
 def test_prompt_caching_is_noop_for_non_router_fal_model():
     messages = [
         {"role": "system", "content": "stable system"},
@@ -148,3 +174,47 @@ def test_prompt_caching_is_noop_for_non_router_fal_model():
     cached_messages, _ = with_prompt_caching(messages, None, llm_params)
 
     assert cached_messages is messages
+
+
+def test_prompt_cache_params_add_session_id_for_fal_router_model():
+    llm_params = _anthropic_fal_params()
+
+    cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
+
+    assert cached_params is not llm_params
+    assert cached_params["extra_body"] == {"session_id": "session-1"}
+    assert "extra_body" not in llm_params
+
+
+def test_prompt_cache_params_merges_gpt55_cache_hints():
+    llm_params = {
+        **_gpt55_fal_params(),
+        "extra_body": {"reasoning_effort": "high"},
+    }
+
+    cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
+
+    assert cached_params["extra_body"] == {
+        "reasoning_effort": "high",
+        "session_id": "session-1",
+        "prompt_cache_key": "session-1",
+        "prompt_cache_retention": "24h",
+    }
+    assert llm_params["extra_body"] == {"reasoning_effort": "high"}
+
+
+def test_prompt_cache_params_adds_gpt55_retention_without_session():
+    cached_params = with_prompt_cache_params(_gpt55_fal_params())
+
+    assert cached_params["extra_body"] == {"prompt_cache_retention": "24h"}
+
+
+def test_prompt_cache_params_is_noop_for_non_router_model():
+    llm_params = {
+        "model": "openai/openai/gpt-5.5:fal-ai",
+        "api_base": "http://localhost:8000/v1",
+    }
+
+    cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
+
+    assert cached_params is llm_params
