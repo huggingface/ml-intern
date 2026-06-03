@@ -6,7 +6,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -113,9 +113,28 @@ class AgentSession:
     is_reaping: bool = False
     broadcaster: Any = None
     title: str | None = None
-    # True once this session has been counted against the user's daily premium
-    # quota. The field name is kept for persistence compatibility.
+    # True once this session has ever been counted against premium quota.
+    # claude_counted_day decides whether it has already consumed today's cap.
     claude_counted: bool = False
+    claude_counted_day: str | None = None
+
+
+def _quota_day_today() -> str:
+    return datetime.now(UTC).date().isoformat()
+
+
+def _quota_counted_today(agent_session: AgentSession) -> bool:
+    return (
+        agent_session.claude_counted
+        and agent_session.claude_counted_day == _quota_day_today()
+    )
+
+
+def _premium_user_billed_today(agent_session: AgentSession) -> bool:
+    return bool(
+        getattr(agent_session.session, "premium_user_billed", False)
+        and _quota_counted_today(agent_session)
+    )
 
 
 class SessionCapacityError(Exception):
@@ -600,6 +619,7 @@ class SessionManager:
                     agent_session.session
                 ),
                 claude_counted=agent_session.claude_counted,
+                claude_counted_day=agent_session.claude_counted_day,
                 premium_user_billed=getattr(
                     agent_session.session, "premium_user_billed", False
                 ),
@@ -696,6 +716,13 @@ class SessionManager:
             premium_user_billed=bool(meta.get("premium_user_billed", False)),
             claude_counted=bool(meta.get("claude_counted")),
         )
+        claude_counted_day = (
+            str(meta.get("claude_counted_day"))
+            if meta.get("claude_counted_day")
+            else None
+        )
+        if not claude_counted:
+            claude_counted_day = None
         event_queue: asyncio.Queue = asyncio.Queue()
         submission_queue: asyncio.Queue = asyncio.Queue()
         tool_router, session = await asyncio.to_thread(
@@ -779,6 +806,7 @@ class SessionManager:
             is_active=True,
             is_processing=False,
             claude_counted=claude_counted,
+            claude_counted_day=claude_counted_day,
             title=meta.get("title"),
         )
         started = await self._start_agent_session(
@@ -1505,10 +1533,8 @@ class SessionManager:
                 agent_session.session.notification_destinations
             ),
             "auto_approval": self._auto_approval_summary(agent_session.session),
-            "premium_user_billed": getattr(
-                agent_session.session, "premium_user_billed", False
-            ),
-            "premium_quota_counted": agent_session.claude_counted,
+            "premium_user_billed": _premium_user_billed_today(agent_session),
+            "premium_quota_counted": _quota_counted_today(agent_session),
         }
 
     def set_notification_destinations(
@@ -1562,6 +1588,10 @@ class SessionManager:
                 else:
                     created_at_str = str(created_at or datetime.utcnow().isoformat())
                 pending = self._pending_docs_for_api(row.get("pending_approval") or [])
+                quota_counted_today = (
+                    bool(row.get("claude_counted", False))
+                    and row.get("claude_counted_day") == _quota_day_today()
+                )
                 results.append(
                     {
                         "session_id": str(sid),
@@ -1575,8 +1605,9 @@ class SessionManager:
                         "title": row.get("title"),
                         "premium_user_billed": bool(
                             row.get("premium_user_billed", False)
+                            and quota_counted_today
                         ),
-                        "premium_quota_counted": bool(row.get("claude_counted", False)),
+                        "premium_quota_counted": quota_counted_today,
                         "notification_destinations": row.get(
                             "notification_destinations"
                         )

@@ -94,13 +94,13 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
   // account (past the subsidized daily allowance). Re-read after each turn,
   // since the backend flips it at submit time. Only premium-model sessions can
   // ever be user-billed, so skip the fetch for free models.
-  const [premiumBilled, setPremiumBilled] = useState(false);
-  const [premiumQuotaCounted, setPremiumQuotaCounted] = useState(false);
+  const [premiumBilled, setPremiumBilled] = useState<boolean | null>(null);
+  const [premiumQuotaCounted, setPremiumQuotaCounted] = useState<boolean | null>(null);
   const onPremiumModel = isPremiumPath(sessionMeta?.model ?? undefined);
   useEffect(() => {
     if (!isActive || !onPremiumModel) {
-      setPremiumBilled(false);
-      setPremiumQuotaCounted(false);
+      setPremiumBilled(null);
+      setPremiumQuotaCounted(null);
       return;
     }
     if (busy) return;
@@ -119,9 +119,9 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
     };
   }, [busy, isActive, onPremiumModel, sessionId]);
 
-  const sessionPremiumBilled = premiumBilled || Boolean(sessionMeta?.premiumUserBilled);
+  const sessionPremiumBilled = premiumBilled ?? Boolean(sessionMeta?.premiumUserBilled);
   const sessionPremiumQuotaCounted =
-    premiumQuotaCounted || Boolean(sessionMeta?.premiumQuotaCounted);
+    premiumQuotaCounted ?? Boolean(sessionMeta?.premiumQuotaCounted);
   const premiumBillingNotice =
     sessionPremiumBilled ||
     (isActive &&

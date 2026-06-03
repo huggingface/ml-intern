@@ -7,10 +7,10 @@ in-process dict remains the fallback for local/dev/test runs.
 The public names still say ``claude`` because this quota bucket originally
 only covered Claude and the persisted session field uses that name.
 
-Unit: first premium-model submit in a session, not raw messages. A user who
-sends with an allowed premium model in a new session consumes one quota point;
-switching an already-counted session back to a premium model doesn't
-(`AgentSession.claude_counted` guards that). Model-level plan gates live in
+Unit: first premium-model submit per session per UTC day, not raw messages. A
+user who sends with an allowed premium model in any session consumes one quota
+point for that day; continuing the same session on the same day doesn't
+(`AgentSession.claude_counted_day` guards that). Model-level plan gates live in
 ``backend.routes.agent``; this module only tracks the per-plan daily cap.
 
 Cap tiers:
@@ -38,6 +38,11 @@ _lock = asyncio.Lock()
 
 def _today() -> str:
     return datetime.now(UTC).date().isoformat()
+
+
+def current_quota_day() -> str:
+    """Return the UTC date key used for today's premium-model quota bucket."""
+    return _today()
 
 
 def daily_cap_for(plan: str | None) -> int:

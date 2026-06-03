@@ -24,6 +24,7 @@ def _reset_quota_store():
 def _premium_session(model: str = agent.DEFAULT_PREMIUM_MODEL_ID):
     return SimpleNamespace(
         claude_counted=False,
+        claude_counted_day=None,
         session=SimpleNamespace(
             config=SimpleNamespace(model_name=model),
             premium_user_billed=False,
@@ -198,8 +199,63 @@ async def test_premium_quota_charges_without_user_billing_inside_allowance(monke
     )
 
     assert agent_session.claude_counted is True
+    assert agent_session.claude_counted_day == agent.user_quotas.current_quota_day()
     assert agent_session.session.premium_user_billed is False
     assert persisted == [agent_session]
+    assert await agent.user_quotas.get_claude_used_today("u1") == 1
+
+
+@pytest.mark.asyncio
+async def test_premium_quota_counts_same_session_once_per_day(monkeypatch):
+    async def fake_persist_session_snapshot(_agent_session):
+        return None
+
+    monkeypatch.setattr(
+        agent.session_manager,
+        "persist_session_snapshot",
+        fake_persist_session_snapshot,
+    )
+
+    agent_session = _premium_session()
+
+    await agent._enforce_premium_model_quota(
+        {"user_id": "u1", "plan": "free"},
+        agent_session,
+    )
+    await agent._enforce_premium_model_quota(
+        {"user_id": "u1", "plan": "free"},
+        agent_session,
+    )
+
+    assert agent_session.claude_counted is True
+    assert agent_session.claude_counted_day == agent.user_quotas.current_quota_day()
+    assert await agent.user_quotas.get_claude_used_today("u1") == 1
+
+
+@pytest.mark.asyncio
+async def test_premium_quota_counts_stale_session_again_today(monkeypatch):
+    async def fake_persist_session_snapshot(_agent_session):
+        return None
+
+    monkeypatch.setattr(
+        agent.session_manager,
+        "persist_session_snapshot",
+        fake_persist_session_snapshot,
+    )
+
+    agent_session = _premium_session()
+    agent_session.claude_counted = True
+    agent_session.claude_counted_day = "2000-01-01"
+    agent_session.session.premium_user_billed = True
+
+    await agent._enforce_premium_model_quota(
+        {"user_id": "u1", "plan": "free"},
+        agent_session,
+    )
+
+    assert agent_session.claude_counted is True
+    assert agent_session.claude_counted_day == agent.user_quotas.current_quota_day()
+    assert agent_session.session.premium_user_billed is False
     assert await agent.user_quotas.get_claude_used_today("u1") == 1
 
 
@@ -227,6 +283,7 @@ async def test_free_user_gets_two_subsidized_premium_sessions_then_user_billing(
     third = _premium_session()
     await agent._enforce_premium_model_quota({"user_id": "g1", "plan": "free"}, third)
     assert third.session.premium_user_billed is True
+    assert third.claude_counted_day == agent.user_quotas.current_quota_day()
     assert await agent.user_quotas.get_claude_used_today("g1") == 2
 
 
@@ -249,6 +306,7 @@ async def test_free_model_does_not_consume_premium_quota(monkeypatch):
     )
 
     assert agent_session.claude_counted is False
+    assert agent_session.claude_counted_day is None
     assert await agent.user_quotas.get_claude_used_today("u1") == 0
 
 
@@ -274,6 +332,7 @@ async def test_free_user_cannot_spend_quota_on_pro_only_premium_model(monkeypatc
     assert exc_info.value.status_code == 403
     assert exc_info.value.detail["error"] == "model_requires_pro"
     assert agent_session.claude_counted is False
+    assert agent_session.claude_counted_day is None
     assert await agent.user_quotas.get_claude_used_today("u1") == 0
 
 
@@ -321,6 +380,7 @@ async def test_pro_user_uses_pro_premium_quota(monkeypatch):
             agent_session,
         )
         assert agent_session.claude_counted is True
+        assert agent_session.claude_counted_day == agent.user_quotas.current_quota_day()
         assert agent_session.session.premium_user_billed is False
         assert await agent.user_quotas.get_claude_used_today("pro-user") == index + 1
 

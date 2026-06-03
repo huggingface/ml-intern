@@ -207,21 +207,23 @@ async def _enforce_premium_model_quota(
 
     Runs at *message-submit* time, not session-create time — so spinning up a
     premium-model session to look around doesn't burn quota. The
-    ``claude_counted`` flag on ``AgentSession`` guards against re-counting the
-    same session; the stored field name is kept for persistence compatibility.
+    ``claude_counted_day`` flag on ``AgentSession`` guards against re-counting
+    the same session on the same day, while still counting old sessions when
+    they are used again on a later day.
 
     Subsidizes the daily allowance (free = 2 for default premium, pro = 20
     across premium models), organization-billed through the HF Router. Opus and
     GPT-5.5 are pro-only before quota is charged. Past the allowance, premium
     router models flip the session to ``premium_user_billed`` so the call bills
     the user's own HF token instead of blocking. No-ops when the model isn't
-    premium or when this session's billing has already been decided.
+    premium or when this session's billing has already been decided for today.
     """
     model_name = agent_session.session.config.model_name
     if not _is_premium_model(model_name):
         return
     _reject_model_unavailable_for_plan(model_name, user)
-    if agent_session.claude_counted:
+    quota_day = user_quotas.current_quota_day()
+    if agent_session.claude_counted and agent_session.claude_counted_day == quota_day:
         return
     user_id = user["user_id"]
     plan = user.get("plan", "free")
@@ -241,7 +243,12 @@ async def _enforce_premium_model_quota(
         # Past the subsidized allowance on a user-billable model: bill the
         # user's own HF (OAuth) token for this session instead of blocking.
         agent_session.session.premium_user_billed = True
+    else:
+        # A session that overflowed on a previous day can use today's
+        # subsidized allowance again if quota is available.
+        agent_session.session.premium_user_billed = False
     agent_session.claude_counted = True
+    agent_session.claude_counted_day = quota_day
     await session_manager.persist_session_snapshot(agent_session)
 
 
@@ -909,8 +916,8 @@ async def chat_sse(
     approvals = body.get("approvals")
 
     # Gate user-message sends against the daily premium-model quota. Approvals are
-    # continuations of an in-progress turn — the session was already charged
-    # on its first message, so we skip the gate there.
+    # continuations of an in-progress turn, so the relevant quota decision was
+    # made when that user message was submitted.
     if text is not None and not approvals:
         try:
             await _enforce_premium_model_quota(user, agent_session)

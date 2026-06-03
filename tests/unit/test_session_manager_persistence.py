@@ -757,6 +757,7 @@ async def test_list_sessions_dev_uses_store_dev_visibility():
                         "created_at": datetime.now(UTC),
                         "premium_user_billed": True,
                         "claude_counted": True,
+                        "claude_counted_day": datetime.now(UTC).date().isoformat(),
                         "auto_approval_enabled": True,
                         "auto_approval_cost_cap_usd": 5.0,
                         "auto_approval_estimated_spend_usd": 2.0,
@@ -786,3 +787,44 @@ async def test_list_sessions_dev_uses_store_dev_visibility():
         "estimated_spend_usd": 2.0,
         "remaining_usd": 3.0,
     }
+
+
+def test_get_session_info_marks_stale_premium_quota_as_unused_today():
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", user_id="alice")
+    agent_session.claude_counted = True
+    agent_session.claude_counted_day = "2000-01-01"
+    agent_session.session.premium_user_billed = True
+    manager.sessions["s1"] = agent_session
+
+    info = manager.get_session_info("s1")
+
+    assert info is not None
+    assert info["premium_user_billed"] is False
+    assert info["premium_quota_counted"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_marks_stale_premium_quota_as_unused_today():
+    class ListStore(NoopSessionStore):
+        enabled = True
+
+        async def list_sessions(self, user_id: str, **_: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "session_id": "s1",
+                    "user_id": user_id,
+                    "model": "m",
+                    "created_at": datetime.now(UTC),
+                    "premium_user_billed": True,
+                    "claude_counted": True,
+                    "claude_counted_day": "2000-01-01",
+                }
+            ]
+
+    manager = _manager_with_store(ListStore())
+
+    sessions = await manager.list_sessions(user_id="alice")
+
+    assert sessions[0]["premium_user_billed"] is False
+    assert sessions[0]["premium_quota_counted"] is False

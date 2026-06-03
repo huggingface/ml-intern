@@ -252,10 +252,14 @@ export const useSessionStore = create<SessionStore>()(
     {
       name: 'hf-agent-sessions',
       partialize: (state) => ({
-        // Reset the transient isProcessing flag so a stale `true` from a
-        // previous session can't trigger a reactivating hydration on the next
-        // cold load — it's always re-derived from the live GET /sessions list.
-        sessions: state.sessions.map((s) => ({ ...s, isProcessing: false })),
+        // Reset transient session flags so cold-load state is re-derived from
+        // the live GET /sessions list and current daily quota window.
+        sessions: state.sessions.map((s) => ({
+          ...s,
+          isProcessing: false,
+          premiumUserBilled: false,
+          premiumQuotaCounted: false,
+        })),
         activeSessionId: state.activeSessionId,
       }),
     }
