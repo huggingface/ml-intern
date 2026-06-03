@@ -217,12 +217,12 @@ async def _enforce_premium_model_quota(
     the user's own HF token instead of blocking. No-ops when the model isn't
     premium or when this session's billing has already been decided.
     """
-    if agent_session.claude_counted:
-        return
     model_name = agent_session.session.config.model_name
     if not _is_premium_model(model_name):
         return
     _reject_model_unavailable_for_plan(model_name, user)
+    if agent_session.claude_counted:
+        return
     user_id = user["user_id"]
     plan = user.get("plan", "free")
     cap = user_quotas.daily_cap_for(plan)

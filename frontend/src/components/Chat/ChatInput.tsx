@@ -309,11 +309,16 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   }, [disabled, isProcessing]);
 
   const handleSend = useCallback(() => {
+    const selectedOption = modelOptions.find((model) => model.id === selectedModelId);
+    if (selectedOption && !isModelAllowedForPlan(selectedOption, plan)) {
+      setModelSwitchError('Claude Opus 4.8 and GPT-5.5 daily sessions require HF Pro.');
+      return;
+    }
     if (input.trim() && !disabled && !isUploadingDataset) {
       onSend(input);
       setInput('');
     }
-  }, [input, disabled, isUploadingDataset, onSend]);
+  }, [input, disabled, isUploadingDataset, onSend, modelOptions, selectedModelId, plan]);
 
   const handleDatasetUploadClick = useCallback(() => {
     fileInputRef.current?.click();

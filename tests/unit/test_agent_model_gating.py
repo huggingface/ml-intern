@@ -278,6 +278,32 @@ async def test_free_user_cannot_spend_quota_on_pro_only_premium_model(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_downgraded_user_cannot_continue_counted_pro_only_session(monkeypatch):
+    async def fail_if_persisted(_agent_session):
+        raise AssertionError("already-counted rejected session should not persist")
+
+    monkeypatch.setattr(
+        agent.session_manager,
+        "persist_session_snapshot",
+        fail_if_persisted,
+    )
+
+    agent_session = _premium_session(agent.DEFAULT_OPUS_MODEL_ID)
+    agent_session.claude_counted = True
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent._enforce_premium_model_quota(
+            {"user_id": "u1", "plan": "free"},
+            agent_session,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail["error"] == "model_requires_pro"
+    assert agent_session.claude_counted is True
+    assert await agent.user_quotas.get_claude_used_today("u1") == 0
+
+
+@pytest.mark.asyncio
 async def test_pro_user_uses_pro_premium_quota(monkeypatch):
     async def fake_persist_session_snapshot(_agent_session):
         return None
