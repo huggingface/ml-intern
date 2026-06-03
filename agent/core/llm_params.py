@@ -10,7 +10,6 @@ import os
 from agent.core.hf_tokens import (
     get_hf_bill_to,
     resolve_hf_router_token,
-    resolve_hf_token,
 )
 from agent.core.local_models import (
     LOCAL_MODEL_API_KEY_DEFAULT,
@@ -22,7 +21,6 @@ from agent.core.local_models import (
 )
 from agent.core.model_ids import (
     HF_ROUTER_BASE_URL,
-    is_premium_model_id,
     strip_huggingface_model_prefix,
 )
 
@@ -97,7 +95,6 @@ def _resolve_llm_params(
     session_hf_token: str | None = None,
     reasoning_effort: str | None = None,
     strict: bool = False,
-    bill_to_user: bool = False,
 ) -> dict:
     """
     Build LiteLLM kwargs for a given model id.
@@ -128,10 +125,6 @@ def _resolve_llm_params(
       2. session.hf_token — the user's own token (CLI / OAuth / cache file).
       3. huggingface_hub cache — ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` /
          local ``hf auth login`` cache.
-
-    Pass ``bill_to_user=True`` only after the daily subsidized allowance is
-    spent. Premium router ids then use the caller's own token, skip
-    ``INFERENCE_TOKEN``, and omit ``X-HF-Bill-To``.
     """
     normalized_model = strip_huggingface_model_prefix(model_name) or model_name
 
@@ -142,18 +135,13 @@ def _resolve_llm_params(
         return _resolve_local_model_params(normalized_model, reasoning_effort, strict)
 
     hf_model = normalized_model
-    bill_user = bill_to_user and is_premium_model_id(hf_model)
-    api_key = (
-        resolve_hf_token(session_hf_token, include_cached=False)
-        if bill_user
-        else _resolve_hf_router_token(session_hf_token)
-    )
+    api_key = _resolve_hf_router_token(session_hf_token)
     params = {
         "model": f"openai/{hf_model}",
         "api_base": HF_ROUTER_BASE_URL,
         "api_key": api_key,
     }
-    if not bill_user and (bill_to := get_hf_bill_to()):
+    if bill_to := get_hf_bill_to():
         params["extra_headers"] = {"X-HF-Bill-To": bill_to}
     if reasoning_effort:
         hf_level = _hf_router_effort_level(reasoning_effort)

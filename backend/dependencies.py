@@ -35,7 +35,7 @@ DEV_USER: dict[str, Any] = {
     "user_id": "dev",
     "username": "dev",
     "authenticated": True,
-    "plan": "pro",  # Dev runs at the Pro quota tier so local testing isn't capped.
+    "plan": "pro",  # Dev can exercise Pro-only model access locally.
 }
 
 INTERNAL_HF_TOKEN_KEY = "_hf_token"
@@ -137,7 +137,7 @@ def _user_from_info(user_info: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_user_plan(whoami: Any) -> str:
-    """Normalize a whoami-v2 payload to the app's personal quota tiers."""
+    """Normalize a whoami-v2 payload to the app's model-access tiers."""
     if not isinstance(whoami, dict):
         return "free"
 
@@ -152,7 +152,7 @@ async def _fetch_user_plan(token: str) -> str:
 
     Returns 'free' | 'pro'. Non-200, network errors, or an unknown
     payload shape all collapse to 'free' — safe default; we'd rather under-
-    grant the Pro cap than over-grant it on bad data.
+    grant Pro-only models than over-grant them on bad data.
     """
     global _WHOAMI_SHAPE_LOGGED
     whoami = await fetch_whoami_v2(token)

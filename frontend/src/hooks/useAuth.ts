@@ -48,6 +48,7 @@ export function useAuth() {
               username: data.username,
               name: data.name,
               picture: data.picture,
+              plan: data.plan ?? 'free',
             });
             logger.log('Authenticated as', data.username);
             return;
@@ -59,7 +60,7 @@ export function useAuth() {
         const statusData = await statusRes.json();
         if (!statusData.auth_enabled) {
           // Dev mode — no OAuth configured
-          if (!cancelled) setUser({ authenticated: true, username: 'dev' });
+          if (!cancelled) setUser({ authenticated: true, username: 'dev', plan: 'pro' });
           return;
         }
 
@@ -67,7 +68,7 @@ export function useAuth() {
         if (!cancelled) setUser(null);
       } catch {
         // Backend unreachable — assume dev mode
-        if (!cancelled) setUser({ authenticated: true, username: 'dev' });
+        if (!cancelled) setUser({ authenticated: true, username: 'dev', plan: 'pro' });
       }
     }
 

@@ -257,7 +257,6 @@ async def research_handler(
         research_model,
         getattr(session, "hf_token", None),
         reasoning_effort=_capped,
-        bill_to_user=getattr(session, "premium_user_billed", False),
     )
 
     # Get read-only tool specs from the session's tool router

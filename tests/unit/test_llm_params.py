@@ -9,19 +9,19 @@ from agent.core.llm_params import (
 from agent.core.model_ids import HF_ROUTER_BASE_URL
 
 
-def test_hf_router_params_for_default_premium_model(monkeypatch):
+def test_hf_router_params_for_default_model(monkeypatch):
     monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
     monkeypatch.setenv("HF_BILL_TO", "smolagents")
 
     params = _resolve_llm_params(
-        "anthropic/claude-sonnet-4-6:fal-ai",
+        "moonshotai/Kimi-K2.6",
         "session-token",
         reasoning_effort="high",
         strict=True,
     )
 
     assert params == {
-        "model": "openai/anthropic/claude-sonnet-4-6:fal-ai",
+        "model": "openai/moonshotai/Kimi-K2.6",
         "api_base": HF_ROUTER_BASE_URL,
         "api_key": "inference-token",
         "extra_headers": {"X-HF-Bill-To": "smolagents"},
@@ -50,54 +50,6 @@ def test_hf_router_drops_unsupported_effort_in_non_strict_mode(monkeypatch):
     assert params["api_base"] == HF_ROUTER_BASE_URL
     assert params["api_key"] == "hf-token"
     assert "extra_body" not in params
-
-
-def test_user_billed_premium_uses_session_token_without_bill_to(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "anthropic/claude-opus-4.8:fal-ai",
-        "session-token",
-        reasoning_effort="high",
-        strict=True,
-        bill_to_user=True,
-    )
-
-    assert params["model"] == "openai/anthropic/claude-opus-4.8:fal-ai"
-    assert params["api_base"] == HF_ROUTER_BASE_URL
-    assert params["api_key"] == "session-token"
-    assert "extra_headers" not in params
-    assert params["extra_body"] == {"reasoning_effort": "high"}
-
-
-def test_user_billed_premium_does_not_fall_back_to_cached_token(monkeypatch):
-    import huggingface_hub
-
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_TOKEN", "server-token")
-    monkeypatch.setattr(huggingface_hub, "get_token", lambda: "cached-token")
-
-    params = _resolve_llm_params(
-        "anthropic/claude-opus-4.8:fal-ai",
-        None,
-        bill_to_user=True,
-    )
-
-    assert params["api_key"] is None
-    assert "extra_headers" not in params
-
-
-def test_bill_to_user_ignored_for_free_models(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "moonshotai/Kimi-K2.6", "session-token", bill_to_user=True
-    )
-
-    assert params["api_key"] == "inference-token"
-    assert params["extra_headers"] == {"X-HF-Bill-To": "smolagents"}
 
 
 def test_huggingface_prefix_is_stripped_for_router_calls(monkeypatch):

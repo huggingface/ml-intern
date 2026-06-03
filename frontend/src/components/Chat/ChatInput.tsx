@@ -20,16 +20,13 @@ import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
 import StopIcon from '@mui/icons-material/Stop';
 import AddIcon from '@mui/icons-material/Add';
 import { apiFetch, apiUpload } from '@/utils/api';
-import type { PlanTier, UserQuota } from '@/hooks/useUserQuota';
 import JobsUpgradeDialog from '@/components/JobsUpgradeDialog';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import {
-  CLAUDE_MODEL_PATH,
   CLAUDE_OPUS_48_MODEL_PATH,
   GPT_55_MODEL_PATH,
-  isClaudePath,
-  isPremiumPath,
+  KIMI_K26_MODEL_PATH,
   isProOnlyPath,
 } from '@/utils/model';
 
@@ -44,6 +41,8 @@ interface ModelOption {
   minimumPlan?: 'free' | 'pro';
 }
 
+type PlanTier = 'free' | 'pro';
+
 const getHfAvatarUrl = (modelId: string) => {
   const org = modelId.split('/')[0];
   return `https://huggingface.co/api/avatars/${org}`;
@@ -51,11 +50,11 @@ const getHfAvatarUrl = (modelId: string) => {
 
 const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   {
-    id: 'claude-sonnet-4-6',
-    name: 'Claude Sonnet 4.6',
+    id: 'kimi-k2.6',
+    name: 'Kimi K2.6',
     description: 'Hugging Face',
-    modelPath: CLAUDE_MODEL_PATH,
-    avatarUrl: getHfAvatarUrl(CLAUDE_MODEL_PATH),
+    modelPath: KIMI_K26_MODEL_PATH,
+    avatarUrl: getHfAvatarUrl(KIMI_K26_MODEL_PATH),
     recommended: true,
   },
   {
@@ -73,13 +72,6 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
     modelPath: GPT_55_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(GPT_55_MODEL_PATH),
     minimumPlan: 'pro',
-  },
-  {
-    id: 'kimi-k2.6',
-    name: 'Kimi K2.6',
-    description: 'Hugging Face',
-    modelPath: 'moonshotai/Kimi-K2.6',
-    avatarUrl: getHfAvatarUrl('moonshotai/Kimi-K2.6'),
   },
   {
     id: 'minimax-m2.7',
@@ -109,7 +101,6 @@ const normalizeModelPath = (path: string | undefined) => (
     .toLowerCase()
     .replace(/^huggingface\//, '')
     .replace(/claude-opus-4\.(\d)/g, 'claude-opus-4-$1')
-    .replace(/claude-sonnet-4\.(\d)/g, 'claude-sonnet-4-$1')
 );
 
 const findModelByPath = (path: string, options: ModelOption[]): ModelOption | undefined => {
@@ -124,10 +115,6 @@ const findModelByPath = (path: string, options: ModelOption[]): ModelOption | un
     );
   });
   if (matched) return matched;
-  if (isClaudePath(path)) {
-    const claude = options.find(isClaudeModel);
-    if (claude) return claude;
-  }
   return undefined;
 };
 
@@ -178,8 +165,6 @@ interface ChatInputProps {
   isProcessing?: boolean;
   disabled?: boolean;
   placeholder?: string;
-  quota: UserQuota | null;
-  refreshQuota: () => Promise<void> | void;
 }
 
 interface DatasetUploadResponse {
@@ -201,8 +186,6 @@ const MAX_DATASET_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DATASET_UPLOAD_ACCEPT = '.csv,.json,.jsonl';
 const DATASET_UPLOAD_EXTENSIONS = new Set(['csv', 'json', 'jsonl']);
 
-const isClaudeModel = (m: ModelOption) => isClaudePath(m.modelPath);
-const isPremiumModel = (m: ModelOption) => isPremiumPath(m.modelPath);
 const isProOnlyModel = (m: ModelOption) => (
   m.minimumPlan === 'pro' || isProOnlyPath(m.modelPath)
 );
@@ -220,7 +203,7 @@ const datasetRepoUrl = (repoId: string) => (
   `https://huggingface.co/datasets/${repoId.split('/').map(encodeURIComponent).join('/')}`
 );
 
-export default function ChatInput({ sessionId, initialModelPath, onSend, onStop, onDatasetUploaded, isProcessing = false, disabled = false, placeholder = 'Ask anything...', quota, refreshQuota }: ChatInputProps) {
+export default function ChatInput({ sessionId, initialModelPath, onSend, onStop, onDatasetUploaded, isProcessing = false, disabled = false, placeholder = 'Ask anything...' }: ChatInputProps) {
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -231,6 +214,7 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     () => findModelByPath(initialModelPath ?? '', DEFAULT_MODEL_OPTIONS)?.id ?? DEFAULT_MODEL_OPTIONS[0].id,
   );
   const [modelAnchorEl, setModelAnchorEl] = useState<null | HTMLElement>(null);
+  const user = useAgentStore((s) => s.user);
   const jobsUpgradeRequired = useAgentStore((s) => s.jobsUpgradeRequired);
   const setJobsUpgradeRequired = useAgentStore((s) => s.setJobsUpgradeRequired);
   const updateSessionModel = useSessionStore((s) => s.updateSessionModel);
@@ -290,7 +274,7 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     return () => { cancelled = true; };
   }, [sessionId, updateSessionModel]);
 
-  const plan = quota?.plan ?? 'free';
+  const plan = user?.plan ?? 'free';
   const visibleModelOptions = modelOptions.filter((model) => (
     isModelAllowedForPlan(model, plan)
   ));
@@ -311,7 +295,7 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   const handleSend = useCallback(() => {
     const selectedOption = modelOptions.find((model) => model.id === selectedModelId);
     if (selectedOption && !isModelAllowedForPlan(selectedOption, plan)) {
-      setModelSwitchError('Claude Opus 4.8 and GPT-5.5 daily sessions require HF Pro.');
+      setModelSwitchError('Claude Opus 4.8 and GPT-5.5 require HF Pro.');
       return;
     }
     if (input.trim() && !disabled && !isUploadingDataset) {
@@ -395,13 +379,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     return () => window.clearTimeout(timeout);
   }, [datasetUploadSuccess]);
 
-  // Refresh the quota display whenever the session changes (user might
-  // have started another tab that spent quota).
-  useEffect(() => {
-    if (sessionId) refreshQuota();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
-
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -414,7 +391,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
 
   const handleModelClick = (event: React.MouseEvent<HTMLElement>) => {
     setModelAnchorEl(event.currentTarget);
-    void refreshQuota();
   };
 
   const handleModelClose = () => {
@@ -425,7 +401,7 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     handleModelClose();
     if (!sessionId) return;
     if (!isModelAllowedForPlan(model, plan)) {
-      setModelSwitchError('Claude Opus 4.8 and GPT-5.5 daily sessions require HF Pro.');
+      setModelSwitchError('Claude Opus 4.8 and GPT-5.5 require HF Pro.');
       return;
     }
     try {
@@ -485,16 +461,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [awaitingTopUp, jobsUpgradeRequired, handleJobsRetry]);
-
-  // Show the remaining subsidized premium-session allowance for today.
-  const premiumChip = (() => {
-    if (!quota) return null;
-    const remaining = Math.max(0, quota.premiumRemaining);
-    if (remaining === 0) {
-      return quota.plan === 'pro' ? '0 left – using HF billing' : '0 left – enable billing';
-    }
-    return `${remaining} left today`;
-  })();
 
   return (
     <Box
@@ -789,19 +755,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
                           fontSize: '10px',
                           bgcolor: 'var(--accent-yellow)',
                           color: '#000',
-                          fontWeight: 600,
-                        }}
-                      />
-                    )}
-                    {isPremiumModel(model) && premiumChip && (
-                      <Chip
-                        label={premiumChip}
-                        size="small"
-                        sx={{
-                          height: '18px',
-                          fontSize: '10px',
-                          bgcolor: 'rgba(255,255,255,0.08)',
-                          color: 'var(--muted-text)',
                           fontWeight: 600,
                         }}
                       />

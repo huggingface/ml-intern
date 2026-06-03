@@ -25,7 +25,6 @@ async def test_noop_store_keeps_local_cli_and_tests_db_free():
     assert await store.load_session("s1") is None
     assert await store.list_sessions("u1") == []
     assert await store.append_event("s1", "processing", {}) is None
-    assert await store.try_increment_quota("u1", "2099-01-01", 1) is None
 
 
 def test_unsafe_message_payload_is_replaced_with_marker():
