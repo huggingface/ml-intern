@@ -1296,11 +1296,14 @@ async def _call_json_llm(
 
         completion_func = acompletion
 
+    from agent.core.prompt_caching import with_prompt_caching
+
     attempt_messages = list(messages)
     last_error: Exception | None = None
     for attempt in range(retries + 1):
+        cached_messages, _ = with_prompt_caching(attempt_messages, None, llm_params)
         response = await completion_func(
-            messages=attempt_messages,
+            messages=cached_messages,
             max_completion_tokens=max_completion_tokens,
             temperature=_temperature_for_params(llm_params),
             **llm_params,

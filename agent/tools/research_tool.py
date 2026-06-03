@@ -18,6 +18,7 @@ from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import strip_huggingface_model_prefix
+from agent.core.prompt_caching import with_prompt_caching
 from agent.core.session import Event
 
 logger = logging.getLogger(__name__)
@@ -336,8 +337,9 @@ async def research_handler(
             )
             try:
                 _t0 = time.monotonic()
+                cached_messages, _ = with_prompt_caching(messages, None, llm_params)
                 response = await acompletion(
-                    messages=messages,
+                    messages=cached_messages,
                     tools=None,  # no tools — force text response
                     stream=False,
                     timeout=120,
@@ -383,9 +385,12 @@ async def research_handler(
 
         try:
             _t0 = time.monotonic()
+            cached_messages, cached_tools = with_prompt_caching(
+                messages, tool_specs if tool_specs else None, llm_params
+            )
             response = await acompletion(
-                messages=messages,
-                tools=tool_specs if tool_specs else None,
+                messages=cached_messages,
+                tools=cached_tools,
                 tool_choice="auto",
                 stream=False,
                 timeout=120,
@@ -499,8 +504,9 @@ async def research_handler(
     )
     try:
         _t0 = time.monotonic()
+        cached_messages, _ = with_prompt_caching(messages, None, llm_params)
         response = await acompletion(
-            messages=messages,
+            messages=cached_messages,
             tools=None,
             stream=False,
             timeout=120,
