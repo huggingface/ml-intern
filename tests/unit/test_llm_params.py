@@ -14,14 +14,14 @@ def test_hf_router_params_for_default_premium_model(monkeypatch):
     monkeypatch.setenv("HF_BILL_TO", "smolagents")
 
     params = _resolve_llm_params(
-        "anthropic/claude-opus-4.8:fal-ai",
+        "anthropic/claude-sonnet-4-6:fal-ai",
         "session-token",
         reasoning_effort="high",
         strict=True,
     )
 
     assert params == {
-        "model": "openai/anthropic/claude-opus-4.8:fal-ai",
+        "model": "openai/anthropic/claude-sonnet-4-6:fal-ai",
         "api_base": HF_ROUTER_BASE_URL,
         "api_key": "inference-token",
         "extra_headers": {"X-HF-Bill-To": "smolagents"},

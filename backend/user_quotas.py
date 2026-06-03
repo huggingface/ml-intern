@@ -8,12 +8,13 @@ The public names still say ``claude`` because this quota bucket originally
 only covered Claude and the persisted session field uses that name.
 
 Unit: first premium-model submit in a session, not raw messages. A user who
-sends with a premium model in a new session consumes one quota point; switching
-an already-counted session back to a premium model doesn't
-(`AgentSession.claude_counted` guards that).
+sends with an allowed premium model in a new session consumes one quota point;
+switching an already-counted session back to a premium model doesn't
+(`AgentSession.claude_counted` guards that). Model-level plan gates live in
+``backend.routes.agent``; this module only tracks the per-plan daily cap.
 
 Cap tiers:
-  free user   → CLAUDE_FREE_DAILY (2)
+  free user   → CLAUDE_FREE_DAILY (2) for the default premium model
   pro user    → CLAUDE_PRO_DAILY  (20)
 """
 

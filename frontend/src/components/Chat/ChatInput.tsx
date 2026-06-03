@@ -20,15 +20,17 @@ import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
 import StopIcon from '@mui/icons-material/Stop';
 import AddIcon from '@mui/icons-material/Add';
 import { apiFetch, apiUpload } from '@/utils/api';
-import type { UserQuota } from '@/hooks/useUserQuota';
+import type { PlanTier, UserQuota } from '@/hooks/useUserQuota';
 import JobsUpgradeDialog from '@/components/JobsUpgradeDialog';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import {
   CLAUDE_MODEL_PATH,
+  CLAUDE_OPUS_48_MODEL_PATH,
   GPT_55_MODEL_PATH,
   isClaudePath,
   isPremiumPath,
+  isProOnlyPath,
 } from '@/utils/model';
 
 // Model configuration
@@ -39,6 +41,7 @@ interface ModelOption {
   modelPath: string;
   avatarUrl: string;
   recommended?: boolean;
+  minimumPlan?: 'free' | 'pro';
 }
 
 const getHfAvatarUrl = (modelId: string) => {
@@ -48,12 +51,20 @@ const getHfAvatarUrl = (modelId: string) => {
 
 const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   {
-    id: 'claude-opus-4-8',
-    name: 'Claude Opus 4.8',
+    id: 'claude-sonnet-4-6',
+    name: 'Claude Sonnet 4.6',
     description: 'Hugging Face',
     modelPath: CLAUDE_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(CLAUDE_MODEL_PATH),
     recommended: true,
+  },
+  {
+    id: 'claude-opus-4-8',
+    name: 'Claude Opus 4.8',
+    description: 'Hugging Face',
+    modelPath: CLAUDE_OPUS_48_MODEL_PATH,
+    avatarUrl: getHfAvatarUrl(CLAUDE_OPUS_48_MODEL_PATH),
+    minimumPlan: 'pro',
   },
   {
     id: 'gpt-5.5',
@@ -61,6 +72,7 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
     description: 'Hugging Face',
     modelPath: GPT_55_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(GPT_55_MODEL_PATH),
+    minimumPlan: 'pro',
   },
   {
     id: 'kimi-k2.6',
@@ -97,6 +109,7 @@ const normalizeModelPath = (path: string | undefined) => (
     .toLowerCase()
     .replace(/^huggingface\//, '')
     .replace(/claude-opus-4\.(\d)/g, 'claude-opus-4-$1')
+    .replace(/claude-sonnet-4\.(\d)/g, 'claude-sonnet-4-$1')
 );
 
 const findModelByPath = (path: string, options: ModelOption[]): ModelOption | undefined => {
@@ -129,6 +142,7 @@ const modelOptionFromApi = (model: {
   label?: string;
   provider?: string;
   recommended?: boolean;
+  minimum_plan?: string;
 }): ModelOption | null => {
   if (!model.id) return null;
   return {
@@ -138,6 +152,7 @@ const modelOptionFromApi = (model: {
     modelPath: model.id,
     avatarUrl: getHfAvatarUrl(model.id.replace(/^huggingface\//, '')),
     recommended: Boolean(model.recommended),
+    minimumPlan: model.minimum_plan === 'pro' ? 'pro' : 'free',
   };
 };
 
@@ -188,6 +203,12 @@ const DATASET_UPLOAD_EXTENSIONS = new Set(['csv', 'json', 'jsonl']);
 
 const isClaudeModel = (m: ModelOption) => isClaudePath(m.modelPath);
 const isPremiumModel = (m: ModelOption) => isPremiumPath(m.modelPath);
+const isProOnlyModel = (m: ModelOption) => (
+  m.minimumPlan === 'pro' || isProOnlyPath(m.modelPath)
+);
+const isModelAllowedForPlan = (m: ModelOption, plan: PlanTier) => (
+  plan === 'pro' || !isProOnlyModel(m)
+);
 
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -269,7 +290,16 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     return () => { cancelled = true; };
   }, [sessionId, updateSessionModel]);
 
-  const selectedModel = modelOptions.find(m => m.id === selectedModelId) || modelOptions[0];
+  const plan = quota?.plan ?? 'free';
+  const visibleModelOptions = modelOptions.filter((model) => (
+    isModelAllowedForPlan(model, plan)
+  ));
+  const selectedModel = (
+    visibleModelOptions.find(m => m.id === selectedModelId)
+    || modelOptions.find(m => m.id === selectedModelId)
+    || visibleModelOptions[0]
+    || modelOptions[0]
+  );
 
   // Auto-focus the textarea when the session becomes ready
   useEffect(() => {
@@ -389,6 +419,10 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   const handleSelectModel = async (model: ModelOption) => {
     handleModelClose();
     if (!sessionId) return;
+    if (!isModelAllowedForPlan(model, plan)) {
+      setModelSwitchError('Claude Opus 4.8 and GPT-5.5 daily sessions require HF Pro.');
+      return;
+    }
     try {
       const res = await apiFetch(`/api/session/${sessionId}/model`, {
         method: 'POST',
@@ -718,7 +752,7 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
             }
           }}
         >
-          {modelOptions.map((model) => (
+          {visibleModelOptions.map((model) => (
             <MenuItem
               key={model.id}
               onClick={() => handleSelectModel(model)}

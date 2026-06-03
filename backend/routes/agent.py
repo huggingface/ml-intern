@@ -55,6 +55,7 @@ from agent.core.hf_access import get_jobs_access
 from agent.core.hf_tokens import resolve_hf_request_token
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import (
+    CLAUDE_OPUS_48_MODEL_ID,
     DEEPSEEK_V4_PRO_MODEL_ID,
     DEFAULT_MODEL_ID,
     GLM_51_MODEL_ID,
@@ -62,6 +63,7 @@ from agent.core.model_ids import (
     KIMI_K26_MODEL_ID,
     MINIMAX_M27_MODEL_ID,
     is_premium_model_id,
+    is_pro_only_premium_model_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,7 @@ router = APIRouter(prefix="/api", tags=["agent"])
 _background_teardown_tasks: set[asyncio.Task] = set()
 
 DEFAULT_PREMIUM_MODEL_ID = DEFAULT_MODEL_ID
+DEFAULT_OPUS_MODEL_ID = CLAUDE_OPUS_48_MODEL_ID
 DEFAULT_GPT_MODEL_ID = GPT_55_MODEL_ID
 DEFAULT_FREE_MODEL_ID = KIMI_K26_MODEL_ID
 DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
@@ -79,40 +82,53 @@ def _available_models() -> list[dict[str, Any]]:
     models = [
         {
             "id": DEFAULT_PREMIUM_MODEL_ID,
-            "label": "Claude Opus 4.8",
+            "label": "Claude Sonnet 4.6",
             "provider": "huggingface",
             "tier": "pro",
             "recommended": True,
+            "minimum_plan": "free",
+        },
+        {
+            "id": DEFAULT_OPUS_MODEL_ID,
+            "label": "Claude Opus 4.8",
+            "provider": "huggingface",
+            "tier": "pro",
+            "minimum_plan": "pro",
         },
         {
             "id": DEFAULT_GPT_MODEL_ID,
             "label": "GPT-5.5",
             "provider": "huggingface",
             "tier": "pro",
+            "minimum_plan": "pro",
         },
         {
             "id": DEFAULT_FREE_MODEL_ID,
             "label": "Kimi K2.6",
             "provider": "huggingface",
             "tier": "free",
+            "minimum_plan": "free",
         },
         {
             "id": MINIMAX_M27_MODEL_ID,
             "label": "MiniMax M2.7",
             "provider": "huggingface",
             "tier": "free",
+            "minimum_plan": "free",
         },
         {
             "id": GLM_51_MODEL_ID,
             "label": "GLM 5.1",
             "provider": "huggingface",
             "tier": "free",
+            "minimum_plan": "free",
         },
         {
             "id": DEEPSEEK_V4_PRO_MODEL_ID,
             "label": "DeepSeek V4 Pro",
             "provider": "huggingface",
             "tier": "free",
+            "minimum_plan": "free",
         },
     ]
     return models
@@ -123,6 +139,32 @@ AVAILABLE_MODELS = _available_models()
 
 def _is_premium_model(model_id: str) -> bool:
     return is_premium_model_id(model_id)
+
+
+def _is_pro_only_premium_model(model_id: str | None) -> bool:
+    return is_pro_only_premium_model_id(model_id)
+
+
+def _model_unavailable_for_plan(model_id: str | None, plan: str | None) -> bool:
+    return plan != "pro" and _is_pro_only_premium_model(model_id)
+
+
+def _reject_model_unavailable_for_plan(
+    model_id: str | None,
+    user: dict[str, Any],
+) -> None:
+    plan = user.get("plan", "free")
+    if not _model_unavailable_for_plan(model_id, plan):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "model_requires_pro",
+            "plan": plan,
+            "model": model_id,
+            "message": "Claude Opus 4.8 and GPT-5.5 daily sessions require HF Pro.",
+        },
+    )
 
 
 def _is_user_billed(model_id: str) -> bool:
@@ -168,17 +210,19 @@ async def _enforce_premium_model_quota(
     ``claude_counted`` flag on ``AgentSession`` guards against re-counting the
     same session; the stored field name is kept for persistence compatibility.
 
-    Subsidizes the daily allowance (free = 2, pro = 20), organization-billed
-    through the HF Router. Past the allowance, premium router models flip the
-    session to ``premium_user_billed`` so the call bills the user's own HF
-    token instead of blocking. No-ops when the model isn't premium or when this
-    session's billing has already been decided.
+    Subsidizes the daily allowance (free = 2 for default premium, pro = 20
+    across premium models), organization-billed through the HF Router. Opus and
+    GPT-5.5 are pro-only before quota is charged. Past the allowance, premium
+    router models flip the session to ``premium_user_billed`` so the call bills
+    the user's own HF token instead of blocking. No-ops when the model isn't
+    premium or when this session's billing has already been decided.
     """
     if agent_session.claude_counted:
         return
     model_name = agent_session.session.config.model_name
     if not _is_premium_model(model_name):
         return
+    _reject_model_unavailable_for_plan(model_name, user)
     user_id = user["user_id"]
     plan = user.get("plan", "free")
     cap = user_quotas.daily_cap_for(plan)
@@ -463,6 +507,7 @@ async def create_session(
     valid_ids = {m["id"] for m in AVAILABLE_MODELS}
     if model and model not in valid_ids:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model}")
+    _reject_model_unavailable_for_plan(model, user)
 
     # Empty requests use the configured default, which may be premium.
     model = await _model_override_for_new_session(request, model)
@@ -508,6 +553,7 @@ async def restore_session_summary(
     valid_ids = {m["id"] for m in AVAILABLE_MODELS}
     if model and model not in valid_ids:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model}")
+    _reject_model_unavailable_for_plan(model, user)
 
     model = await _model_override_for_new_session(request, model)
 
@@ -579,6 +625,7 @@ async def set_session_model(
     valid_ids = {m["id"] for m in AVAILABLE_MODELS}
     if model_id not in valid_ids:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
+    _reject_model_unavailable_for_plan(model_id, user)
     if not agent_session:
         raise HTTPException(status_code=404, detail="Session not found")
     await session_manager.update_session_model(session_id, model_id)

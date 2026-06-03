@@ -33,10 +33,23 @@ def _premium_session(model: str = agent.DEFAULT_PREMIUM_MODEL_ID):
 
 def test_premium_model_predicate_uses_router_ids_only():
     assert agent._is_premium_model(agent.DEFAULT_PREMIUM_MODEL_ID)
+    assert agent._is_premium_model(agent.DEFAULT_OPUS_MODEL_ID)
     assert agent._is_premium_model(agent.DEFAULT_GPT_MODEL_ID)
+    assert not agent._is_pro_only_premium_model(agent.DEFAULT_PREMIUM_MODEL_ID)
+    assert agent._is_pro_only_premium_model(agent.DEFAULT_OPUS_MODEL_ID)
+    assert agent._is_pro_only_premium_model(agent.DEFAULT_GPT_MODEL_ID)
     assert agent._is_user_billed(agent.DEFAULT_PREMIUM_MODEL_ID)
     assert not agent._is_premium_model("moonshotai/Kimi-K2.6")
     assert not agent._is_premium_model("unsupported/model")
+
+
+def test_available_models_mark_opus_and_gpt_as_pro_only():
+    models = {model["id"]: model for model in agent.AVAILABLE_MODELS}
+
+    assert models[agent.DEFAULT_PREMIUM_MODEL_ID]["label"] == "Claude Sonnet 4.6"
+    assert models[agent.DEFAULT_PREMIUM_MODEL_ID]["minimum_plan"] == "free"
+    assert models[agent.DEFAULT_OPUS_MODEL_ID]["minimum_plan"] == "pro"
+    assert models[agent.DEFAULT_GPT_MODEL_ID]["minimum_plan"] == "pro"
 
 
 @pytest.mark.asyncio
@@ -79,13 +92,70 @@ async def test_switching_to_premium_model_is_allowed_for_authenticated_user(
 
     response = await agent.set_session_model(
         "s1",
-        {"model": agent.DEFAULT_GPT_MODEL_ID},
+        {"model": agent.DEFAULT_PREMIUM_MODEL_ID},
         request=None,
         user={"user_id": "u1", "plan": "free"},
     )
 
+    assert response == {"session_id": "s1", "model": agent.DEFAULT_PREMIUM_MODEL_ID}
+    assert updated == [("s1", agent.DEFAULT_PREMIUM_MODEL_ID)]
+
+
+@pytest.mark.asyncio
+async def test_switching_to_pro_only_premium_model_is_allowed_for_pro_user(
+    monkeypatch,
+):
+    updated = []
+
+    async def fake_check_session_access(session_id, user, request=None):
+        assert session_id == "s1"
+        assert user["user_id"] == "u1"
+        return SimpleNamespace(user_id="u1")
+
+    async def fake_update_session_model(session_id, model_id):
+        updated.append((session_id, model_id))
+
+    monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
+    monkeypatch.setattr(
+        agent.session_manager,
+        "update_session_model",
+        fake_update_session_model,
+    )
+
+    response = await agent.set_session_model(
+        "s1",
+        {"model": agent.DEFAULT_GPT_MODEL_ID},
+        request=None,
+        user={"user_id": "u1", "plan": "pro"},
+    )
+
     assert response == {"session_id": "s1", "model": agent.DEFAULT_GPT_MODEL_ID}
     assert updated == [("s1", agent.DEFAULT_GPT_MODEL_ID)]
+
+
+@pytest.mark.asyncio
+async def test_switching_to_pro_only_premium_model_is_rejected_for_free_user(
+    monkeypatch,
+):
+    async def fake_check_session_access(session_id, user, request=None):
+        return SimpleNamespace(user_id=user["user_id"])
+
+    async def fail_if_updated(session_id, model_id):
+        raise AssertionError("free users should not switch to pro-only models")
+
+    monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
+    monkeypatch.setattr(agent.session_manager, "update_session_model", fail_if_updated)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent.set_session_model(
+            "s1",
+            {"model": agent.DEFAULT_GPT_MODEL_ID},
+            request=None,
+            user={"user_id": "u1", "plan": "free"},
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail["error"] == "model_requires_pro"
 
 
 @pytest.mark.asyncio
@@ -178,6 +248,31 @@ async def test_free_model_does_not_consume_premium_quota(monkeypatch):
         agent_session,
     )
 
+    assert agent_session.claude_counted is False
+    assert await agent.user_quotas.get_claude_used_today("u1") == 0
+
+
+@pytest.mark.asyncio
+async def test_free_user_cannot_spend_quota_on_pro_only_premium_model(monkeypatch):
+    async def fail_if_persisted(_agent_session):
+        raise AssertionError("rejected model should not persist quota state")
+
+    monkeypatch.setattr(
+        agent.session_manager,
+        "persist_session_snapshot",
+        fail_if_persisted,
+    )
+
+    agent_session = _premium_session(agent.DEFAULT_OPUS_MODEL_ID)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent._enforce_premium_model_quota(
+            {"user_id": "u1", "plan": "free"},
+            agent_session,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail["error"] == "model_requires_pro"
     assert agent_session.claude_counted is False
     assert await agent.user_quotas.get_claude_used_today("u1") == 0
 

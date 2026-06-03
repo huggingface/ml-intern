@@ -13,7 +13,7 @@ Notes:
 - Vite proxies `/api` and `/auth` to `http://localhost:7860`.
 - If `127.0.0.1:7860` is already owned by another local process, binding the backend to `::1` lets the Vite proxy resolve `localhost` cleanly.
 - Prefer `npm ci` over `npm install` for setup, since `npm install` may rewrite `frontend/package-lock.json` metadata depending on npm version.
-- Production defaults to Claude Opus 4.8 through the HF Router (`anthropic/claude-opus-4.8:fal-ai`). Non-local LLM calls use `https://router.huggingface.co/v1` with Hugging Face tokens. Subsidized premium calls use the Space/operator `INFERENCE_TOKEN` plus `X-HF-Bill-To` from `HF_BILL_TO` (default `smolagents`); after the daily allowance, premium calls bill the user's own HF token. For local development, set `HF_TOKEN` and optionally `ML_INTERN_DEFAULT_MODEL_ID`.
+- Production defaults to Claude Sonnet 4.6 through the HF Router (`anthropic/claude-sonnet-4-6:fal-ai`). Non-local LLM calls use `https://router.huggingface.co/v1` with Hugging Face tokens. Subsidized premium calls use the Space/operator `INFERENCE_TOKEN` plus `X-HF-Bill-To` from `HF_BILL_TO` (default `smolagents`); Opus and GPT-5.5 daily sessions are Pro-only, and after the daily allowance, premium calls bill the user's own HF token. For local development, set `HF_TOKEN` and optionally `ML_INTERN_DEFAULT_MODEL_ID`.
 
 ## Development Checks
 

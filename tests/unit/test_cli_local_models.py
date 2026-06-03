@@ -30,9 +30,10 @@ def test_openai_compat_prefix_is_not_supported():
     assert not model_switcher.is_valid_model_id("openai-compat/custom-model")
 
 
-def test_suggested_models_include_router_opus48_and_no_native_ids():
+def test_suggested_models_include_router_claude_models_and_no_native_ids():
     ids = {m["id"] for m in model_switcher.SUGGESTED_MODELS}
 
+    assert "anthropic/claude-sonnet-4-6:fal-ai" in ids
     assert "anthropic/claude-opus-4.8:fal-ai" in ids
     assert all(model_id.count("/") >= 1 for model_id in ids)
 
