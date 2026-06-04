@@ -19,7 +19,8 @@ def test_available_models_exclude_sonnet_and_have_no_pro_gate():
 
     assert models[agent.DEFAULT_OPUS_MODEL_ID]["label"] == "Claude Opus 4.8"
     assert models[agent.DEFAULT_GPT_MODEL_ID]["minimum_plan"] == "free"
-    assert models[agent.DEFAULT_FREE_MODEL_ID]["recommended"] is True
+    assert models[agent.DEFAULT_OPUS_MODEL_ID]["recommended"] is True
+    assert "recommended" not in models[agent.DEFAULT_FREE_MODEL_ID]
     assert {model["minimum_plan"] for model in models.values()} == {"free"}
 
 

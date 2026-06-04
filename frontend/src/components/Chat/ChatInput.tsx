@@ -52,6 +52,7 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
     description: 'Hugging Face',
     modelPath: CLAUDE_OPUS_48_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(CLAUDE_OPUS_48_MODEL_PATH),
+    recommended: true,
   },
   {
     id: 'gpt-5.5',
@@ -66,7 +67,6 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
     description: 'Hugging Face',
     modelPath: KIMI_K26_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(KIMI_K26_MODEL_PATH),
-    recommended: true,
   },
   {
     id: 'minimax-m2.7',

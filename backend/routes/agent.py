@@ -80,6 +80,7 @@ def _available_models() -> list[dict[str, Any]]:
             "provider": "huggingface",
             "tier": "pro",
             "minimum_plan": "free",
+            "recommended": True,
         },
         {
             "id": DEFAULT_GPT_MODEL_ID,
@@ -94,7 +95,6 @@ def _available_models() -> list[dict[str, Any]]:
             "provider": "huggingface",
             "tier": "free",
             "minimum_plan": "free",
-            "recommended": True,
         },
         {
             "id": MINIMAX_M27_MODEL_ID,
