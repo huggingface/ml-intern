@@ -51,6 +51,7 @@ from session_manager import (
 
 from agent.core.hf_access import get_jobs_access
 from agent.core.hf_tokens import resolve_hf_request_token
+from agent.core.local_models import local_model_provider
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import (
     CLAUDE_OPUS_48_MODEL_ID,
@@ -59,6 +60,7 @@ from agent.core.model_ids import (
     GPT_55_MODEL_ID,
     KIMI_K26_MODEL_ID,
     MINIMAX_M27_MODEL_ID,
+    strip_huggingface_model_prefix,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,6 +144,11 @@ def _user_hf_token(user: dict[str, Any] | None) -> str | None:
     if not isinstance(user, dict):
         return None
     return user.get(INTERNAL_HF_TOKEN_KEY)
+
+
+def _model_requires_hf_router_token(model_id: str | None) -> bool:
+    normalized = strip_huggingface_model_prefix(model_id) or model_id or ""
+    return local_model_provider(normalized) is None
 
 
 def _reject_oversize_dataset_upload(request: Request) -> None:
@@ -241,7 +248,7 @@ async def health_check() -> HealthResponse:
 
 
 @router.get("/health/llm", response_model=LLMHealthResponse)
-async def llm_health_check() -> LLMHealthResponse:
+async def llm_health_check(request: Request) -> LLMHealthResponse:
     """Check if the LLM provider is reachable and the API key is valid.
 
     Makes a minimal 1-token completion call.  Catches common errors:
@@ -251,8 +258,16 @@ async def llm_health_check() -> LLMHealthResponse:
     - timeout / network → provider unreachable
     """
     model = session_manager.config.model_name
+    hf_token = resolve_hf_request_token(request)
+    if _model_requires_hf_router_token(model) and not hf_token:
+        return LLMHealthResponse(status="skipped", model=model)
+
     try:
-        llm_params = _resolve_llm_params(model, reasoning_effort="high")
+        llm_params = _resolve_llm_params(
+            model,
+            hf_token,
+            reasoning_effort="high",
+        )
         await acompletion(
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=1,

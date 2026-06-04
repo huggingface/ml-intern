@@ -148,7 +148,7 @@ class HealthResponse(BaseModel):
 class LLMHealthResponse(BaseModel):
     """LLM provider health check response."""
 
-    status: str  # "ok" | "error"
+    status: str  # "ok" | "error" | "skipped"
     model: str
     error: str | None = None
     error_type: str | None = (

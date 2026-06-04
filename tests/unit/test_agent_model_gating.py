@@ -33,6 +33,75 @@ def test_default_model_for_user_is_plan_aware():
 
 
 @pytest.mark.asyncio
+async def test_llm_health_uses_request_hf_token(monkeypatch):
+    class Request:
+        headers = {"Authorization": "Bearer user-token"}
+        cookies = {}
+
+    resolved = []
+    completions = []
+
+    def fake_resolve_llm_params(
+        model_name,
+        session_hf_token=None,
+        reasoning_effort=None,
+        strict=False,
+    ):
+        resolved.append((model_name, session_hf_token, reasoning_effort, strict))
+        return {
+            "model": f"openai/{model_name}",
+            "api_base": "https://router.huggingface.co/v1",
+            "api_key": session_hf_token,
+        }
+
+    async def fake_acompletion(**kwargs):
+        completions.append(kwargs)
+
+    monkeypatch.setattr(
+        agent.session_manager,
+        "config",
+        SimpleNamespace(model_name=agent.DEFAULT_FREE_MODEL_ID),
+    )
+    monkeypatch.setattr(agent, "_resolve_llm_params", fake_resolve_llm_params)
+    monkeypatch.setattr(agent, "acompletion", fake_acompletion)
+
+    response = await agent.llm_health_check(Request())
+
+    assert response.status == "ok"
+    assert resolved == [(agent.DEFAULT_FREE_MODEL_ID, "user-token", "high", False)]
+    assert completions[0]["api_key"] == "user-token"
+
+
+@pytest.mark.asyncio
+async def test_llm_health_skips_router_probe_without_token(monkeypatch):
+    class Request:
+        headers = {}
+        cookies = {}
+
+    def fail_resolve_llm_params(*args, **kwargs):
+        raise AssertionError(
+            "health check should not resolve router params without token"
+        )
+
+    async def fail_acompletion(**kwargs):
+        raise AssertionError("health check should not call LiteLLM without token")
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(
+        agent.session_manager,
+        "config",
+        SimpleNamespace(model_name=agent.DEFAULT_FREE_MODEL_ID),
+    )
+    monkeypatch.setattr(agent, "_resolve_llm_params", fail_resolve_llm_params)
+    monkeypatch.setattr(agent, "acompletion", fail_acompletion)
+
+    response = await agent.llm_health_check(Request())
+
+    assert response.status == "skipped"
+    assert response.model == agent.DEFAULT_FREE_MODEL_ID
+
+
+@pytest.mark.asyncio
 async def test_empty_session_model_uses_plan_default():
     assert (
         await agent._model_override_for_new_session(None, {"plan": "pro"})
