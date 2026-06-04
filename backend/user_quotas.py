@@ -25,7 +25,7 @@ from agent.core.session_persistence import (
     _reset_store_for_tests,
 )
 
-PRO_DAILY_SESSIONS: int = int(os.environ.get("PRO_DAILY_SESSIONS", "20"))
+PRO_DAILY_SESSIONS: int = int(os.environ.get("PRO_DAILY_SESSIONS", "5"))
 
 # user_id -> (day_utc_iso, count_for_that_day)
 _paid_counts: dict[str, tuple[str, int]] = {}

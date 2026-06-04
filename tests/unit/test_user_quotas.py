@@ -128,11 +128,11 @@ async def test_refund_on_stale_day_resets_rather_than_underflow():
 
 
 @pytest.mark.asyncio
-async def test_pro_user_cap_reached_at_twenty():
+async def test_pro_user_cap_reached_at_default_daily_sessions():
     cap = user_quotas.daily_cap_for("pro")
-    assert cap == 20
-    for i in range(1, 21):
+    assert cap == 5
+    for i in range(1, cap + 1):
         assert await user_quotas.increment_paid("pro_user") == i
-    # 21st would exceed — the gate in routes/agent.py enforces this; here
+    # Next session would exceed — the gate in routes/agent.py enforces this; here
     # we just confirm the counter tracks past the cap so that check works.
-    assert await user_quotas.increment_paid("pro_user") == 21
+    assert await user_quotas.increment_paid("pro_user") == cap + 1

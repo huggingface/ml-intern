@@ -70,7 +70,7 @@ model prefixes).
 
 In the web app, non-Pro users default to Kimi K2.6. HF Pro users default to
 Claude Opus 4.8 and get `PRO_DAILY_SESSIONS` included paid-tier sessions per
-UTC day. Anyone can choose the paid tier, and usage outside the included Pro
+UTC day (default: 5). Anyone can choose the paid tier, and usage outside the included Pro
 allowance is billed to their Hugging Face account.
 
 #### Local models
