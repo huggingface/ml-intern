@@ -40,7 +40,6 @@ interface ModelOption {
   modelPath: string;
   avatarUrl: string;
   recommended?: boolean;
-  minimumPlan?: 'free' | 'pro';
 }
 
 const getHfAvatarUrl = (modelId: string) => {
@@ -131,7 +130,6 @@ const modelOptionFromApi = (model: {
   label?: string;
   provider?: string;
   recommended?: boolean;
-  minimum_plan?: string;
 }): ModelOption | null => {
   if (!model.id) return null;
   return {
@@ -141,7 +139,6 @@ const modelOptionFromApi = (model: {
     modelPath: model.id,
     avatarUrl: getHfAvatarUrl(model.id.replace(/^huggingface\//, '')),
     recommended: Boolean(model.recommended),
-    minimumPlan: model.minimum_plan === 'pro' ? 'pro' : 'free',
   };
 };
 
