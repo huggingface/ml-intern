@@ -48,22 +48,6 @@ def test_hf_router_drops_unsupported_effort_in_non_strict_mode(monkeypatch):
     assert "extra_body" not in params
 
 
-def test_bill_to_user_flag_is_accepted_but_does_not_change_router_params():
-    params = _resolve_llm_params(
-        "anthropic/claude-opus-4.8:fal-ai",
-        "session-token",
-        reasoning_effort="high",
-        strict=True,
-        bill_to_user=True,
-    )
-
-    assert params["model"] == "openai/anthropic/claude-opus-4.8:fal-ai"
-    assert params["api_base"] == HF_ROUTER_BASE_URL
-    assert params["api_key"] == "session-token"
-    assert "extra_headers" not in params
-    assert params["extra_body"] == {"reasoning_effort": "high"}
-
-
 def test_router_params_fall_back_to_hf_cache_when_session_token_missing(monkeypatch):
     import huggingface_hub
 
@@ -73,7 +57,6 @@ def test_router_params_fall_back_to_hf_cache_when_session_token_missing(monkeypa
     params = _resolve_llm_params(
         "anthropic/claude-opus-4.8:fal-ai",
         None,
-        bill_to_user=True,
     )
 
     assert params["api_key"] == "cached-token"
@@ -81,9 +64,7 @@ def test_router_params_fall_back_to_hf_cache_when_session_token_missing(monkeypa
 
 
 def test_router_params_never_set_bill_to_headers():
-    params = _resolve_llm_params(
-        "moonshotai/Kimi-K2.6", "session-token", bill_to_user=True
-    )
+    params = _resolve_llm_params("moonshotai/Kimi-K2.6", "session-token")
 
     assert params["api_key"] == "session-token"
     assert "extra_headers" not in params

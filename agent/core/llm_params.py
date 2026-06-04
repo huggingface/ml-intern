@@ -92,7 +92,6 @@ def _resolve_llm_params(
     session_hf_token: str | None = None,
     reasoning_effort: str | None = None,
     strict: bool = False,
-    bill_to_user: bool = False,
 ) -> dict:
     """
     Build LiteLLM kwargs for a given model id.
@@ -121,9 +120,6 @@ def _resolve_llm_params(
       1. session.hf_token — the user's own token (CLI / OAuth / cache file).
       2. huggingface_hub cache — ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` /
          local ``hf auth login`` cache.
-
-    ``bill_to_user`` is accepted for older callers but no longer changes
-    behavior: all hosted inference is user-billed.
     """
     normalized_model = strip_huggingface_model_prefix(model_name) or model_name
 
