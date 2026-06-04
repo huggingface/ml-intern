@@ -251,7 +251,9 @@ async def health_check() -> HealthResponse:
 async def llm_health_check(request: Request) -> LLMHealthResponse:
     """Check if the LLM provider is reachable and the API key is valid.
 
-    Makes a minimal 1-token completion call.  Catches common errors:
+    Makes a minimal 1-token completion call when a token is available. For
+    token-less HF Router requests, returns ``status="skipped"`` instead of
+    making an unauthenticated probe. Catches common errors:
     - 401 → invalid API key
     - 402/insufficient_quota → out of credits
     - 429 → rate limited
