@@ -643,18 +643,6 @@ async def set_session_yolo(
     return {"session_id": session_id, **summary}
 
 
-@router.get("/user/quota")
-async def get_user_quota(user: dict = Depends(get_current_user)) -> dict:
-    """Compatibility response for old clients that still ask for quota state."""
-    plan = user.get("plan", "free")
-    return {
-        "plan": plan,
-        "premium_used_today": 0,
-        "premium_daily_cap": 0,
-        "premium_remaining": 0,
-    }
-
-
 @router.get("/user/jobs-access")
 async def get_jobs_access_info(
     request: Request, user: dict = Depends(get_current_user)

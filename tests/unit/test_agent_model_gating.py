@@ -169,15 +169,3 @@ async def test_restore_summary_uses_default_model_without_quota_gate(monkeypatch
         ("check", "s1", False),
         ("seed", "s1"),
     ]
-
-
-@pytest.mark.asyncio
-async def test_user_quota_response_is_compatibility_only():
-    response = await agent.get_user_quota({"user_id": "u1", "plan": "pro"})
-
-    assert response == {
-        "plan": "pro",
-        "premium_used_today": 0,
-        "premium_daily_cap": 0,
-        "premium_remaining": 0,
-    }
