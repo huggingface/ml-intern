@@ -78,38 +78,32 @@ def _available_models() -> list[dict[str, Any]]:
             "id": DEFAULT_OPUS_MODEL_ID,
             "label": "Claude Opus 4.8",
             "provider": "huggingface",
-            "tier": "pro",
             "recommended": True,
         },
         {
             "id": DEFAULT_GPT_MODEL_ID,
             "label": "GPT-5.5",
             "provider": "huggingface",
-            "tier": "pro",
         },
         {
             "id": DEFAULT_FREE_MODEL_ID,
             "label": "Kimi K2.6",
             "provider": "huggingface",
-            "tier": "free",
         },
         {
             "id": MINIMAX_M27_MODEL_ID,
             "label": "MiniMax M2.7",
             "provider": "huggingface",
-            "tier": "free",
         },
         {
             "id": GLM_51_MODEL_ID,
             "label": "GLM 5.1",
             "provider": "huggingface",
-            "tier": "free",
         },
         {
             "id": DEEPSEEK_V4_PRO_MODEL_ID,
             "label": "DeepSeek V4 Pro",
             "provider": "huggingface",
-            "tier": "free",
         },
     ]
     return models

@@ -21,6 +21,7 @@ def test_available_models_exclude_sonnet_and_have_no_pro_gate():
     assert models[agent.DEFAULT_OPUS_MODEL_ID]["recommended"] is True
     assert "recommended" not in models[agent.DEFAULT_FREE_MODEL_ID]
     assert all("minimum_plan" not in model for model in models.values())
+    assert all("tier" not in model for model in models.values())
 
 
 def test_default_model_for_user_is_plan_aware():
