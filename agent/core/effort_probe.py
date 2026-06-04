@@ -188,7 +188,6 @@ async def probe_effort(
                 hf_token,
                 reasoning_effort=effort,
                 strict=True,
-                bill_to_user=getattr(session, "premium_user_billed", False),
             )
         except UnsupportedEffortError:
             # Provider can't even accept this effort name (e.g. "max" on

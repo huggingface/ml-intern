@@ -16,7 +16,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent / "backend"
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from agent.core.model_ids import DEFAULT_MODEL_ID, KIMI_K26_MODEL_ID  # noqa: E402
+from agent.core.model_ids import KIMI_K26_MODEL_ID  # noqa: E402
 from agent.core.session_persistence import NoopSessionStore  # noqa: E402
 from session_manager import AgentSession, SessionManager  # noqa: E402
 
@@ -128,32 +128,10 @@ def _runtime_agent_session(
     )
 
 
-def test_unknown_saved_model_defaults_to_claude():
-    model, premium_user_billed, claude_counted = (
-        SessionManager._model_from_saved_metadata(
-            "unsupported/model",
-            premium_user_billed=False,
-            claude_counted=False,
-        )
-    )
-
-    assert model == DEFAULT_MODEL_ID
-    assert premium_user_billed is False
-    assert claude_counted is False
-
-
-def test_unknown_saved_user_billed_model_defaults_to_free_model():
-    model, premium_user_billed, claude_counted = (
-        SessionManager._model_from_saved_metadata(
-            "unsupported/model",
-            premium_user_billed=True,
-            claude_counted=True,
-        )
-    )
+def test_unknown_saved_model_defaults_to_kimi():
+    model = SessionManager._model_from_saved_metadata("unsupported/model")
 
     assert model == KIMI_K26_MODEL_ID
-    assert premium_user_billed is False
-    assert claude_counted is False
 
 
 @pytest.mark.asyncio
@@ -755,9 +733,6 @@ async def test_list_sessions_dev_uses_store_dev_visibility():
                         "user_id": "alice",
                         "model": "m",
                         "created_at": datetime.now(UTC),
-                        "premium_user_billed": True,
-                        "claude_counted": True,
-                        "claude_counted_day": datetime.now(UTC).date().isoformat(),
                         "auto_approval_enabled": True,
                         "auto_approval_cost_cap_usd": 5.0,
                         "auto_approval_estimated_spend_usd": 2.0,
@@ -779,52 +754,9 @@ async def test_list_sessions_dev_uses_store_dev_visibility():
     assert store.seen_user_id == "dev"
     assert {session["session_id"] for session in sessions} == {"s1", "s2"}
     yolo = next(session for session in sessions if session["session_id"] == "s1")
-    assert yolo["premium_user_billed"] is True
-    assert yolo["premium_quota_counted"] is True
     assert yolo["auto_approval"] == {
         "enabled": True,
         "cost_cap_usd": 5.0,
         "estimated_spend_usd": 2.0,
         "remaining_usd": 3.0,
     }
-
-
-def test_get_session_info_marks_stale_premium_quota_as_unused_today():
-    manager = _manager_with_store(NoopSessionStore())
-    agent_session = _runtime_agent_session("s1", user_id="alice")
-    agent_session.claude_counted = True
-    agent_session.claude_counted_day = "2000-01-01"
-    agent_session.session.premium_user_billed = True
-    manager.sessions["s1"] = agent_session
-
-    info = manager.get_session_info("s1")
-
-    assert info is not None
-    assert info["premium_user_billed"] is False
-    assert info["premium_quota_counted"] is False
-
-
-@pytest.mark.asyncio
-async def test_list_sessions_marks_stale_premium_quota_as_unused_today():
-    class ListStore(NoopSessionStore):
-        enabled = True
-
-        async def list_sessions(self, user_id: str, **_: Any) -> list[dict[str, Any]]:
-            return [
-                {
-                    "session_id": "s1",
-                    "user_id": user_id,
-                    "model": "m",
-                    "created_at": datetime.now(UTC),
-                    "premium_user_billed": True,
-                    "claude_counted": True,
-                    "claude_counted_day": "2000-01-01",
-                }
-            ]
-
-    manager = _manager_with_store(ListStore())
-
-    sessions = await manager.list_sessions(user_id="alice")
-
-    assert sessions[0]["premium_user_billed"] is False
-    assert sessions[0]["premium_quota_counted"] is False

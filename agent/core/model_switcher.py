@@ -28,7 +28,6 @@ from agent.core.local_models import (
 )
 from agent.core.model_ids import (
     CLAUDE_OPUS_48_MODEL_ID,
-    CLAUDE_SONNET_46_MODEL_ID,
     GPT_55_MODEL_ID,
     KIMI_K26_MODEL_ID,
     strip_huggingface_model_prefix,
@@ -40,7 +39,6 @@ from agent.core.model_ids import (
 # ":cheapest", ":preferred", or ":<provider>" to override the default routing
 # policy (auto = fastest with failover).
 SUGGESTED_MODELS = [
-    {"id": CLAUDE_SONNET_46_MODEL_ID, "label": "Claude Sonnet 4.6"},
     {"id": CLAUDE_OPUS_48_MODEL_ID, "label": "Claude Opus 4.8"},
     {"id": GPT_55_MODEL_ID, "label": "GPT-5.5"},
     {"id": "MiniMaxAI/MiniMax-M2.7", "label": "MiniMax M2.7"},

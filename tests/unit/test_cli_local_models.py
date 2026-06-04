@@ -1,7 +1,9 @@
 import pytest
 
+from agent.config import load_config
 from agent.core import model_switcher
 from agent.core.local_models import is_local_model_id
+from agent.main import CLI_CONFIG_PATH
 
 
 def test_local_model_helper_accepts_supported_prefixes():
@@ -33,9 +35,14 @@ def test_openai_compat_prefix_is_not_supported():
 def test_suggested_models_include_router_claude_models_and_no_native_ids():
     ids = {m["id"] for m in model_switcher.SUGGESTED_MODELS}
 
-    assert "anthropic/claude-sonnet-4-6:fal-ai" in ids
     assert "anthropic/claude-opus-4.8:fal-ai" in ids
     assert all(model_id.count("/") >= 1 for model_id in ids)
+
+
+def test_cli_default_model_is_opus():
+    config = load_config(CLI_CONFIG_PATH)
+
+    assert config.model_name == "anthropic/claude-opus-4.8:fal-ai"
 
 
 def test_model_switcher_accepts_router_model_ids():

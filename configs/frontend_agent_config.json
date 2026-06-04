@@ -1,5 +1,5 @@
 {
-  "model_name": "${ML_INTERN_DEFAULT_MODEL_ID:-anthropic/claude-sonnet-4-6:fal-ai}",
+  "model_name": "${ML_INTERN_DEFAULT_MODEL_ID:-moonshotai/Kimi-K2.6}",
   "save_sessions": true,
   "session_dataset_repo": "smolagents/ml-intern-sessions",
   "share_traces": true,

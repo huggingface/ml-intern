@@ -82,7 +82,6 @@ async def test_live_default_router_model_does_not_replay_reasoning_metadata():
         DEFAULT_MODEL_ID,
         os.environ["HF_TOKEN"],
         reasoning_effort="low",
-        bill_to_user=True,
     )
 
     result = await _call_llm_streaming(

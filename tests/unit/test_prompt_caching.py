@@ -6,7 +6,7 @@ from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_cach
 
 def _anthropic_fal_params() -> dict:
     return {
-        "model": "openai/anthropic/claude-sonnet-4-6:fal-ai",
+        "model": "openai/anthropic/claude-opus-4.8:fal-ai",
         "api_base": HF_ROUTER_BASE_URL,
     }
 
@@ -167,7 +167,7 @@ def test_prompt_caching_is_noop_for_non_router_fal_model():
         {"role": "user", "content": "current question"},
     ]
     llm_params = {
-        "model": "openai/anthropic/claude-sonnet-4-6:fal-ai",
+        "model": "openai/anthropic/claude-opus-4.8:fal-ai",
         "api_base": "http://localhost:8000/v1",
     }
 

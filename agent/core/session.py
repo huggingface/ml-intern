@@ -119,11 +119,6 @@ class Session:
         self.session_id = session_id or str(uuid.uuid4())
         self.config = config
         self.is_running = True
-        # Billing mode for premium HF Router usage. The backend quota gate
-        # flips this on once the user is past their subsidized daily allowance,
-        # so the LLM call bills the user's own HF token instead of the Space.
-        # Persisted with the session so it survives idle-reclaim.
-        self.premium_user_billed: bool = False
         self.current_plan: list[dict[str, str]] = []
         self._cancelled = asyncio.Event()
         self.pending_approval: Optional[dict[str, Any]] = None

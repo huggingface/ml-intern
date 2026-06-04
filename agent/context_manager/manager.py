@@ -92,7 +92,7 @@ class CompactionFailedError(Exception):
     Typically means an individual preserved message (system, first user, or
     untouched tail) exceeds what truncation can fix in one pass. The caller
     must terminate the session; retrying produces an infinite loop that burns
-    premium inference budget.
+    hosted inference budget.
     """
 
 
@@ -133,7 +133,7 @@ async def summarize_messages(
     ``session`` is optional; when provided, the call is recorded via
     ``telemetry.record_llm_call`` so its cost lands in the session's
     ``total_cost_usd``. Without it, the call still happens but is
-    invisible in telemetry, which used to hide a significant share of premium
+    invisible in telemetry, which used to hide a significant share of hosted
     inference spend.
 
     Returns ``(summary_text, completion_tokens)``.
@@ -145,7 +145,6 @@ async def summarize_messages(
         model_name,
         hf_token,
         reasoning_effort="high",
-        bill_to_user=getattr(session, "premium_user_billed", False),
     )
     llm_params = with_prompt_cache_params(
         llm_params, session_id=getattr(session, "session_id", None)
@@ -527,7 +526,7 @@ class ContextManager:
         a giant tool output stuck in the untouched tail) is too large for
         truncation to fix. The caller must terminate the session — retrying
         is what caused the 2026-05-03 infinite-compaction-loop pattern that
-        burned premium inference budget invisibly.
+        burned hosted inference budget invisibly.
         """
         if not self.needs_compaction:
             return
@@ -617,7 +616,7 @@ class ContextManager:
 
         # Hard verify: if compaction didn't bring us below the threshold even
         # after truncating oversized preserved messages, retrying just burns
-        # premium inference budget on the same useless compaction call. Raise so the
+        # hosted inference budget on the same useless compaction call. Raise so the
         # caller can terminate the session cleanly. Pre-2026-05-04, the
         # caller looped indefinitely (~$3/Opus retry) until the pod was
         # killed — invisible to the dataset because the session never

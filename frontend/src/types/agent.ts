@@ -33,8 +33,6 @@ export interface SessionMeta {
   autoApprovalCostCapUsd?: number | null;
   autoApprovalEstimatedSpendUsd?: number;
   autoApprovalRemainingUsd?: number | null;
-  premiumUserBilled?: boolean;
-  premiumQuotaCounted?: boolean;
 }
 
 export interface ToolApproval {
@@ -49,4 +47,5 @@ export interface User {
   username?: string;
   name?: string;
   picture?: string;
+  plan?: 'free' | 'pro';
 }

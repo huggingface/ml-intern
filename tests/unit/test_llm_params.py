@@ -9,22 +9,18 @@ from agent.core.llm_params import (
 from agent.core.model_ids import HF_ROUTER_BASE_URL
 
 
-def test_hf_router_params_for_default_premium_model(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
+def test_hf_router_params_for_default_model_uses_session_token():
     params = _resolve_llm_params(
-        "anthropic/claude-sonnet-4-6:fal-ai",
+        "anthropic/claude-opus-4.8:fal-ai",
         "session-token",
         reasoning_effort="high",
         strict=True,
     )
 
     assert params == {
-        "model": "openai/anthropic/claude-sonnet-4-6:fal-ai",
+        "model": "openai/anthropic/claude-opus-4.8:fal-ai",
         "api_base": HF_ROUTER_BASE_URL,
-        "api_key": "inference-token",
-        "extra_headers": {"X-HF-Bill-To": "smolagents"},
+        "api_key": "session-token",
         "extra_body": {"reasoning_effort": "high"},
     }
 
@@ -52,57 +48,29 @@ def test_hf_router_drops_unsupported_effort_in_non_strict_mode(monkeypatch):
     assert "extra_body" not in params
 
 
-def test_user_billed_premium_uses_session_token_without_bill_to(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
-
-    params = _resolve_llm_params(
-        "anthropic/claude-opus-4.8:fal-ai",
-        "session-token",
-        reasoning_effort="high",
-        strict=True,
-        bill_to_user=True,
-    )
-
-    assert params["model"] == "openai/anthropic/claude-opus-4.8:fal-ai"
-    assert params["api_base"] == HF_ROUTER_BASE_URL
-    assert params["api_key"] == "session-token"
-    assert "extra_headers" not in params
-    assert params["extra_body"] == {"reasoning_effort": "high"}
-
-
-def test_user_billed_premium_does_not_fall_back_to_cached_token(monkeypatch):
+def test_router_params_fall_back_to_hf_cache_when_session_token_missing(monkeypatch):
     import huggingface_hub
 
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
     monkeypatch.setenv("HF_TOKEN", "server-token")
     monkeypatch.setattr(huggingface_hub, "get_token", lambda: "cached-token")
 
     params = _resolve_llm_params(
         "anthropic/claude-opus-4.8:fal-ai",
         None,
-        bill_to_user=True,
     )
 
-    assert params["api_key"] is None
+    assert params["api_key"] == "cached-token"
     assert "extra_headers" not in params
 
 
-def test_bill_to_user_ignored_for_free_models(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "smolagents")
+def test_router_params_never_set_bill_to_headers():
+    params = _resolve_llm_params("moonshotai/Kimi-K2.6", "session-token")
 
-    params = _resolve_llm_params(
-        "moonshotai/Kimi-K2.6", "session-token", bill_to_user=True
-    )
-
-    assert params["api_key"] == "inference-token"
-    assert params["extra_headers"] == {"X-HF-Bill-To": "smolagents"}
+    assert params["api_key"] == "session-token"
+    assert "extra_headers" not in params
 
 
-def test_huggingface_prefix_is_stripped_for_router_calls(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-
+def test_huggingface_prefix_is_stripped_for_router_calls():
     params = _resolve_llm_params("huggingface/openai/gpt-5.5:fal-ai")
 
     assert params["model"] == "openai/openai/gpt-5.5:fal-ai"
@@ -196,22 +164,13 @@ def test_empty_local_model_id_is_not_treated_as_hf_router():
         _resolve_llm_params("ollama/")
 
 
-def test_hf_router_token_prefers_inference_token(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", " inference-token ")
-    monkeypatch.setenv("HF_TOKEN", "hf-token")
-
-    assert _resolve_hf_router_token("session-token") == "inference-token"
-
-
 def test_hf_router_token_prefers_session_over_hf_cache(monkeypatch):
-    monkeypatch.delenv("INFERENCE_TOKEN", raising=False)
     monkeypatch.setenv("HF_TOKEN", "hf-token")
 
     assert _resolve_hf_router_token(" session-token ") == "session-token"
 
 
 def test_hf_router_token_uses_hf_token_env_via_huggingface_hub(monkeypatch):
-    monkeypatch.delenv("INFERENCE_TOKEN", raising=False)
     monkeypatch.setenv("HF_TOKEN", " hf-token ")
 
     assert _resolve_hf_router_token(None) == "hf-token"
@@ -220,7 +179,6 @@ def test_hf_router_token_uses_hf_token_env_via_huggingface_hub(monkeypatch):
 def test_hf_router_token_uses_huggingface_hub_cache(monkeypatch):
     import huggingface_hub
 
-    monkeypatch.delenv("INFERENCE_TOKEN", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr(huggingface_hub, "get_token", lambda: "cached-token")
 
@@ -233,21 +191,22 @@ def test_hf_router_token_swallows_huggingface_hub_errors(monkeypatch):
     def fail():
         raise RuntimeError("cache unavailable")
 
-    monkeypatch.delenv("INFERENCE_TOKEN", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr(huggingface_hub, "get_token", fail)
 
     assert _resolve_hf_router_token(None) is None
 
 
-def test_hf_router_params_set_bill_to_only_for_inference_token(monkeypatch):
-    monkeypatch.setenv("INFERENCE_TOKEN", "inference-token")
-    monkeypatch.setenv("HF_BILL_TO", "test-org")
+def test_hf_router_params_allow_missing_token_without_headers(monkeypatch):
+    import huggingface_hub
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(huggingface_hub, "get_token", lambda: None)
 
     params = _resolve_llm_params("moonshotai/Kimi-K2.6")
 
-    assert params["api_key"] == "inference-token"
-    assert params["extra_headers"] == {"X-HF-Bill-To": "test-org"}
+    assert params["api_key"] is None
+    assert "extra_headers" not in params
 
 
 def test_hf_request_token_keeps_browser_user_precedence(monkeypatch):

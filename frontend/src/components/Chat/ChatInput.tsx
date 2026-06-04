@@ -20,28 +20,23 @@ import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
 import StopIcon from '@mui/icons-material/Stop';
 import AddIcon from '@mui/icons-material/Add';
 import { apiFetch, apiUpload } from '@/utils/api';
-import type { PlanTier, UserQuota } from '@/hooks/useUserQuota';
 import JobsUpgradeDialog from '@/components/JobsUpgradeDialog';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import {
-  CLAUDE_MODEL_PATH,
   CLAUDE_OPUS_48_MODEL_PATH,
   GPT_55_MODEL_PATH,
+  KIMI_K26_MODEL_PATH,
   isClaudePath,
-  isPremiumPath,
-  isProOnlyPath,
 } from '@/utils/model';
 
 // Model configuration
 interface ModelOption {
   id: string;
   name: string;
-  description: string;
   modelPath: string;
   avatarUrl: string;
   recommended?: boolean;
-  minimumPlan?: 'free' | 'pro';
 }
 
 const getHfAvatarUrl = (modelId: string) => {
@@ -51,65 +46,51 @@ const getHfAvatarUrl = (modelId: string) => {
 
 const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   {
-    id: 'claude-sonnet-4-6',
-    name: 'Claude Sonnet 4.6',
-    description: 'Hugging Face',
-    modelPath: CLAUDE_MODEL_PATH,
-    avatarUrl: getHfAvatarUrl(CLAUDE_MODEL_PATH),
-    recommended: true,
-  },
-  {
     id: 'claude-opus-4-8',
     name: 'Claude Opus 4.8',
-    description: 'Hugging Face',
     modelPath: CLAUDE_OPUS_48_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(CLAUDE_OPUS_48_MODEL_PATH),
-    minimumPlan: 'pro',
+    recommended: true,
   },
   {
     id: 'gpt-5.5',
     name: 'GPT-5.5',
-    description: 'Hugging Face',
     modelPath: GPT_55_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(GPT_55_MODEL_PATH),
-    minimumPlan: 'pro',
   },
   {
     id: 'kimi-k2.6',
     name: 'Kimi K2.6',
-    description: 'Hugging Face',
-    modelPath: 'moonshotai/Kimi-K2.6',
-    avatarUrl: getHfAvatarUrl('moonshotai/Kimi-K2.6'),
+    modelPath: KIMI_K26_MODEL_PATH,
+    avatarUrl: getHfAvatarUrl(KIMI_K26_MODEL_PATH),
   },
   {
     id: 'minimax-m2.7',
     name: 'MiniMax M2.7',
-    description: 'Hugging Face',
     modelPath: 'MiniMaxAI/MiniMax-M2.7',
     avatarUrl: getHfAvatarUrl('MiniMaxAI/MiniMax-M2.7'),
   },
   {
     id: 'glm-5.1',
     name: 'GLM 5.1',
-    description: 'Hugging Face',
     modelPath: 'zai-org/GLM-5.1',
     avatarUrl: getHfAvatarUrl('zai-org/GLM-5.1'),
   },
   {
     id: 'deepseek-v4-pro',
     name: 'DeepSeek V4 Pro',
-    description: 'Hugging Face',
     modelPath: 'deepseek-ai/DeepSeek-V4-Pro:deepinfra',
     avatarUrl: getHfAvatarUrl('deepseek-ai/DeepSeek-V4-Pro'),
   },
 ];
+
+const DEFAULT_FREE_MODEL_OPTION_ID = 'kimi-k2.6';
 
 const normalizeModelPath = (path: string | undefined) => (
   (path ?? '')
     .toLowerCase()
     .replace(/^huggingface\//, '')
     .replace(/claude-opus-4\.(\d)/g, 'claude-opus-4-$1')
-    .replace(/claude-sonnet-4\.(\d)/g, 'claude-sonnet-4-$1')
 );
 
 const findModelByPath = (path: string, options: ModelOption[]): ModelOption | undefined => {
@@ -142,17 +123,14 @@ const modelOptionFromApi = (model: {
   label?: string;
   provider?: string;
   recommended?: boolean;
-  minimum_plan?: string;
 }): ModelOption | null => {
   if (!model.id) return null;
   return {
     id: modelOptionId(model.id),
     name: model.label ?? model.id,
-    description: 'Hugging Face',
     modelPath: model.id,
     avatarUrl: getHfAvatarUrl(model.id.replace(/^huggingface\//, '')),
     recommended: Boolean(model.recommended),
-    minimumPlan: model.minimum_plan === 'pro' ? 'pro' : 'free',
   };
 };
 
@@ -178,8 +156,6 @@ interface ChatInputProps {
   isProcessing?: boolean;
   disabled?: boolean;
   placeholder?: string;
-  quota: UserQuota | null;
-  refreshQuota: () => Promise<void> | void;
 }
 
 interface DatasetUploadResponse {
@@ -202,13 +178,6 @@ const DATASET_UPLOAD_ACCEPT = '.csv,.json,.jsonl';
 const DATASET_UPLOAD_EXTENSIONS = new Set(['csv', 'json', 'jsonl']);
 
 const isClaudeModel = (m: ModelOption) => isClaudePath(m.modelPath);
-const isPremiumModel = (m: ModelOption) => isPremiumPath(m.modelPath);
-const isProOnlyModel = (m: ModelOption) => (
-  m.minimumPlan === 'pro' || isProOnlyPath(m.modelPath)
-);
-const isModelAllowedForPlan = (m: ModelOption, plan: PlanTier) => (
-  plan === 'pro' || !isProOnlyModel(m)
-);
 
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -220,7 +189,7 @@ const datasetRepoUrl = (repoId: string) => (
   `https://huggingface.co/datasets/${repoId.split('/').map(encodeURIComponent).join('/')}`
 );
 
-export default function ChatInput({ sessionId, initialModelPath, onSend, onStop, onDatasetUploaded, isProcessing = false, disabled = false, placeholder = 'Ask anything...', quota, refreshQuota }: ChatInputProps) {
+export default function ChatInput({ sessionId, initialModelPath, onSend, onStop, onDatasetUploaded, isProcessing = false, disabled = false, placeholder = 'Ask anything...' }: ChatInputProps) {
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -228,7 +197,10 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   const modelOptionsRef = useRef<ModelOption[]>(DEFAULT_MODEL_OPTIONS);
   const sessionIdRef = useRef<string | undefined>(sessionId);
   const [selectedModelId, setSelectedModelId] = useState<string>(
-    () => findModelByPath(initialModelPath ?? '', DEFAULT_MODEL_OPTIONS)?.id ?? DEFAULT_MODEL_OPTIONS[0].id,
+    () => (
+      findModelByPath(initialModelPath ?? '', DEFAULT_MODEL_OPTIONS)?.id
+      ?? DEFAULT_FREE_MODEL_OPTION_ID
+    ),
   );
   const [modelAnchorEl, setModelAnchorEl] = useState<null | HTMLElement>(null);
   const jobsUpgradeRequired = useAgentStore((s) => s.jobsUpgradeRequired);
@@ -290,10 +262,7 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     return () => { cancelled = true; };
   }, [sessionId, updateSessionModel]);
 
-  const plan = quota?.plan ?? 'free';
-  const visibleModelOptions = modelOptions.filter((model) => (
-    isModelAllowedForPlan(model, plan)
-  ));
+  const visibleModelOptions = modelOptions;
   const selectedModel = (
     visibleModelOptions.find(m => m.id === selectedModelId)
     || modelOptions.find(m => m.id === selectedModelId)
@@ -309,16 +278,11 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   }, [disabled, isProcessing]);
 
   const handleSend = useCallback(() => {
-    const selectedOption = modelOptions.find((model) => model.id === selectedModelId);
-    if (selectedOption && !isModelAllowedForPlan(selectedOption, plan)) {
-      setModelSwitchError('Claude Opus 4.8 and GPT-5.5 daily sessions require HF Pro.');
-      return;
-    }
     if (input.trim() && !disabled && !isUploadingDataset) {
       onSend(input);
       setInput('');
     }
-  }, [input, disabled, isUploadingDataset, onSend, modelOptions, selectedModelId, plan]);
+  }, [input, disabled, isUploadingDataset, onSend]);
 
   const handleDatasetUploadClick = useCallback(() => {
     fileInputRef.current?.click();
@@ -395,13 +359,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     return () => window.clearTimeout(timeout);
   }, [datasetUploadSuccess]);
 
-  // Refresh the quota display whenever the session changes (user might
-  // have started another tab that spent quota).
-  useEffect(() => {
-    if (sessionId) refreshQuota();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
-
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -414,7 +371,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
 
   const handleModelClick = (event: React.MouseEvent<HTMLElement>) => {
     setModelAnchorEl(event.currentTarget);
-    void refreshQuota();
   };
 
   const handleModelClose = () => {
@@ -424,10 +380,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
   const handleSelectModel = async (model: ModelOption) => {
     handleModelClose();
     if (!sessionId) return;
-    if (!isModelAllowedForPlan(model, plan)) {
-      setModelSwitchError('Claude Opus 4.8 and GPT-5.5 daily sessions require HF Pro.');
-      return;
-    }
     try {
       const res = await apiFetch(`/api/session/${sessionId}/model`, {
         method: 'POST',
@@ -485,16 +437,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [awaitingTopUp, jobsUpgradeRequired, handleJobsRetry]);
-
-  // Show the remaining subsidized premium-session allowance for today.
-  const premiumChip = (() => {
-    if (!quota) return null;
-    const remaining = Math.max(0, quota.premiumRemaining);
-    if (remaining === 0) {
-      return quota.plan === 'pro' ? '0 left – using HF billing' : '0 left – enable billing';
-    }
-    return `${remaining} left today`;
-  })();
 
   return (
     <Box
@@ -793,25 +735,8 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
                         }}
                       />
                     )}
-                    {isPremiumModel(model) && premiumChip && (
-                      <Chip
-                        label={premiumChip}
-                        size="small"
-                        sx={{
-                          height: '18px',
-                          fontSize: '10px',
-                          bgcolor: 'rgba(255,255,255,0.08)',
-                          color: 'var(--muted-text)',
-                          fontWeight: 600,
-                        }}
-                      />
-                    )}
                   </Box>
                 }
-                secondary={model.description}
-                secondaryTypographyProps={{
-                  sx: { fontSize: '12px', color: 'var(--muted-text)' }
-                }}
               />
             </MenuItem>
           ))}

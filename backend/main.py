@@ -10,8 +10,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-# Load .env before importing routes/session_manager so persistence and quota
-# modules see local Mongo settings during startup.
+# Load .env before importing routes/session_manager so persistence and model
+# modules see local settings during startup.
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 from routes.agent import router as agent_router  # noqa: E402

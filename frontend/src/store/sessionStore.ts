@@ -33,8 +33,6 @@ interface SessionStore {
     is_active?: boolean;
     is_processing?: boolean;
     model?: string | null;
-    premium_user_billed?: boolean;
-    premium_quota_counted?: boolean;
     pending_approval?: unknown[] | null;
     auto_approval?: {
       enabled?: boolean;
@@ -73,8 +71,6 @@ export const useSessionStore = create<SessionStore>()(
           autoApprovalCostCapUsd: null,
           autoApprovalEstimatedSpendUsd: 0,
           autoApprovalRemainingUsd: null,
-          premiumUserBilled: false,
-          premiumQuotaCounted: false,
         };
         set((state) => ({
           sessions: [...state.sessions, newSession],
@@ -128,8 +124,6 @@ export const useSessionStore = create<SessionStore>()(
                 isActive: server.is_active ?? existing.isActive,
                 isProcessing: Boolean(server.is_processing),
                 model: server.model ?? existing.model ?? null,
-                premiumUserBilled: Boolean(server.premium_user_billed),
-                premiumQuotaCounted: Boolean(server.premium_quota_counted),
                 needsAttention: Boolean(server.pending_approval?.length) || existing.needsAttention,
                 expired: false,
                 ...(auto
@@ -159,8 +153,6 @@ export const useSessionStore = create<SessionStore>()(
               autoApprovalCostCapUsd: server.auto_approval?.cost_cap_usd ?? null,
               autoApprovalEstimatedSpendUsd: server.auto_approval?.estimated_spend_usd ?? 0,
               autoApprovalRemainingUsd: server.auto_approval?.remaining_usd ?? null,
-              premiumUserBilled: Boolean(server.premium_user_billed),
-              premiumQuotaCounted: Boolean(server.premium_quota_counted),
             };
             merged.push(newSession);
             byId.set(id, newSession);
@@ -252,13 +244,11 @@ export const useSessionStore = create<SessionStore>()(
     {
       name: 'hf-agent-sessions',
       partialize: (state) => ({
-        // Reset transient session flags so cold-load state is re-derived from
-        // the live GET /sessions list and current daily quota window.
+        // Reset transient processing so cold-load state is re-derived from
+        // the live GET /sessions list.
         sessions: state.sessions.map((s) => ({
           ...s,
           isProcessing: false,
-          premiumUserBilled: false,
-          premiumQuotaCounted: false,
         })),
         activeSessionId: state.activeSessionId,
       }),
