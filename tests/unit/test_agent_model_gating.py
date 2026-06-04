@@ -18,10 +18,9 @@ def test_available_models_exclude_sonnet_and_have_no_pro_gate():
     models = {model["id"]: model for model in agent.AVAILABLE_MODELS}
 
     assert models[agent.DEFAULT_OPUS_MODEL_ID]["label"] == "Claude Opus 4.8"
-    assert models[agent.DEFAULT_GPT_MODEL_ID]["minimum_plan"] == "free"
     assert models[agent.DEFAULT_OPUS_MODEL_ID]["recommended"] is True
     assert "recommended" not in models[agent.DEFAULT_FREE_MODEL_ID]
-    assert {model["minimum_plan"] for model in models.values()} == {"free"}
+    assert all("minimum_plan" not in model for model in models.values())
 
 
 def test_default_model_for_user_is_plan_aware():
