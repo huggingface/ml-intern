@@ -6,7 +6,7 @@
  *  - Connection / processing flags
  *  - Panel state (right panel — single-artifact pattern)
  *  - Plan state
- *  - User info / health and quota banners
+ *  - User info / health banners
  *  - Edited scripts (for hf_jobs code editing)
  *
  * Per-session state:

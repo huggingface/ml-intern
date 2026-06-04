@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Alert, AlertTitle, Box, Button, Typography } from '@mui/material';
+import { useAgentStore } from '@/store/agentStore';
+import { apiFetch } from '@/utils/api';
+import { inferenceCreditCta, isInferenceCreditError } from '@/utils/inferenceBilling';
 
 interface ChatErrorBannerProps {
   error: string;
@@ -11,6 +14,9 @@ interface ChatErrorBannerProps {
 export default function ChatErrorBanner({ error, sessionId, model, onDismiss }: ChatErrorBannerProps) {
   const [copied, setCopied] = useState(false);
   const [reportedAt, setReportedAt] = useState(() => new Date().toISOString());
+  const userPlan = useAgentStore((s) => s.user?.plan);
+  const isCreditError = isInferenceCreditError(error);
+  const creditCta = isCreditError ? inferenceCreditCta(userPlan) : null;
 
   useEffect(() => {
     setReportedAt(new Date().toISOString());
@@ -37,6 +43,14 @@ export default function ChatErrorBanner({ error, sessionId, model, onDismiss }: 
     }
   };
 
+  const trackProClick = () => {
+    if (userPlan === 'pro') return;
+    void apiFetch(`/api/pro-click/${sessionId}`, {
+      method: 'POST',
+      body: JSON.stringify({ source: 'inference_credit_error', target: 'hf_pro' }),
+    }).catch(() => {});
+  };
+
   return (
     <Box sx={{ maxWidth: 880, mx: 'auto', width: '100%', px: { xs: 0, sm: 1, md: 2 }, mb: 1 }}>
       <Alert
@@ -61,12 +75,42 @@ export default function ChatErrorBanner({ error, sessionId, model, onDismiss }: 
         }
       >
         <AlertTitle sx={{ fontWeight: 700, fontSize: '0.86rem' }}>
-          Message failed
+          {creditCta?.title ?? 'Message failed'}
         </AlertTitle>
         <Typography variant="body2" sx={{ fontSize: '0.8rem', lineHeight: 1.5 }}>
-          The backend could not process the last message. Retry after a moment. If it keeps
-          happening, raise an issue with the copied details.
+          {creditCta?.message ??
+            'The backend could not process the last message. Retry after a moment. If it keeps happening, raise an issue with the copied details.'}
         </Typography>
+        {creditCta && (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mt: 1 }}>
+            <Button
+              component="a"
+              href={creditCta.primaryHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              color="inherit"
+              size="small"
+              variant="outlined"
+              onClick={trackProClick}
+              sx={{ textTransform: 'none' }}
+            >
+              {creditCta.primaryLabel}
+            </Button>
+            {creditCta.secondaryHref && creditCta.secondaryLabel && (
+              <Button
+                component="a"
+                href={creditCta.secondaryHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                color="inherit"
+                size="small"
+                sx={{ textTransform: 'none' }}
+              >
+                {creditCta.secondaryLabel}
+              </Button>
+            )}
+          </Box>
+        )}
         <Typography
           variant="caption"
           component="pre"

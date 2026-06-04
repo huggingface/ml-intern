@@ -258,7 +258,6 @@ async def research_handler(
         research_model,
         getattr(session, "hf_token", None),
         reasoning_effort=_capped,
-        bill_to_user=getattr(session, "premium_user_billed", False),
     )
     llm_params = with_prompt_cache_params(
         llm_params, session_id=getattr(session, "session_id", None)

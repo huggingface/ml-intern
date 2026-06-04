@@ -49,21 +49,16 @@ from session_manager import (
     session_manager,
 )
 
-import user_quotas
-
 from agent.core.hf_access import get_jobs_access
 from agent.core.hf_tokens import resolve_hf_request_token
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import (
     CLAUDE_OPUS_48_MODEL_ID,
     DEEPSEEK_V4_PRO_MODEL_ID,
-    DEFAULT_MODEL_ID,
     GLM_51_MODEL_ID,
     GPT_55_MODEL_ID,
     KIMI_K26_MODEL_ID,
     MINIMAX_M27_MODEL_ID,
-    is_premium_model_id,
-    is_pro_only_premium_model_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,7 +66,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agent"])
 _background_teardown_tasks: set[asyncio.Task] = set()
 
-DEFAULT_PREMIUM_MODEL_ID = DEFAULT_MODEL_ID
 DEFAULT_OPUS_MODEL_ID = CLAUDE_OPUS_48_MODEL_ID
 DEFAULT_GPT_MODEL_ID = GPT_55_MODEL_ID
 DEFAULT_FREE_MODEL_ID = KIMI_K26_MODEL_ID
@@ -81,26 +75,18 @@ DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
 def _available_models() -> list[dict[str, Any]]:
     models = [
         {
-            "id": DEFAULT_PREMIUM_MODEL_ID,
-            "label": "Claude Sonnet 4.6",
-            "provider": "huggingface",
-            "tier": "pro",
-            "recommended": True,
-            "minimum_plan": "free",
-        },
-        {
             "id": DEFAULT_OPUS_MODEL_ID,
             "label": "Claude Opus 4.8",
             "provider": "huggingface",
             "tier": "pro",
-            "minimum_plan": "pro",
+            "minimum_plan": "free",
         },
         {
             "id": DEFAULT_GPT_MODEL_ID,
             "label": "GPT-5.5",
             "provider": "huggingface",
             "tier": "pro",
-            "minimum_plan": "pro",
+            "minimum_plan": "free",
         },
         {
             "id": DEFAULT_FREE_MODEL_ID,
@@ -108,6 +94,7 @@ def _available_models() -> list[dict[str, Any]]:
             "provider": "huggingface",
             "tier": "free",
             "minimum_plan": "free",
+            "recommended": True,
         },
         {
             "id": MINIMAX_M27_MODEL_ID,
@@ -137,119 +124,30 @@ def _available_models() -> list[dict[str, Any]]:
 AVAILABLE_MODELS = _available_models()
 
 
-def _is_premium_model(model_id: str) -> bool:
-    return is_premium_model_id(model_id)
+def _valid_model_ids() -> set[str]:
+    return {m["id"] for m in AVAILABLE_MODELS}
 
 
-def _is_pro_only_premium_model(model_id: str | None) -> bool:
-    return is_pro_only_premium_model_id(model_id)
-
-
-def _model_unavailable_for_plan(model_id: str | None, plan: str | None) -> bool:
-    return plan != "pro" and _is_pro_only_premium_model(model_id)
-
-
-def _reject_model_unavailable_for_plan(
-    model_id: str | None,
-    user: dict[str, Any],
-) -> None:
-    plan = user.get("plan", "free")
-    if not _model_unavailable_for_plan(model_id, plan):
+def _validate_model_id(model_id: str | None) -> None:
+    if not model_id or model_id in _valid_model_ids():
         return
-    raise HTTPException(
-        status_code=403,
-        detail={
-            "error": "model_requires_pro",
-            "plan": plan,
-            "model": model_id,
-            "message": "Claude Opus 4.8 and GPT-5.5 daily sessions require HF Pro.",
-        },
-    )
+    raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
 
 
-def _is_user_billed(model_id: str) -> bool:
-    return _is_premium_model(model_id)
+def _default_model_for_user(user: dict[str, Any]) -> str:
+    return DEFAULT_OPUS_MODEL_ID if user.get("plan") == "pro" else DEFAULT_FREE_MODEL_ID
 
 
 async def _model_override_for_new_session(
-    request: Request,
     requested_model: str | None,
+    user: dict[str, Any],
 ) -> str | None:
     """Return the model override to use when creating a new session.
 
-    Explicit model requests are allowed and charged at message-submit time
-    when premium. Empty requests use the configured default model.
+    Explicit model requests are honored. Empty web requests default to Kimi for
+    non-Pro users and Opus for Pro users.
     """
-    return requested_model
-
-
-def _premium_cap_message(plan: str) -> str:
-    """Over-allowance message for a premium model that can't fall back to user
-    billing. Defensive: every current premium model is user-billable and
-    overflows to the user's own HF account instead of reaching this.
-    """
-    if plan == "pro":
-        return (
-            "Daily premium model limit reached. Use a free model and try premium "
-            "models again tomorrow."
-        )
-    return (
-        "Daily premium model limit reached. Upgrade to HF Pro for "
-        f"{user_quotas.CLAUDE_PRO_DAILY}/day or use a free model."
-    )
-
-
-async def _enforce_premium_model_quota(
-    user: dict[str, Any],
-    agent_session: AgentSession,
-) -> None:
-    """Charge the user's daily premium-model quota on first use in a session.
-
-    Runs at *message-submit* time, not session-create time — so spinning up a
-    premium-model session to look around doesn't burn quota. The
-    ``claude_counted_day`` flag on ``AgentSession`` guards against re-counting
-    the same session on the same day, while still counting old sessions when
-    they are used again on a later day.
-
-    Subsidizes the daily allowance (free = 2 for default premium, pro = 20
-    across premium models), organization-billed through the HF Router. Opus and
-    GPT-5.5 are pro-only before quota is charged. Past the allowance, premium
-    router models flip the session to ``premium_user_billed`` so the call bills
-    the user's own HF token instead of blocking. No-ops when the model isn't
-    premium or when this session's billing has already been decided for today.
-    """
-    model_name = agent_session.session.config.model_name
-    if not _is_premium_model(model_name):
-        return
-    _reject_model_unavailable_for_plan(model_name, user)
-    quota_day = user_quotas.current_quota_day()
-    if agent_session.claude_counted and agent_session.claude_counted_day == quota_day:
-        return
-    user_id = user["user_id"]
-    plan = user.get("plan", "free")
-    cap = user_quotas.daily_cap_for(plan)
-    within_allowance = await user_quotas.try_increment_claude(user_id, cap) is not None
-    if not within_allowance:
-        if not _is_user_billed(model_name):
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "error": "premium_model_daily_cap",
-                    "plan": plan,
-                    "cap": cap,
-                    "message": _premium_cap_message(plan),
-                },
-            )
-        # Past the subsidized allowance on a user-billable model: bill the
-        # user's own HF (OAuth) token for this session instead of blocking.
-        agent_session.session.premium_user_billed = True
-    else:
-        # A session that overflowed on a previous day can use today's
-        # subsidized allowance again if quota is available.
-        agent_session.session.premium_user_billed = False
-    agent_session.claude_counted = True
-    agent_session.claude_counted_day = quota_day
-    await session_manager.persist_session_snapshot(agent_session)
+    return requested_model or _default_model_for_user(user)
 
 
 def _user_hf_token(user: dict[str, Any] | None) -> str | None:
@@ -494,8 +392,7 @@ async def create_session(
     behalf of the user.
 
     Optional body ``{"model"?: <id>}`` selects the session's LLM; unknown
-    ids are rejected (400). The premium-model quota runs at message-submit
-    time, not here — spinning up a session to look around is free.
+    ids are rejected (400). Empty requests use the plan-aware web default.
 
     Returns 503 if the server or user has reached the session limit.
     """
@@ -511,13 +408,10 @@ async def create_session(
     if isinstance(body, dict):
         model = body.get("model")
 
-    valid_ids = {m["id"] for m in AVAILABLE_MODELS}
-    if model and model not in valid_ids:
-        raise HTTPException(status_code=400, detail=f"Unknown model: {model}")
-    _reject_model_unavailable_for_plan(model, user)
+    _validate_model_id(model)
 
-    # Empty requests use the configured default, which may be premium.
-    model = await _model_override_for_new_session(request, model)
+    # Empty requests use the plan-aware web default.
+    model = await _model_override_for_new_session(model, user)
 
     try:
         session_id = await session_manager.create_session(
@@ -533,7 +427,7 @@ async def create_session(
     return SessionResponse(
         session_id=session_id,
         ready=True,
-        model=model or session_manager.config.model_name,
+        model=model,
     )
 
 
@@ -546,9 +440,8 @@ async def restore_session_summary(
     summarization prompt on them and drop the result into the new
     session's context as a user-role system note.
 
-    Optional ``"model"`` in the body overrides the session's LLM. The
-    premium-model quota runs before summarization because that call uses the
-    session model immediately.
+    Optional ``"model"`` in the body overrides the session's LLM; otherwise
+    the new session uses the plan-aware web default.
     """
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -557,12 +450,9 @@ async def restore_session_summary(
     hf_token = resolve_hf_request_token(request)
 
     model = body.get("model")
-    valid_ids = {m["id"] for m in AVAILABLE_MODELS}
-    if model and model not in valid_ids:
-        raise HTTPException(status_code=400, detail=f"Unknown model: {model}")
-    _reject_model_unavailable_for_plan(model, user)
+    _validate_model_id(model)
 
-    model = await _model_override_for_new_session(request, model)
+    model = await _model_override_for_new_session(model, user)
 
     try:
         session_id = await session_manager.create_session(
@@ -575,14 +465,12 @@ async def restore_session_summary(
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    agent_session = await _check_session_access(
+    await _check_session_access(
         session_id,
         user,
         request,
         preload_sandbox=False,
     )
-    await _enforce_premium_model_quota(user, agent_session)
-
     try:
         summarized = await session_manager.seed_from_summary(session_id, messages)
     except ValueError as e:
@@ -598,7 +486,7 @@ async def restore_session_summary(
     return SessionResponse(
         session_id=session_id,
         ready=True,
-        model=model or session_manager.config.model_name,
+        model=model,
     )
 
 
@@ -622,17 +510,13 @@ async def set_session_model(
     """Switch the active model for a single session (tab-scoped).
 
     Takes effect on the next LLM call in that session — other sessions
-    (including other browser tabs) are unaffected. Model switches don't
-    charge quota — the premium-model quota only fires at message-submit time.
+    (including other browser tabs) are unaffected.
     """
     agent_session = await _check_session_access(session_id, user, request)
     model_id = body.get("model")
     if not model_id:
         raise HTTPException(status_code=400, detail="Missing 'model' field")
-    valid_ids = {m["id"] for m in AVAILABLE_MODELS}
-    if model_id not in valid_ids:
-        raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
-    _reject_model_unavailable_for_plan(model_id, user)
+    _validate_model_id(model_id)
     if not agent_session:
         raise HTTPException(status_code=404, detail="Session not found")
     await session_manager.update_session_model(session_id, model_id)
@@ -767,16 +651,13 @@ async def set_session_yolo(
 
 @router.get("/user/quota")
 async def get_user_quota(user: dict = Depends(get_current_user)) -> dict:
-    """Return the user's plan tier and today's premium-model quota state."""
+    """Compatibility response for old clients that still ask for quota state."""
     plan = user.get("plan", "free")
-    used = await user_quotas.get_claude_used_today(user["user_id"])
-    cap = user_quotas.daily_cap_for(plan)
-    remaining = max(0, cap - used)
     return {
         "plan": plan,
-        "premium_used_today": used,
-        "premium_daily_cap": cap,
-        "premium_remaining": remaining,
+        "premium_used_today": 0,
+        "premium_daily_cap": 0,
+        "premium_remaining": 0,
     }
 
 
@@ -858,12 +739,11 @@ async def submit_input(
                 }
             ]
         )
-    agent_session = await _check_session_access(raw_session_id, user)
+    await _check_session_access(raw_session_id, user)
     try:
         body = SubmitRequest(**payload)
     except ValidationError as exc:
         raise RequestValidationError(exc.errors()) from exc
-    await _enforce_premium_model_quota(user, agent_session)
     success = await session_manager.submit_user_input(body.session_id, body.text)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found or inactive")
@@ -914,16 +794,6 @@ async def chat_sse(
     # Submit the operation
     text = body.get("text")
     approvals = body.get("approvals")
-
-    # Gate user-message sends against the daily premium-model quota. Approvals are
-    # continuations of an in-progress turn, so the relevant quota decision was
-    # made when that user message was submitted.
-    if text is not None and not approvals:
-        try:
-            await _enforce_premium_model_quota(user, agent_session)
-        except HTTPException:
-            broadcaster.unsubscribe(sub_id)
-            raise
 
     try:
         if approvals:

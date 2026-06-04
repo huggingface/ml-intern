@@ -7,11 +7,7 @@ creating circular imports.
 
 import os
 
-from agent.core.hf_tokens import (
-    get_hf_bill_to,
-    resolve_hf_router_token,
-    resolve_hf_token,
-)
+from agent.core.hf_tokens import resolve_hf_router_token
 from agent.core.local_models import (
     LOCAL_MODEL_API_KEY_DEFAULT,
     LOCAL_MODEL_API_KEY_ENV,
@@ -22,7 +18,6 @@ from agent.core.local_models import (
 )
 from agent.core.model_ids import (
     HF_ROUTER_BASE_URL,
-    is_premium_model_id,
     strip_huggingface_model_prefix,
 )
 
@@ -123,15 +118,12 @@ def _resolve_llm_params(
     can't crash a turn — it just doesn't get sent.
 
     Token precedence for HF-router calls (first non-empty wins):
-      1. INFERENCE_TOKEN env — shared key on the hosted Space (inference is
-         free for users, billed to the Space owner via ``X-HF-Bill-To``).
-      2. session.hf_token — the user's own token (CLI / OAuth / cache file).
-      3. huggingface_hub cache — ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` /
+      1. session.hf_token — the user's own token (CLI / OAuth / cache file).
+      2. huggingface_hub cache — ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` /
          local ``hf auth login`` cache.
 
-    Pass ``bill_to_user=True`` only after the daily subsidized allowance is
-    spent. Premium router ids then use the caller's own token, skip
-    ``INFERENCE_TOKEN``, and omit ``X-HF-Bill-To``.
+    ``bill_to_user`` is accepted for older callers but no longer changes
+    behavior: all hosted inference is user-billed.
     """
     normalized_model = strip_huggingface_model_prefix(model_name) or model_name
 
@@ -142,19 +134,12 @@ def _resolve_llm_params(
         return _resolve_local_model_params(normalized_model, reasoning_effort, strict)
 
     hf_model = normalized_model
-    bill_user = bill_to_user and is_premium_model_id(hf_model)
-    api_key = (
-        resolve_hf_token(session_hf_token, include_cached=False)
-        if bill_user
-        else _resolve_hf_router_token(session_hf_token)
-    )
+    api_key = _resolve_hf_router_token(session_hf_token)
     params = {
         "model": f"openai/{hf_model}",
         "api_base": HF_ROUTER_BASE_URL,
         "api_key": api_key,
     }
-    if not bill_user and (bill_to := get_hf_bill_to()):
-        params["extra_headers"] = {"X-HF-Bill-To": bill_to}
     if reasoning_effort:
         hf_level = _hf_router_effort_level(reasoning_effort)
         if hf_level not in _HF_EFFORTS:

@@ -540,7 +540,6 @@ async def _heal_effort_and_rebuild_params(
         model,
         session.hf_token,
         reasoning_effort=session.effective_effort_for(model),
-        bill_to_user=getattr(session, "premium_user_billed", False),
     )
 
 
@@ -562,8 +561,8 @@ def _friendly_error_message(error: Exception) -> str | None:
 
     if "insufficient" in err_str and "credit" in err_str:
         return (
-            "Insufficient API credits. Please check your account balance "
-            "at your model provider's dashboard."
+            "Insufficient Hugging Face Inference Providers credits. Add credits "
+            "or upgrade your HF account to continue."
         )
 
     if "not supported by provider" in err_str or "no provider supports" in err_str:
@@ -591,7 +590,7 @@ async def _compact_and_notify(session: Session) -> None:
 
     Catches ``CompactionFailedError`` and ends the session cleanly instead
     of letting the caller retry. Pre-2026-05-04 the caller looped on
-    ContextWindowExceededError → compact → re-trigger, burning premium
+    ContextWindowExceededError → compact → re-trigger, burning hosted
     inference budget while the session never reached the upload path.
     """
     from agent.context_manager.manager import CompactionFailedError
@@ -1207,7 +1206,6 @@ class Handlers:
                     reasoning_effort=session.effective_effort_for(
                         session.config.model_name
                     ),
-                    bill_to_user=getattr(session, "premium_user_billed", False),
                 )
                 if session.stream:
                     llm_result = await _call_llm_streaming(
