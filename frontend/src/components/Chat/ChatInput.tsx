@@ -34,7 +34,6 @@ import {
 interface ModelOption {
   id: string;
   name: string;
-  description: string;
   modelPath: string;
   avatarUrl: string;
   recommended?: boolean;
@@ -49,7 +48,6 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   {
     id: 'claude-opus-4-8',
     name: 'Claude Opus 4.8',
-    description: 'Hugging Face',
     modelPath: CLAUDE_OPUS_48_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(CLAUDE_OPUS_48_MODEL_PATH),
     recommended: true,
@@ -57,35 +55,30 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   {
     id: 'gpt-5.5',
     name: 'GPT-5.5',
-    description: 'Hugging Face',
     modelPath: GPT_55_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(GPT_55_MODEL_PATH),
   },
   {
     id: 'kimi-k2.6',
     name: 'Kimi K2.6',
-    description: 'Hugging Face',
     modelPath: KIMI_K26_MODEL_PATH,
     avatarUrl: getHfAvatarUrl(KIMI_K26_MODEL_PATH),
   },
   {
     id: 'minimax-m2.7',
     name: 'MiniMax M2.7',
-    description: 'Hugging Face',
     modelPath: 'MiniMaxAI/MiniMax-M2.7',
     avatarUrl: getHfAvatarUrl('MiniMaxAI/MiniMax-M2.7'),
   },
   {
     id: 'glm-5.1',
     name: 'GLM 5.1',
-    description: 'Hugging Face',
     modelPath: 'zai-org/GLM-5.1',
     avatarUrl: getHfAvatarUrl('zai-org/GLM-5.1'),
   },
   {
     id: 'deepseek-v4-pro',
     name: 'DeepSeek V4 Pro',
-    description: 'Hugging Face',
     modelPath: 'deepseek-ai/DeepSeek-V4-Pro:deepinfra',
     avatarUrl: getHfAvatarUrl('deepseek-ai/DeepSeek-V4-Pro'),
   },
@@ -135,7 +128,6 @@ const modelOptionFromApi = (model: {
   return {
     id: modelOptionId(model.id),
     name: model.label ?? model.id,
-    description: 'Hugging Face',
     modelPath: model.id,
     avatarUrl: getHfAvatarUrl(model.id.replace(/^huggingface\//, '')),
     recommended: Boolean(model.recommended),
@@ -745,10 +737,6 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
                     )}
                   </Box>
                 }
-                secondary={model.description}
-                secondaryTypographyProps={{
-                  sx: { fontSize: '12px', color: 'var(--muted-text)' }
-                }}
               />
             </MenuItem>
           ))}
