@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, AlertTitle, Box, Button, Typography } from '@mui/material';
+import { Alert, AlertTitle, Box, Button, Link, Typography } from '@mui/material';
 import { useAgentStore } from '@/store/agentStore';
 import { apiFetch } from '@/utils/api';
 import { inferenceCreditCta, isInferenceCreditError } from '@/utils/inferenceBilling';
@@ -10,6 +10,8 @@ interface ChatErrorBannerProps {
   model?: string | null;
   onDismiss: () => void;
 }
+
+const DISCUSSIONS_URL = 'https://huggingface.co/spaces/smolagents/ml-intern/discussions';
 
 export default function ChatErrorBanner({ error, sessionId, model, onDismiss }: ChatErrorBannerProps) {
   const [copied, setCopied] = useState(false);
@@ -78,8 +80,24 @@ export default function ChatErrorBanner({ error, sessionId, model, onDismiss }: 
           {creditCta?.title ?? 'Message failed'}
         </AlertTitle>
         <Typography variant="body2" sx={{ fontSize: '0.8rem', lineHeight: 1.5 }}>
-          {creditCta?.message ??
-            'The backend could not process the last message. Retry after a moment. If it keeps happening, raise an issue with the copied details.'}
+          {creditCta ? (
+            creditCta.message
+          ) : (
+            <>
+              The backend could not process the last message. Retry after a moment. If it keeps
+              happening,{' '}
+              <Link
+                href={DISCUSSIONS_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                color="inherit"
+                underline="always"
+              >
+                open a discussion
+              </Link>{' '}
+              with the copied details.
+            </>
+          )}
         </Typography>
         {creditCta && (
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mt: 1 }}>
