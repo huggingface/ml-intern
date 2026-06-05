@@ -26,6 +26,7 @@ import SessionChat from '@/components/SessionChat';
 import CodePanel from '@/components/CodePanel/CodePanel';
 import WelcomeScreen from '@/components/WelcomeScreen/WelcomeScreen';
 import YoloControl from '@/components/YoloControl';
+import UsageMeter from '@/components/UsageMeter';
 import { apiFetch } from '@/utils/api';
 import { inferenceCreditCta, isInferenceCreditError } from '@/utils/inferenceBilling';
 
@@ -300,6 +301,7 @@ export default function AppLayout() {
           </Box>
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <UsageMeter />
             <YoloControl />
             <IconButton
               onClick={toggleTheme}

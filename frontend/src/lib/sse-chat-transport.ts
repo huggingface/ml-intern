@@ -39,6 +39,7 @@ export interface SideChannelCallbacks {
   onToolOutputPanel: (tool: string, toolCallId: string, output: string, success: boolean) => void;
   onStreaming: () => void;
   onToolRunning: (toolName: string, description?: string) => void;
+  onUsageEvent: (eventType: 'llm_call' | 'hf_job_complete', data: Record<string, unknown>) => void;
   onInterrupted: () => void;
 }
 
@@ -315,6 +316,11 @@ function createEventToChunkStream(sideChannel: SideChannelCallbacks): TransformS
           }
           break;
         }
+
+        case 'llm_call':
+        case 'hf_job_complete':
+          sideChannel.onUsageEvent(event.event_type, event.data || {});
+          break;
 
         case 'turn_complete':
           endTextPart(controller);

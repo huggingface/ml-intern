@@ -21,6 +21,8 @@ import logging
 import time
 from typing import Any
 
+from agent.core.cost_estimation import hf_jobs_price_catalog
+
 logger = logging.getLogger(__name__)
 
 
@@ -190,6 +192,18 @@ async def record_hf_job_complete(
 
     try:
         wall_time_s = int(time.monotonic() - submit_ts)
+        billable_seconds = max(0, wall_time_s)
+        price_usd_per_hour = None
+        estimated_cost_usd = None
+        cost_estimate_source = "unknown_price"
+        prices = await hf_jobs_price_catalog()
+        if flavor in prices:
+            price_usd_per_hour = float(prices[flavor])
+            estimated_cost_usd = round(
+                price_usd_per_hour * (billable_seconds / 3600),
+                4,
+            )
+            cost_estimate_source = "runtime_price_catalog"
         await session.send_event(
             Event(
                 event_type="hf_job_complete",
@@ -198,6 +212,10 @@ async def record_hf_job_complete(
                     "flavor": flavor,
                     "final_status": final_status,
                     "wall_time_s": wall_time_s,
+                    "billable_seconds_estimate": billable_seconds,
+                    "price_usd_per_hour": price_usd_per_hour,
+                    "estimated_cost_usd": estimated_cost_usd,
+                    "cost_estimate_source": cost_estimate_source,
                 },
             )
         )

@@ -13,6 +13,8 @@ export type EventType =
   | 'tool_log'
   | 'approval_required'
   | 'tool_state_change'
+  | 'llm_call'
+  | 'hf_job_complete'
   | 'turn_complete'
   | 'compacted'
   | 'error'

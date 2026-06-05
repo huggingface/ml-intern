@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 MAX_BSON_BYTES = 15 * 1024 * 1024
+USAGE_EVENT_TYPES = ("llm_call", "hf_job_complete")
 
 
 def _now() -> datetime:
@@ -86,6 +87,9 @@ class NoopSessionStore:
     async def load_events_after(self, *_: Any, **__: Any) -> list[dict[str, Any]]:
         return []
 
+    async def load_usage_events(self, *_: Any, **__: Any) -> list[dict[str, Any]]:
+        return []
+
     async def append_trace_message(self, *_: Any, **__: Any) -> int | None:
         return None
 
@@ -141,6 +145,9 @@ class MongoSessionStore(NoopSessionStore):
         )
         await self.db.session_events.create_index(
             [("session_id", 1), ("seq", 1)], unique=True
+        )
+        await self.db.session_events.create_index(
+            [("session_id", 1), ("created_at", 1), ("event_type", 1)]
         )
         await self.db.session_trace_messages.create_index(
             [("session_id", 1), ("seq", 1)], unique=True
@@ -364,6 +371,42 @@ class MongoSessionStore(NoopSessionStore):
             {"session_id": session_id, "seq": {"$gt": int(after_seq or 0)}}
         ).sort("seq", 1)
         return [row async for row in cursor]
+
+    async def load_usage_events(
+        self,
+        user_id: str,
+        *,
+        session_id: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self._ready():
+            return []
+        session_query: dict[str, Any] = {"visibility": {"$ne": "deleted"}}
+        if user_id != "dev":
+            session_query["user_id"] = user_id
+        if session_id is not None:
+            session_query["_id"] = session_id
+
+        session_cursor = self.db.sessions.find(session_query, {"_id": 1})
+        session_ids = [str(row.get("_id")) async for row in session_cursor]
+        if not session_ids:
+            return []
+
+        event_query: dict[str, Any] = {
+            "session_id": {"$in": session_ids},
+            "event_type": {"$in": list(USAGE_EVENT_TYPES)},
+        }
+        if start is not None or end is not None:
+            created_at: dict[str, datetime] = {}
+            if start is not None:
+                created_at["$gte"] = start
+            if end is not None:
+                created_at["$lt"] = end
+            event_query["created_at"] = created_at
+
+        event_cursor = self.db.session_events.find(event_query).sort("created_at", 1)
+        return [row async for row in event_cursor]
 
     async def append_trace_message(
         self, session_id: str, message: dict[str, Any], source: str = "message"

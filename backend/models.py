@@ -120,6 +120,39 @@ class SessionYoloRequest(BaseModel):
     cost_cap_usd: float | None = Field(default=None, ge=0)
 
 
+class UsageBucket(BaseModel):
+    """App-attributed usage totals for a session or time window."""
+
+    session_id: str | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    timezone: str | None = None
+    total_usd: float = 0.0
+    inference_usd: float = 0.0
+    hf_jobs_estimated_usd: float = 0.0
+    llm_calls: int = 0
+    hf_jobs_count: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    total_tokens: int = 0
+    hf_jobs_billable_seconds_estimate: int = 0
+
+
+class UsageResponse(BaseModel):
+    """Current-user app-attributed usage response."""
+
+    source: Literal["app_telemetry"]
+    currency: Literal["USD"]
+    generated_at: str
+    timezone: str
+    session: UsageBucket | None = None
+    today: UsageBucket
+    month: UsageBucket
+    links: dict[str, str] = Field(default_factory=dict)
+
+
 class DatasetUploadResponse(BaseModel):
     """Response for a dataset file uploaded to the Hub."""
 

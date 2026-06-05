@@ -41,6 +41,7 @@ from models import (
     SessionYoloRequest,
     SubmitRequest,
     TruncateRequest,
+    UsageResponse,
 )
 from session_manager import (
     MAX_SESSIONS,
@@ -62,6 +63,7 @@ from agent.core.model_ids import (
     MINIMAX_M27_MODEL_ID,
     strip_huggingface_model_prefix,
 )
+from usage import build_usage_response
 
 logger = logging.getLogger(__name__)
 
@@ -672,6 +674,29 @@ async def get_jobs_access_info(
         "default_namespace": access.default_namespace if access else None,
         "billing_url": "https://huggingface.co/settings/billing",
     }
+
+
+@router.get("/usage", response_model=UsageResponse)
+async def get_usage(
+    request: Request,
+    session_id: str | None = None,
+    tz: str | None = None,
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Return app-attributed usage for the current user."""
+    if session_id:
+        await _check_session_access(
+            session_id,
+            user,
+            request,
+            preload_sandbox=False,
+        )
+    return await build_usage_response(
+        session_manager,
+        user_id=user["user_id"],
+        session_id=session_id,
+        timezone_name=tz,
+    )
 
 
 @router.get("/sessions", response_model=list[SessionInfo])

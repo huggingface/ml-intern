@@ -18,6 +18,7 @@ import { llmMessagesToUIMessages } from '@/lib/convert-llm-messages';
 import { apiFetch } from '@/utils/api';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
+import { useUsageStore } from '@/store/usageStore';
 import { useLayoutStore } from '@/store/layoutStore';
 import { logger } from '@/utils/logger';
 
@@ -64,6 +65,11 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
     [sessionId, updateSession],
   );
 
+  const refreshUsage = useCallback(() => {
+    const activeSessionId = useSessionStore.getState().activeSessionId;
+    void useUsageStore.getState().fetchUsage(activeSessionId);
+  }, []);
+
   // -- Build side-channel callbacks (stable ref) --------------------------
   const sideChannel = useMemo<SideChannelCallbacks>(
     () => ({
@@ -96,6 +102,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
       },
       onProcessingDone: () => {
         setProcessingState(false);
+        refreshUsage();
       },
       onUndoComplete: () => {
         setProcessingState(false);
@@ -230,6 +237,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         // doesn't stay "processing" until the next /sessions merge —
         // activityStatus still surfaces the waiting-approval state.
         setProcessingState(false, { activityStatus: { type: 'waiting-approval' } });
+        refreshUsage();
 
         // Build panel data for this session's pending approval
         const firstTool = tools[0];
@@ -335,6 +343,9 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
           updates.researchStats = { toolCount: 0, tokenCount: 0, startedAt: null, finalElapsed: null };
         }
         updateSession(sessionId, updates);
+      },
+      onUsageEvent: (eventType, data) => {
+        useUsageStore.getState().applyUsageEvent(sessionId, eventType, data);
       },
       onInterrupted: () => { /* no-op — handled by stop() caller */ },
     }),
@@ -593,6 +604,8 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             const state = event.data?.state as string;
             const toolName = event.data?.tool as string;
             if (state === 'running' && toolName) sideChannel.onToolRunning(toolName);
+          } else if (et === 'llm_call' || et === 'hf_job_complete') {
+            sideChannel.onUsageEvent(et, (event.data || {}) as Record<string, unknown>);
           } else if (et === 'turn_complete' || et === 'error' || et === 'interrupted') {
             sideChannel.onProcessingDone();
             stopReconnect();
