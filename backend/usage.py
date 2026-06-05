@@ -44,19 +44,53 @@ def _coerce_int(value: Any) -> int:
         return 0
 
 
-def _parse_timestamp(value: Any) -> datetime | None:
+def _coerce_timezone(timezone_name: str | None) -> ZoneInfo | None:
+    if not timezone_name:
+        return None
+    try:
+        return ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def _normalize_event_timestamp(
+    dt: datetime,
+    *,
+    timezone_name: str | None = None,
+) -> datetime:
+    if dt.tzinfo is not None:
+        return _utc(dt)
+    timezone = _coerce_timezone(timezone_name)
+    if timezone is not None:
+        return dt.replace(tzinfo=timezone).astimezone(UTC)
+    return dt.astimezone(UTC)
+
+
+def _parse_timestamp(
+    value: Any, *, timezone_name: str | None = None
+) -> datetime | None:
     if isinstance(value, datetime):
-        return _utc(value)
+        return _normalize_event_timestamp(value, timezone_name=timezone_name)
     if not isinstance(value, str) or not value:
         return None
     try:
-        return _utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        return _normalize_event_timestamp(
+            datetime.fromisoformat(value.replace("Z", "+00:00")),
+            timezone_name=timezone_name,
+        )
     except ValueError:
         return None
 
 
-def event_created_at(event: dict[str, Any]) -> datetime | None:
-    return _parse_timestamp(event.get("created_at") or event.get("timestamp"))
+def event_created_at(
+    event: dict[str, Any],
+    *,
+    timezone_name: str | None = None,
+) -> datetime | None:
+    return _parse_timestamp(
+        event.get("created_at") or event.get("timestamp"),
+        timezone_name=timezone_name,
+    )
 
 
 def resolve_usage_windows(
@@ -166,10 +200,11 @@ def _event_in_window(
     *,
     start: datetime | None = None,
     end: datetime | None = None,
+    timezone_name: str | None = None,
 ) -> bool:
     if start is None and end is None:
         return True
-    created_at = event_created_at(event)
+    created_at = event_created_at(event, timezone_name=timezone_name)
     if created_at is None:
         return False
     if start is not None and created_at < _utc(start):
@@ -209,6 +244,7 @@ async def _load_usage_events(
     session_id: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    timezone_name: str | None = None,
 ) -> list[dict[str, Any]]:
     store = manager._store()
     if getattr(store, "enabled", False):
@@ -224,7 +260,12 @@ async def _load_usage_events(
         if session_id is not None and agent_session.session_id != session_id:
             continue
         for event in _events_from_runtime_session(agent_session):
-            if _event_in_window(event, start=start, end=end):
+            if _event_in_window(
+                event,
+                start=start,
+                end=end,
+                timezone_name=timezone_name,
+            ):
                 events.append(event)
     return events
 
@@ -256,12 +297,14 @@ async def build_usage_response(
         user_id=user_id,
         start=today_start,
         end=now_utc,
+        timezone_name=timezone,
     )
     month_events = await _load_usage_events(
         manager,
         user_id=user_id,
         start=month_start,
         end=now_utc,
+        timezone_name=timezone,
     )
 
     return {

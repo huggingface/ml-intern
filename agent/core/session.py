@@ -137,7 +137,7 @@ class Session:
 
         # Session trajectory logging
         self.logged_events: list[dict] = []
-        self.session_start_time = datetime.now().isoformat()
+        self.session_start_time = datetime.now().astimezone().isoformat()
         self.turn_count: int = 0
         self.last_auto_save_turn: int = 0
         # Stable local save path so heartbeat saves overwrite one file instead
@@ -162,7 +162,7 @@ class Session:
         # Log event to trajectory
         self.logged_events.append(
             {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now().astimezone().isoformat(),
                 "event_type": event.event_type,
                 "data": event.data,
             }
@@ -412,7 +412,7 @@ class Session:
         self.context_manager.running_context_usage = 0
 
         self.session_id = str(uuid.uuid4())
-        self.session_start_time = datetime.now().isoformat()
+        self.session_start_time = datetime.now().astimezone().isoformat()
         self.turn_count = 0
         self.last_auto_save_turn = 0
         self.logged_events = []

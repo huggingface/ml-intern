@@ -168,3 +168,35 @@ async def test_runtime_usage_includes_requested_session_total():
     assert usage["session"]["session_id"] == "s1"
     assert usage["session"]["inference_usd"] == 0.25
     assert usage["today"]["inference_usd"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_runtime_usage_interprets_naive_timestamps_in_browser_timezone():
+    manager = _Manager(
+        {
+            "s1": _agent_session(
+                "s1",
+                "owner",
+                [
+                    _event(
+                        "llm_call",
+                        {"cost_usd": 0.25, "total_tokens": 42},
+                        created_at="2026-06-05T15:00:00",
+                    )
+                ],
+            )
+        }
+    )
+
+    usage = await build_usage_response(
+        manager,
+        user_id="owner",
+        session_id="s1",
+        timezone_name="Europe/Zurich",
+        now=datetime(2026, 6, 5, 13, 30, tzinfo=UTC),
+    )
+
+    assert usage["session"]["llm_calls"] == 1
+    assert usage["today"]["llm_calls"] == 1
+    assert usage["month"]["llm_calls"] == 1
+    assert usage["today"]["total_tokens"] == 42
