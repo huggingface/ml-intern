@@ -226,7 +226,7 @@ def _friendly_error_message(error: Exception) -> str | None:
     ):
         return (
             "Model not found. Use '/model' to list suggestions, or paste an "
-            "HF model id like 'MiniMaxAI/MiniMax-M2.7'. Availability is shown "
+            "HF model id like 'MiniMaxAI/MiniMax-M3'. Availability is shown "
             "when you switch."
         )
 

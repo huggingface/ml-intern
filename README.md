@@ -51,7 +51,7 @@ ml-intern "fine-tune llama on my dataset"
 
 ```bash
 ml-intern --model anthropic/claude-opus-4-6 "your prompt"
-ml-intern --model minimax/MiniMax-M2.7 "your prompt"
+ml-intern --model minimax/MiniMax-M3 "your prompt"
 ml-intern --max-iterations 100 "your prompt"
 ml-intern --no-stream "your prompt"
 ```

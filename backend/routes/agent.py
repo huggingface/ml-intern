@@ -54,6 +54,12 @@ AVAILABLE_MODELS = [
         "recommended": True,
     },
     {
+        "id": "minimax/MiniMax-M3",
+        "label": "MiniMax M3",
+        "provider": "minimax",
+        "tier": "free",
+    },
+    {
         "id": "minimax/MiniMax-M2.7",
         "label": "MiniMax M2.7",
         "provider": "minimax",
@@ -66,8 +72,8 @@ AVAILABLE_MODELS = [
         "tier": "free",
     },
     {
-        "id": "MiniMaxAI/MiniMax-M2.7",
-        "label": "MiniMax M2.7",
+        "id": "MiniMaxAI/MiniMax-M3",
+        "label": "MiniMax M3",
         "provider": "huggingface",
         "tier": "free",
     },
@@ -103,7 +109,7 @@ async def _require_hf_for_anthropic(request: Request, model_id: str) -> None:
                 "error": "anthropic_restricted",
                 "message": (
                     "Opus is gated to HF staff. Pick a free model — "
-                    "Kimi K2.6, MiniMax M2.7, or GLM 5.1 — instead."
+                    "Kimi K2.6, MiniMax M3, or GLM 5.1 — instead."
                 ),
             },
         )

@@ -42,11 +42,11 @@ const MODEL_OPTIONS: ModelOption[] = [
     recommended: true,
   },
   {
-    id: 'minimax-m2.7',
-    name: 'MiniMax M2.7',
+    id: 'minimax-m3',
+    name: 'MiniMax M3',
     description: 'Novita',
-    modelPath: 'MiniMaxAI/MiniMax-M2.7',
-    avatarUrl: getHfAvatarUrl('MiniMaxAI/MiniMax-M2.7'),
+    modelPath: 'MiniMaxAI/MiniMax-M3',
+    avatarUrl: getHfAvatarUrl('MiniMaxAI/MiniMax-M3'),
   },
   {
     id: 'glm-5.1',

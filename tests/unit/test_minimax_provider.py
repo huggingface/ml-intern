@@ -26,6 +26,11 @@ _MINIMAX_DEFAULT_BASE_URL = _llm_params_mod._MINIMAX_DEFAULT_BASE_URL
 class TestMinimaxProvider:
     """Tests for the minimax/ prefix provider routing."""
 
+    def test_minimax_m3_model_uses_openai_adapter(self):
+        """minimax/MiniMax-M3 is forwarded to litellm as openai/MiniMax-M3."""
+        params = _resolve_llm_params("minimax/MiniMax-M3")
+        assert params["model"] == "openai/MiniMax-M3"
+
     def test_minimax_model_uses_openai_adapter(self):
         """minimax/X is forwarded to litellm as openai/X with api_base set."""
         params = _resolve_llm_params("minimax/MiniMax-M2.7")
@@ -39,7 +44,7 @@ class TestMinimaxProvider:
         """Default base URL points to api.minimax.io."""
         env = {k: v for k, v in os.environ.items() if k != "MINIMAX_BASE_URL"}
         with patch.dict(os.environ, env, clear=True):
-            params = _resolve_llm_params("minimax/MiniMax-M2.7")
+            params = _resolve_llm_params("minimax/MiniMax-M3")
         assert params["api_base"] == _MINIMAX_DEFAULT_BASE_URL
         assert params["api_base"].startswith("https://api.minimax.io")
 
@@ -113,6 +118,7 @@ class TestMinimaxSuggestedModels:
         spec_s.loader.exec_module(mod)  # type: ignore[union-attr]
 
         ids = [m["id"] for m in mod.SUGGESTED_MODELS]
+        assert "minimax/MiniMax-M3" in ids
         assert "minimax/MiniMax-M2.7" in ids
         assert "minimax/MiniMax-M2.7-highspeed" in ids
 
@@ -126,5 +132,6 @@ class TestMinimaxSuggestedModels:
         mod = importlib.util.module_from_spec(spec_s)  # type: ignore[arg-type]
         spec_s.loader.exec_module(mod)  # type: ignore[union-attr]
 
+        assert mod.is_valid_model_id("minimax/MiniMax-M3")
         assert mod.is_valid_model_id("minimax/MiniMax-M2.7")
         assert mod.is_valid_model_id("minimax/MiniMax-M2.7-highspeed")

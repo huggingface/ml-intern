@@ -19,16 +19,17 @@ from agent.core.effort_probe import ProbeInconclusive, probe_effort
 
 
 # Suggested models shown by `/model` (not a gate). Users can paste any HF
-# model id (e.g. "MiniMaxAI/MiniMax-M2.7") or an `anthropic/` / `openai/` /
+# model id (e.g. "MiniMaxAI/MiniMax-M3") or an `anthropic/` / `openai/` /
 # `minimax/` prefix for direct API access. For HF ids, append ":fastest" /
 # ":cheapest" / ":preferred" / ":<provider>" to override the default
 # routing policy (auto = fastest with failover).
 SUGGESTED_MODELS = [
+    {"id": "minimax/MiniMax-M3", "label": "MiniMax M3 (direct API)"},
     {"id": "bedrock/us.anthropic.claude-opus-4-7", "label": "Claude Opus 4.7"},
     {"id": "bedrock/us.anthropic.claude-opus-4-6-v1", "label": "Claude Opus 4.6"},
     {"id": "minimax/MiniMax-M2.7", "label": "MiniMax M2.7 (direct API)"},
     {"id": "minimax/MiniMax-M2.7-highspeed", "label": "MiniMax M2.7 Highspeed (direct API)"},
-    {"id": "MiniMaxAI/MiniMax-M2.7", "label": "MiniMax M2.7"},
+    {"id": "MiniMaxAI/MiniMax-M3", "label": "MiniMax M3"},
     {"id": "moonshotai/Kimi-K2.6", "label": "Kimi K2.6"},
     {"id": "zai-org/GLM-5.1", "label": "GLM 5.1"},
 ]
@@ -136,7 +137,7 @@ def print_model_listing(config, console) -> None:
         marker = " [dim]<-- current[/dim]" if m["id"] == current else ""
         console.print(f"  {m['id']}  [dim]({m['label']})[/dim]{marker}")
     console.print(
-        "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M2.7').\n"
+        "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M3').\n"
         "Add ':fastest', ':cheapest', ':preferred', or ':<provider>' to override routing.\n"
         "Use 'anthropic/<model>', 'openai/<model>', or 'minimax/<model>' for direct API access.[/dim]"
     )
