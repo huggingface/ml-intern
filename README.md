@@ -54,23 +54,19 @@ ml-intern "fine-tune llama on my dataset"
 **Options:**
 
 ```bash
-ml-intern --model anthropic/claude-opus-4.8:fal-ai "your prompt"
-ml-intern --model moonshotai/Kimi-K2.6 "your prompt"
-ml-intern --model openai/gpt-5.5:fal-ai "your prompt"
-ml-intern --model ollama/llama3.1:8b "your prompt"
-ml-intern --model vllm/meta-llama/Llama-3.1-8B-Instruct "your prompt"
 ml-intern --sandbox-tools "your prompt"                         # use HF Space sandbox tools
 ml-intern --max-iterations 100 "your prompt"
 ml-intern --no-stream "your prompt"
+# Change model
+ml-intern --model moonshotai/Kimi-K2.6 "your prompt"
+ml-intern --model openai/gpt-5.5:fal-ai "your prompt"
 ```
 
 Run `ml-intern` then `/model` to see the full list of suggested model ids
 (Claude, GPT, HF Router models like MiniMax, Kimi, GLM, DeepSeek, and local
 model prefixes).
 
-Hosted inference is billed to the active Hugging Face user. In the web app,
-free users start on Kimi K2.6 and HF Pro users start on Claude Opus 4.8; the
-CLI default is Claude Opus 4.8.
+Hosted inference is billed to the active Hugging Face user. See below on how to run `ml-intern` with local models.
 
 #### Local models
 
