@@ -19,6 +19,38 @@ export interface UsageBucket {
   hf_jobs_billable_seconds_estimate: number;
 }
 
+export interface HfAccountUsageBucket {
+  window_start?: string | null;
+  window_end?: string | null;
+  timezone?: string | null;
+  total_usd: number;
+  inference_providers_usd: number;
+  hf_jobs_usd: number;
+  inference_provider_requests: number;
+  hf_jobs_minutes: number;
+}
+
+export interface HfInferenceProvidersCredits {
+  included_usd: number;
+  used_usd: number;
+  remaining_included_usd: number;
+  limit_usd: number;
+  remaining_limit_usd: number;
+  num_requests: number;
+  period_start?: string | null;
+  period_end?: string | null;
+}
+
+export interface HfAccountUsage {
+  source: 'hf_billing_usage_v2';
+  available: boolean;
+  error?: string | null;
+  current_session: HfAccountUsageBucket | null;
+  today: HfAccountUsageBucket | null;
+  month: HfAccountUsageBucket | null;
+  inference_providers_credits: HfInferenceProvidersCredits | null;
+}
+
 export interface UsageResponse {
   source: 'app_telemetry';
   currency: 'USD';
@@ -27,6 +59,7 @@ export interface UsageResponse {
   session: UsageBucket | null;
   today: UsageBucket;
   month: UsageBucket;
+  hf_account?: HfAccountUsage | null;
   links: Record<string, string>;
 }
 
@@ -54,6 +87,14 @@ function intValue(value: unknown): number {
 
 function roundUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function usageUrl(sessionId?: string | null): string {
+  const params = new URLSearchParams();
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  params.set('tz', timezone);
+  if (sessionId) params.set('session_id', sessionId);
+  return `/api/usage?${params.toString()}`;
 }
 
 function applyEventToBucket(
@@ -97,15 +138,12 @@ export const useUsageStore = create<UsageStore>()((set, get) => ({
   error: null,
 
   fetchUsage: async (sessionId?: string | null) => {
-    const params = new URLSearchParams();
-    const timezone =
-      Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    params.set('tz', timezone);
-    if (sessionId) params.set('session_id', sessionId);
-
     set({ isLoading: true, error: null });
     try {
-      const response = await apiFetch(`/api/usage?${params.toString()}`);
+      let response = await apiFetch(usageUrl(sessionId));
+      if (response.status === 404 && sessionId) {
+        response = await apiFetch(usageUrl());
+      }
       if (!response.ok) {
         throw new Error(response.statusText || 'Failed to load usage');
       }

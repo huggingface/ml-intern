@@ -694,6 +694,11 @@ async def get_usage(
     return await build_usage_response(
         session_manager,
         user_id=user["user_id"],
+        hf_token=(
+            resolve_hf_request_token(request, include_env_fallback=False)
+            or _user_hf_token(user)
+            or resolve_hf_request_token(request)
+        ),
         session_id=session_id,
         timezone_name=tz,
     )

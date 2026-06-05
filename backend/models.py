@@ -140,6 +140,44 @@ class UsageBucket(BaseModel):
     hf_jobs_billable_seconds_estimate: int = 0
 
 
+class HfAccountUsageBucket(BaseModel):
+    """HF account billing usage for a time window."""
+
+    window_start: str | None = None
+    window_end: str | None = None
+    timezone: str | None = None
+    total_usd: float = 0.0
+    inference_providers_usd: float = 0.0
+    hf_jobs_usd: float = 0.0
+    inference_provider_requests: int = 0
+    hf_jobs_minutes: float = 0.0
+
+
+class HfInferenceProvidersCredits(BaseModel):
+    """Included and configured Inference Providers account credits."""
+
+    included_usd: float = 0.0
+    used_usd: float = 0.0
+    remaining_included_usd: float = 0.0
+    limit_usd: float = 0.0
+    remaining_limit_usd: float = 0.0
+    num_requests: int = 0
+    period_start: str | None = None
+    period_end: str | None = None
+
+
+class HfAccountUsage(BaseModel):
+    """Authoritative HF account billing usage from the signed-in token."""
+
+    source: Literal["hf_billing_usage_v2"]
+    available: bool = False
+    error: str | None = None
+    current_session: HfAccountUsageBucket | None = None
+    today: HfAccountUsageBucket | None = None
+    month: HfAccountUsageBucket | None = None
+    inference_providers_credits: HfInferenceProvidersCredits | None = None
+
+
 class UsageResponse(BaseModel):
     """Current-user app-attributed usage response."""
 
@@ -150,6 +188,7 @@ class UsageResponse(BaseModel):
     session: UsageBucket | None = None
     today: UsageBucket
     month: UsageBucket
+    hf_account: HfAccountUsage | None = None
     links: dict[str, str] = Field(default_factory=dict)
 
 

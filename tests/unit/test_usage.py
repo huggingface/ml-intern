@@ -10,6 +10,7 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 from usage import (  # noqa: E402
+    _account_bucket_from_billing_usage,
     aggregate_usage_events,
     build_usage_response,
     resolve_usage_windows,
@@ -76,6 +77,32 @@ def test_aggregate_usage_events_treats_missing_costs_as_zero():
     assert usage["prompt_tokens"] == 7
     assert usage["hf_jobs_billable_seconds_estimate"] == 60
     assert usage["total_usd"] == 0.0
+
+
+def test_account_bucket_from_hf_billing_usage_v2():
+    usage = _account_bucket_from_billing_usage(
+        {
+            "usage": {
+                "inferenceProviders": {
+                    "usedNanoUsd": 1_500_000_000,
+                    "numRequests": 12,
+                },
+                "jobs": {
+                    "usedMicroUsd": 250_000,
+                    "totalMinutes": 3.5,
+                },
+            }
+        },
+        window_start=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        window_end=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+        timezone="UTC",
+    )
+
+    assert usage["inference_providers_usd"] == 1.5
+    assert usage["hf_jobs_usd"] == 0.25
+    assert usage["total_usd"] == 1.75
+    assert usage["inference_provider_requests"] == 12
+    assert usage["hf_jobs_minutes"] == 3.5
 
 
 def test_usage_windows_respect_browser_timezone():
@@ -200,3 +227,70 @@ async def test_runtime_usage_interprets_naive_timestamps_in_browser_timezone():
     assert usage["today"]["llm_calls"] == 1
     assert usage["month"]["llm_calls"] == 1
     assert usage["today"]["total_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_hf_account_usage_uses_session_start_for_current_delta(monkeypatch):
+    session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
+    manager = _Manager(
+        {
+            "s1": SimpleNamespace(
+                session_id="s1",
+                user_id="owner",
+                created_at=session_created_at,
+                session=SimpleNamespace(logged_events=[]),
+            )
+        }
+    )
+    calls = []
+
+    async def fake_fetch(_token, *, start, end):
+        calls.append((start, end))
+        if start == session_created_at:
+            used_nano = 500_000_000
+        elif start == datetime(2026, 6, 5, 0, 0, tzinfo=UTC):
+            used_nano = 1_000_000_000
+        else:
+            used_nano = 2_000_000_000
+        return {
+            "usage": {
+                "inferenceProviders": {
+                    "usedNanoUsd": used_nano,
+                    "includedNanoUsd": 2_000_000_000,
+                    "limitNanoUsd": 5_000_000_000,
+                    "numRequests": 4,
+                },
+                "jobs": {"usedMicroUsd": 0, "totalMinutes": 0},
+            }
+        }
+
+    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_fetch)
+
+    usage = await build_usage_response(
+        manager,
+        user_id="owner",
+        hf_token="hf_fake",
+        session_id="s1",
+        timezone_name="UTC",
+        now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+    )
+
+    assert usage["hf_account"]["available"] is True
+    assert usage["hf_account"]["current_session"]["inference_providers_usd"] == 0.5
+    assert usage["hf_account"]["today"]["inference_providers_usd"] == 1.0
+    assert usage["hf_account"]["month"]["inference_providers_usd"] == 2.0
+    assert usage["hf_account"]["inference_providers_credits"] == {
+        "included_usd": 2.0,
+        "used_usd": 2.0,
+        "remaining_included_usd": 0.0,
+        "limit_usd": 5.0,
+        "remaining_limit_usd": 3.0,
+        "num_requests": 4,
+        "period_start": None,
+        "period_end": None,
+    }
+    assert {start for start, _ in calls} == {
+        datetime(2026, 6, 5, 0, 0, tzinfo=UTC),
+        datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        session_created_at,
+    }

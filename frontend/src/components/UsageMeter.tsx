@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import {
   Box,
   Button,
@@ -12,7 +12,12 @@ import {
 import PaidOutlinedIcon from '@mui/icons-material/PaidOutlined';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import { useSessionStore } from '@/store/sessionStore';
-import { type UsageBucket, useUsageStore } from '@/store/usageStore';
+import {
+  type HfAccountUsageBucket,
+  type HfInferenceProvidersCredits,
+  type UsageBucket,
+  useUsageStore,
+} from '@/store/usageStore';
 
 function formatUsd(value: number | undefined, compact = false): string {
   const amount = value ?? 0;
@@ -29,35 +34,121 @@ function formatCount(value: number | undefined): string {
   return new Intl.NumberFormat('en-US').format(value ?? 0);
 }
 
-function UsageSection({ title, bucket }: { title: string; bucket: UsageBucket | null }) {
+function UsageRow({
+  label,
+  value,
+  strong = false,
+}: {
+  label: string;
+  value: string;
+  strong?: boolean;
+}) {
+  return (
+    <>
+      <Typography variant="body2" color="text.secondary">
+        {label}
+      </Typography>
+      <Typography
+        variant="body2"
+        sx={{ fontWeight: strong ? 700 : 400, fontVariantNumeric: 'tabular-nums' }}
+      >
+        {value}
+      </Typography>
+    </>
+  );
+}
+
+function UsageGrid({ children }: { children: ReactNode }) {
+  return (
+    <Box
+      sx={{
+        display: 'grid',
+        gridTemplateColumns: '1fr auto',
+        columnGap: 2,
+        rowGap: 0.5,
+        mt: 0.75,
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+function AccountUsageSection({
+  title,
+  account,
+  telemetry,
+  sessionDelta = false,
+}: {
+  title: string;
+  account: HfAccountUsageBucket | null | undefined;
+  telemetry: UsageBucket | null | undefined;
+  sessionDelta?: boolean;
+}) {
   return (
     <Box sx={{ py: 1 }}>
       <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 700 }}>
         {title}
       </Typography>
-      <Box sx={{ display: 'grid', gridTemplateColumns: '1fr auto', columnGap: 2, rowGap: 0.5, mt: 0.75 }}>
-        <Typography variant="body2" color="text.secondary">Total</Typography>
-        <Typography variant="body2" sx={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
-          {formatUsd(bucket?.total_usd)}
-        </Typography>
-        <Typography variant="body2" color="text.secondary">Inference Providers</Typography>
-        <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-          {formatUsd(bucket?.inference_usd)}
-        </Typography>
-        <Typography variant="body2" color="text.secondary">HF Jobs estimated</Typography>
-        <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-          {formatUsd(bucket?.hf_jobs_estimated_usd)}
-        </Typography>
-        <Typography variant="body2" color="text.secondary">Calls / jobs</Typography>
-        <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-          {formatCount(bucket?.llm_calls)} / {formatCount(bucket?.hf_jobs_count)}
-        </Typography>
-        <Typography variant="body2" color="text.secondary">Tokens</Typography>
-        <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-          {formatCount(bucket?.total_tokens)}
-        </Typography>
-      </Box>
+      <UsageGrid>
+        <UsageRow
+          label={account ? (sessionDelta ? 'HF account delta' : 'HF account total') : 'Telemetry total'}
+          value={formatUsd(account?.total_usd ?? telemetry?.total_usd)}
+          strong
+        />
+        <UsageRow
+          label="Inference Providers"
+          value={formatUsd(account?.inference_providers_usd ?? telemetry?.inference_usd)}
+        />
+        <UsageRow
+          label={account ? 'HF Jobs' : 'HF Jobs estimated'}
+          value={formatUsd(account?.hf_jobs_usd ?? telemetry?.hf_jobs_estimated_usd)}
+        />
+        {account && (
+          <UsageRow
+            label="Provider requests"
+            value={formatCount(account.inference_provider_requests)}
+          />
+        )}
+        <UsageRow
+          label="ML Intern calls / jobs"
+          value={`${formatCount(telemetry?.llm_calls)} / ${formatCount(telemetry?.hf_jobs_count)}`}
+        />
+        <UsageRow label="ML Intern tokens" value={formatCount(telemetry?.total_tokens)} />
+      </UsageGrid>
     </Box>
+  );
+}
+
+function CreditsSection({ credits }: { credits: HfInferenceProvidersCredits | null | undefined }) {
+  if (!credits) return null;
+  return (
+    <>
+      <Divider />
+      <Box sx={{ py: 1 }}>
+        <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 700 }}>
+          Inference credits
+        </Typography>
+        <UsageGrid>
+          <UsageRow
+            label="Included remaining"
+            value={formatUsd(credits.remaining_included_usd)}
+            strong
+          />
+          <UsageRow
+            label="Used / included"
+            value={`${formatUsd(credits.used_usd)} / ${formatUsd(credits.included_usd)}`}
+          />
+          {credits.limit_usd > 0 && (
+            <UsageRow
+              label="Spend limit remaining"
+              value={formatUsd(credits.remaining_limit_usd)}
+            />
+          )}
+          <UsageRow label="Provider requests" value={formatCount(credits.num_requests)} />
+        </UsageGrid>
+      </Box>
+    </>
   );
 }
 
@@ -70,7 +161,8 @@ export default function UsageMeter() {
     void fetchUsage(activeSessionId);
   }, [activeSessionId, fetchUsage]);
 
-  const sessionTotal = usage?.session?.total_usd ?? 0;
+  const sessionTotal =
+    usage?.hf_account?.current_session?.total_usd ?? usage?.session?.total_usd ?? 0;
   const links = useMemo(() => usage?.links ?? {}, [usage?.links]);
   const open = Boolean(anchorEl);
 
@@ -107,6 +199,8 @@ export default function UsageMeter() {
             sx: {
               width: 320,
               maxWidth: 'calc(100vw - 24px)',
+              maxHeight: 'calc(100vh - 24px)',
+              overflowY: 'auto',
               p: 2,
               border: '1px solid',
               borderColor: 'divider',
@@ -118,7 +212,7 @@ export default function UsageMeter() {
           Usage
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          ML Intern-attributed spend, not your full HF invoice.
+          HF account billing plus ML Intern session telemetry.
         </Typography>
 
         {error ? (
@@ -127,11 +221,30 @@ export default function UsageMeter() {
           </Typography>
         ) : (
           <>
-            <UsageSection title="Current session" bucket={usage?.session ?? null} />
+            <AccountUsageSection
+              title="Current session"
+              account={usage?.hf_account?.current_session ?? null}
+              telemetry={usage?.session ?? null}
+              sessionDelta
+            />
             <Divider />
-            <UsageSection title="Today" bucket={usage?.today ?? null} />
+            <AccountUsageSection
+              title="Today"
+              account={usage?.hf_account?.today ?? null}
+              telemetry={usage?.today ?? null}
+            />
             <Divider />
-            <UsageSection title="This month" bucket={usage?.month ?? null} />
+            <AccountUsageSection
+              title="This month"
+              account={usage?.hf_account?.month ?? null}
+              telemetry={usage?.month ?? null}
+            />
+            <CreditsSection credits={usage?.hf_account?.inference_providers_credits} />
+            {usage?.hf_account?.available && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', pt: 0.5 }}>
+                Session billing is inferred from HF account usage since session start.
+              </Typography>
+            )}
           </>
         )}
 
