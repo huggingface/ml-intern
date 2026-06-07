@@ -23,6 +23,14 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_TOKENS = 200_000
 _TURN_COMPLETE_NOTIFICATION_CHARS = 39000
 
+# Per-token streaming events. They're fanned out live to the client but kept out
+# of the in-memory trajectory: ``logged_events`` is never trimmed within a
+# session and is re-serialized in full on every save (see ``get_trajectory`` ->
+# ``save_trajectory_local``), so accumulating one entry per token dominates the
+# save cost on long/concurrent sessions. The assistant's text is preserved by
+# the consolidated message in ``context_manager.items``, so nothing is lost.
+_EPHEMERAL_TRAJECTORY_EVENTS = frozenset({"assistant_chunk"})
+
 DEFAULT_SESSION_LOG_DIR = Path("session_logs")
 
 
@@ -159,14 +167,17 @@ class Session:
 
     async def send_event(self, event: Event) -> None:
         """Send event back to client and log to trajectory"""
-        # Log event to trajectory
-        self.logged_events.append(
-            {
-                "timestamp": datetime.now().astimezone().isoformat(),
-                "event_type": event.event_type,
-                "data": event.data,
-            }
-        )
+        # Log event to trajectory, skipping high-frequency per-token events that
+        # would bloat the re-serialized-on-every-save trajectory (see
+        # _EPHEMERAL_TRAJECTORY_EVENTS).
+        if event.event_type not in _EPHEMERAL_TRAJECTORY_EVENTS:
+            self.logged_events.append(
+                {
+                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "event_type": event.event_type,
+                    "data": event.data,
+                }
+            )
         if self.persistence_store is not None:
             try:
                 event.seq = await self.persistence_store.append_event(
