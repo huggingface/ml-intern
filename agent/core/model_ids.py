@@ -5,10 +5,10 @@ HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 # Keep these as verbatim HF Router ids; version punctuation differs by model.
 CLAUDE_OPUS_48_MODEL_ID = "anthropic/claude-opus-4.8:fal-ai"
 GPT_55_MODEL_ID = "openai/gpt-5.5:fal-ai"
-KIMI_K26_MODEL_ID = "moonshotai/Kimi-K2.6"
-MINIMAX_M27_MODEL_ID = "MiniMaxAI/MiniMax-M2.7"
-GLM_51_MODEL_ID = "zai-org/GLM-5.1"
-DEEPSEEK_V4_PRO_MODEL_ID = "deepseek-ai/DeepSeek-V4-Pro:deepinfra"
+KIMI_K26_MODEL_ID = "moonshotai/Kimi-K2.6:novita"
+MINIMAX_M27_MODEL_ID = "MiniMaxAI/MiniMax-M2.7:novita"
+GLM_51_MODEL_ID = "zai-org/GLM-5.1:novita"
+DEEPSEEK_V4_PRO_MODEL_ID = "deepseek-ai/DeepSeek-V4-Pro:novita"
 
 DEFAULT_MODEL_ID = CLAUDE_OPUS_48_MODEL_ID
 

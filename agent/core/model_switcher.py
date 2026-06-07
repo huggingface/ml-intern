@@ -28,8 +28,11 @@ from agent.core.local_models import (
 )
 from agent.core.model_ids import (
     CLAUDE_OPUS_48_MODEL_ID,
+    DEEPSEEK_V4_PRO_MODEL_ID,
+    GLM_51_MODEL_ID,
     GPT_55_MODEL_ID,
     KIMI_K26_MODEL_ID,
+    MINIMAX_M27_MODEL_ID,
     strip_huggingface_model_prefix,
 )
 
@@ -41,10 +44,10 @@ from agent.core.model_ids import (
 SUGGESTED_MODELS = [
     {"id": CLAUDE_OPUS_48_MODEL_ID, "label": "Claude Opus 4.8"},
     {"id": GPT_55_MODEL_ID, "label": "GPT-5.5"},
-    {"id": "MiniMaxAI/MiniMax-M2.7", "label": "MiniMax M2.7"},
+    {"id": MINIMAX_M27_MODEL_ID, "label": "MiniMax M2.7"},
     {"id": KIMI_K26_MODEL_ID, "label": "Kimi K2.6"},
-    {"id": "zai-org/GLM-5.1", "label": "GLM 5.1"},
-    {"id": "deepseek-ai/DeepSeek-V4-Pro:deepinfra", "label": "DeepSeek V4 Pro"},
+    {"id": GLM_51_MODEL_ID, "label": "GLM 5.1"},
+    {"id": DEEPSEEK_V4_PRO_MODEL_ID, "label": "DeepSeek V4 Pro"},
 ]
 
 
