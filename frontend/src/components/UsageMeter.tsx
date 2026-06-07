@@ -78,12 +78,10 @@ function AccountUsageSection({
   title,
   account,
   telemetry,
-  sessionDelta = false,
 }: {
   title: string;
   account: HfAccountUsageBucket | null | undefined;
   telemetry: UsageBucket | null | undefined;
-  sessionDelta?: boolean;
 }) {
   return (
     <Box sx={{ py: 1 }}>
@@ -92,27 +90,13 @@ function AccountUsageSection({
       </Typography>
       <UsageGrid>
         <UsageRow
-          label={account ? (sessionDelta ? 'HF account delta' : 'HF account total') : 'Telemetry total'}
-          value={formatUsd(account?.total_usd ?? telemetry?.total_usd)}
-          strong
-        />
-        <UsageRow
           label="Inference Providers"
           value={formatUsd(account?.inference_providers_usd ?? telemetry?.inference_usd)}
+          strong
         />
         <UsageRow
           label={account ? 'HF Jobs' : 'HF Jobs estimated'}
           value={formatUsd(account?.hf_jobs_usd ?? telemetry?.hf_jobs_estimated_usd)}
-        />
-        {account && (
-          <UsageRow
-            label="Provider requests"
-            value={formatCount(account.inference_provider_requests)}
-          />
-        )}
-        <UsageRow
-          label="ML Intern calls / jobs"
-          value={`${formatCount(telemetry?.llm_calls)} / ${formatCount(telemetry?.hf_jobs_count)}`}
         />
         <UsageRow label="ML Intern tokens" value={formatCount(telemetry?.total_tokens)} />
       </UsageGrid>
@@ -145,7 +129,6 @@ function CreditsSection({ credits }: { credits: HfInferenceProvidersCredits | nu
               value={formatUsd(credits.remaining_limit_usd)}
             />
           )}
-          <UsageRow label="Provider requests" value={formatCount(credits.num_requests)} />
         </UsageGrid>
       </Box>
     </>
@@ -212,7 +195,7 @@ export default function UsageMeter() {
           Usage
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          HF account billing plus ML Intern session telemetry.
+          Current session billing and Inference Providers credits.
         </Typography>
 
         {error ? (
@@ -225,19 +208,6 @@ export default function UsageMeter() {
               title="Current session"
               account={usage?.hf_account?.current_session ?? null}
               telemetry={usage?.session ?? null}
-              sessionDelta
-            />
-            <Divider />
-            <AccountUsageSection
-              title="Today"
-              account={usage?.hf_account?.today ?? null}
-              telemetry={usage?.today ?? null}
-            />
-            <Divider />
-            <AccountUsageSection
-              title="This month"
-              account={usage?.hf_account?.month ?? null}
-              telemetry={usage?.month ?? null}
             />
             <CreditsSection credits={usage?.hf_account?.inference_providers_credits} />
             {usage?.hf_account?.available && (
