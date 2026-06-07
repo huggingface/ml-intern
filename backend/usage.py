@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 HF_BILLING_USAGE_V2_URL = "https://huggingface.co/api/settings/billing/usage-v2"
 HF_BILLING_URL = "https://huggingface.co/settings/billing"
-HF_INFERENCE_PROVIDERS_USAGE_URL = "https://huggingface.co/settings/billing/usage"
 HF_INFERENCE_PROVIDERS_PRICING_URL = (
     "https://huggingface.co/docs/inference-providers/en/pricing"
 )
@@ -746,7 +745,6 @@ async def build_usage_response(
         "hf_account": hf_account,
         "links": {
             "hf_billing": HF_BILLING_URL,
-            "inference_providers_usage": HF_INFERENCE_PROVIDERS_USAGE_URL,
             "inference_providers_pricing": HF_INFERENCE_PROVIDERS_PRICING_URL,
             "jobs_pricing": HF_JOBS_PRICING_URL,
         },

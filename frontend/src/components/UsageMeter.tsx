@@ -35,6 +35,18 @@ function formatCount(value: number | undefined): string {
   return new Intl.NumberFormat('en-US').format(value ?? 0);
 }
 
+function contextTokenCount(telemetry: UsageBucket | null | undefined): number | undefined {
+  if (!telemetry) return undefined;
+  if (telemetry.total_tokens > 0) {
+    return Math.max(0, telemetry.total_tokens - telemetry.completion_tokens);
+  }
+  return (
+    telemetry.prompt_tokens +
+    telemetry.cache_read_tokens +
+    telemetry.cache_creation_tokens
+  );
+}
+
 function billingUnavailableMessage(error: string | null | undefined): string | null {
   if (!error) return null;
   if (error === 'missing_hf_token') return 'Sign in to view HF account billing usage.';
@@ -115,8 +127,12 @@ function AccountUsageSection({
         />
         <UsageRow label="LLM calls" value={formatCount(telemetry?.llm_calls)} />
         <UsageRow
-          label="Tokens"
-          value={formatCount(telemetry?.total_tokens)}
+          label="Input tokens"
+          value={formatCount(contextTokenCount(telemetry))}
+        />
+        <UsageRow
+          label="Output tokens"
+          value={formatCount(telemetry?.completion_tokens)}
         />
       </UsageGrid>
     </Box>
@@ -241,11 +257,6 @@ export default function UsageMeter() {
           {links.hf_billing && (
             <Link href={links.hf_billing} target="_blank" rel="noopener noreferrer" underline="hover" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25, fontSize: '0.75rem' }}>
               HF billing <OpenInNewIcon sx={{ fontSize: 12 }} />
-            </Link>
-          )}
-          {links.inference_providers_usage && (
-            <Link href={links.inference_providers_usage} target="_blank" rel="noopener noreferrer" underline="hover" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25, fontSize: '0.75rem' }}>
-              Inference usage <OpenInNewIcon sx={{ fontSize: 12 }} />
             </Link>
           )}
           {links.jobs_pricing && (
