@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Box,
   Button,
   CircularProgress,
@@ -28,6 +29,24 @@ function formatUsd(value: number | undefined): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(amount);
+}
+
+function preferLiveEstimate(
+  accountValue: number | null | undefined,
+  telemetryValue: number | null | undefined,
+): number | undefined {
+  if (accountValue == null) return telemetryValue ?? undefined;
+  if (accountValue <= 0 && (telemetryValue ?? 0) > 0) return telemetryValue ?? accountValue;
+  return accountValue;
+}
+
+function billingUnavailableMessage(error: string | null | undefined): string | null {
+  if (!error) return null;
+  if (error === 'missing_hf_token') return 'Sign in to view HF account billing usage.';
+  if (error === 'billing_usage_unavailable') {
+    return 'HF billing usage is unavailable for this login. Showing app telemetry estimates.';
+  }
+  return 'HF billing usage is unavailable. Showing app telemetry estimates.';
 }
 
 function UsageRow({
@@ -87,12 +106,16 @@ function AccountUsageSection({
       <UsageGrid>
         <UsageRow
           label="Inference Providers"
-          value={formatUsd(account?.inference_providers_usd ?? telemetry?.inference_usd)}
+          value={formatUsd(
+            preferLiveEstimate(account?.inference_providers_usd, telemetry?.inference_usd),
+          )}
           strong
         />
         <UsageRow
           label={account ? 'HF Jobs' : 'HF Jobs estimated'}
-          value={formatUsd(account?.hf_jobs_usd ?? telemetry?.hf_jobs_estimated_usd)}
+          value={formatUsd(
+            preferLiveEstimate(account?.hf_jobs_usd, telemetry?.hf_jobs_estimated_usd),
+          )}
         />
       </UsageGrid>
     </Box>
@@ -140,8 +163,12 @@ export default function UsageMeter() {
   }, [activeSessionId, fetchUsage]);
 
   const sessionTotal =
-    usage?.hf_account?.current_session?.total_usd ?? usage?.session?.total_usd ?? 0;
+    preferLiveEstimate(
+      usage?.hf_account?.current_session?.total_usd,
+      usage?.session?.total_usd,
+    ) ?? 0;
   const links = useMemo(() => usage?.links ?? {}, [usage?.links]);
+  const billingMessage = billingUnavailableMessage(usage?.hf_account?.error);
   const open = Boolean(anchorEl);
 
   return (
@@ -199,6 +226,11 @@ export default function UsageMeter() {
           </Typography>
         ) : (
           <>
+            {billingMessage && (
+              <Alert severity="info" sx={{ mt: 1.5, py: 0.25 }}>
+                {billingMessage}
+              </Alert>
+            )}
             <AccountUsageSection
               title="Current session"
               account={usage?.hf_account?.current_session ?? null}

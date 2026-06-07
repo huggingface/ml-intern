@@ -43,6 +43,7 @@ OAUTH_SCOPE_COOKIE = "hf_oauth_scope_hash"
 REQUIRED_OAUTH_SCOPES: tuple[str, ...] = (
     "openid",
     "profile",
+    "read-billing",
     "read-repos",
     "write-repos",
     "contribute-repos",
