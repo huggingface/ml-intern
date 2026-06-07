@@ -93,6 +93,7 @@ function usageUrl(sessionId?: string | null): string {
   const params = new URLSearchParams();
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   params.set('tz', timezone);
+  params.set('include_rollups', 'false');
   if (sessionId) params.set('session_id', sessionId);
   return `/api/usage?${params.toString()}`;
 }

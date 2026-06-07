@@ -405,7 +405,7 @@ class MongoSessionStore(NoopSessionStore):
                 created_at["$lt"] = end
             event_query["created_at"] = created_at
 
-        event_cursor = self.db.session_events.find(event_query).sort("created_at", 1)
+        event_cursor = self.db.session_events.find(event_query)
         return [row async for row in event_cursor]
 
     async def append_trace_message(

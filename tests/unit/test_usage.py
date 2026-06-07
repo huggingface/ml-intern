@@ -120,12 +120,24 @@ class _NoopStore:
     enabled = False
 
 
+class _RecordingStore:
+    enabled = True
+
+    def __init__(self):
+        self.calls = []
+
+    async def load_usage_events(self, user_id, **kwargs):
+        self.calls.append((user_id, kwargs))
+        return []
+
+
 class _Manager:
-    def __init__(self, sessions):
+    def __init__(self, sessions, store=None):
         self.sessions = sessions
+        self.store = store or _NoopStore()
 
     def _store(self):
-        return _NoopStore()
+        return self.store
 
 
 def _agent_session(session_id, user_id, events):
@@ -294,3 +306,57 @@ async def test_hf_account_usage_uses_session_start_for_current_delta(monkeypatch
         datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
         session_created_at,
     }
+
+
+@pytest.mark.asyncio
+async def test_compact_usage_skips_unused_rollup_loads(monkeypatch):
+    session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
+    store = _RecordingStore()
+    manager = _Manager(
+        {
+            "s1": SimpleNamespace(
+                session_id="s1",
+                user_id="owner",
+                created_at=session_created_at,
+                session=SimpleNamespace(logged_events=[]),
+            )
+        },
+        store=store,
+    )
+    billing_starts = []
+
+    async def fake_fetch(_token, *, start, end):
+        billing_starts.append(start)
+        return {
+            "usage": {
+                "inferenceProviders": {
+                    "usedNanoUsd": 0,
+                    "includedNanoUsd": 2_000_000_000,
+                    "limitNanoUsd": 0,
+                },
+                "jobs": {"usedMicroUsd": 0, "totalMinutes": 0},
+            }
+        }
+
+    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_fetch)
+
+    usage = await build_usage_response(
+        manager,
+        user_id="owner",
+        hf_token="hf_fake",
+        session_id="s1",
+        timezone_name="UTC",
+        now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+        include_rollups=False,
+    )
+
+    assert store.calls == [("owner", {"session_id": "s1", "start": None, "end": None})]
+    assert set(billing_starts) == {
+        datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        session_created_at,
+    }
+    assert datetime(2026, 6, 5, 0, 0, tzinfo=UTC) not in billing_starts
+    assert usage["today"]["llm_calls"] == 0
+    assert usage["month"]["llm_calls"] == 0
+    assert usage["hf_account"]["today"] is None
+    assert usage["hf_account"]["month"]["inference_providers_usd"] == 0.0

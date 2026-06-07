@@ -681,6 +681,7 @@ async def get_usage(
     request: Request,
     session_id: str | None = None,
     tz: str | None = None,
+    include_rollups: bool = True,
     user: dict = Depends(get_current_user),
 ) -> dict:
     """Return app-attributed usage for the current user."""
@@ -701,6 +702,7 @@ async def get_usage(
         ),
         session_id=session_id,
         timezone_name=tz,
+        include_rollups=include_rollups,
     )
 
 

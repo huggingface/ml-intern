@@ -356,6 +356,7 @@ async def _build_hf_account_usage(
     now_utc: datetime,
     today_start: datetime,
     month_start: datetime,
+    include_rollups: bool = True,
 ) -> dict[str, Any]:
     account_usage: dict[str, Any] = {
         "source": "hf_billing_usage_v2",
@@ -374,12 +375,6 @@ async def _build_hf_account_usage(
         session_start = await _load_persisted_session_started_at(manager, session_id)
 
     window_tasks: dict[str, tuple[datetime, asyncio.Task[dict[str, Any] | None]]] = {
-        "today": (
-            today_start,
-            asyncio.create_task(
-                _fetch_hf_billing_usage_v2(hf_token, start=today_start, end=now_utc)
-            ),
-        ),
         "month": (
             month_start,
             asyncio.create_task(
@@ -387,6 +382,13 @@ async def _build_hf_account_usage(
             ),
         ),
     }
+    if include_rollups:
+        window_tasks["today"] = (
+            today_start,
+            asyncio.create_task(
+                _fetch_hf_billing_usage_v2(hf_token, start=today_start, end=now_utc)
+            ),
+        )
     if session_start is not None:
         window_tasks["current_session"] = (
             session_start,
@@ -505,6 +507,7 @@ async def build_usage_response(
     session_id: str | None = None,
     timezone_name: str | None = None,
     now: datetime | None = None,
+    include_rollups: bool = True,
 ) -> dict[str, Any]:
     windows = resolve_usage_windows(timezone_name, now=now)
     timezone = str(windows["timezone"])
@@ -520,20 +523,23 @@ async def build_usage_response(
             session_id=session_id,
         )
 
-    today_events = await _load_usage_events(
-        manager,
-        user_id=user_id,
-        start=today_start,
-        end=now_utc,
-        timezone_name=timezone,
-    )
-    month_events = await _load_usage_events(
-        manager,
-        user_id=user_id,
-        start=month_start,
-        end=now_utc,
-        timezone_name=timezone,
-    )
+    today_events: list[dict[str, Any]] = []
+    month_events: list[dict[str, Any]] = []
+    if include_rollups:
+        today_events = await _load_usage_events(
+            manager,
+            user_id=user_id,
+            start=today_start,
+            end=now_utc,
+            timezone_name=timezone,
+        )
+        month_events = await _load_usage_events(
+            manager,
+            user_id=user_id,
+            start=month_start,
+            end=now_utc,
+            timezone_name=timezone,
+        )
     hf_account = await _build_hf_account_usage(
         manager,
         hf_token=hf_token,
@@ -542,6 +548,7 @@ async def build_usage_response(
         now_utc=now_utc,
         today_start=today_start,
         month_start=month_start,
+        include_rollups=include_rollups,
     )
 
     return {
