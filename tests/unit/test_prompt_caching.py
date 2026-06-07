@@ -182,7 +182,10 @@ def test_prompt_cache_params_add_session_id_for_fal_router_model():
     cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
 
     assert cached_params is not llm_params
-    assert cached_params["extra_body"] == {"session_id": "session-1"}
+    assert cached_params["extra_body"] == {
+        "session_id": "session-1",
+        "cache_control": {"type": "ephemeral"},
+    }
     assert "extra_body" not in llm_params
 
 

@@ -1,8 +1,11 @@
 """Prompt-cache helpers for HF Router FAL requests.
 
 The HF Router/OpenRouter path uses provider-native prompt caching. Anthropic
-models need explicit JSON ``cache_control`` content blocks; OpenAI models cache
-eligible prefixes automatically and accept routing/retention hints in the body.
+models keep explicit JSON ``cache_control`` content blocks for compatibility,
+and also need the top-level ``cache_control`` hint on the OpenAI-compatible HF
+Router path; the explicit markers alone are accepted there but do not produce
+cache writes. OpenAI models cache eligible prefixes automatically and accept
+routing/retention hints in the body.
 Headers like ``X-OpenRouter-Cache`` control response caching, not prompt
 caching through this route.
 """
@@ -66,6 +69,9 @@ def with_prompt_cache_params(
         updates["session_id"] = stable_session_id
         if _is_openai_gpt55(llm_params):
             updates["prompt_cache_key"] = stable_session_id
+
+    if _uses_explicit_cache_control(llm_params):
+        updates["cache_control"] = dict(_CACHE_CONTROL)
 
     if _is_openai_gpt55(llm_params):
         updates["prompt_cache_retention"] = "24h"

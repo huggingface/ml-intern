@@ -60,6 +60,13 @@ def extract_usage(response_or_chunk: Any) -> dict:
                 cache_read = details.get("cached_tokens", 0) or 0
             else:
                 cache_read = getattr(details, "cached_tokens", 0) or 0
+    if not cache_creation:
+        details = _g("prompt_tokens_details", None)
+        if details is not None:
+            if isinstance(details, dict):
+                cache_creation = details.get("cache_write_tokens", 0) or 0
+            else:
+                cache_creation = getattr(details, "cache_write_tokens", 0) or 0
 
     return {
         "prompt_tokens": int(prompt),

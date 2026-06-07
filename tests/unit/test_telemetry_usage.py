@@ -13,6 +13,25 @@ class FakeSession:
         self.events.append(event)
 
 
+def test_extract_usage_reads_hf_router_cache_write_tokens():
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            prompt_tokens_details=SimpleNamespace(
+                cached_tokens=80,
+                cache_write_tokens=20,
+            ),
+        )
+    )
+
+    usage = telemetry.extract_usage(response)
+
+    assert usage["cache_read_tokens"] == 80
+    assert usage["cache_creation_tokens"] == 20
+
+
 @pytest.mark.asyncio
 async def test_record_hf_job_complete_emits_runtime_cost(monkeypatch):
     async def fake_catalog():
