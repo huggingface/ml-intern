@@ -189,6 +189,12 @@ def test_prompt_cache_params_add_session_id_for_fal_router_model():
     assert "extra_body" not in llm_params
 
 
+def test_prompt_cache_params_adds_anthropic_cache_control_without_session_id():
+    cached_params = with_prompt_cache_params(_anthropic_fal_params())
+
+    assert cached_params["extra_body"] == {"cache_control": {"type": "ephemeral"}}
+
+
 def test_prompt_cache_params_merges_gpt55_cache_hints():
     llm_params = {
         **_gpt55_fal_params(),
