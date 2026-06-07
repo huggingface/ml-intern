@@ -243,11 +243,6 @@ export default function UsageMeter() {
               HF billing <OpenInNewIcon sx={{ fontSize: 12 }} />
             </Link>
           )}
-          {links.inference_providers_usage && (
-            <Link href={links.inference_providers_usage} target="_blank" rel="noopener noreferrer" underline="hover" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25, fontSize: '0.75rem' }}>
-              Inference usage <OpenInNewIcon sx={{ fontSize: 12 }} />
-            </Link>
-          )}
           {links.jobs_pricing && (
             <Link href={links.jobs_pricing} target="_blank" rel="noopener noreferrer" underline="hover" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25, fontSize: '0.75rem' }}>
               Jobs pricing <OpenInNewIcon sx={{ fontSize: 12 }} />
