@@ -19,14 +19,14 @@ import {
   useUsageStore,
 } from '@/store/usageStore';
 
-function formatUsd(value: number | undefined, compact = false): string {
+function formatUsd(value: number | undefined): string {
   const amount = value ?? 0;
   if (amount > 0 && amount < 0.01) return '<$0.01';
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
     minimumFractionDigits: 2,
-    maximumFractionDigits: compact || amount >= 1 ? 2 : 4,
+    maximumFractionDigits: 2,
   }).format(amount);
 }
 
@@ -163,7 +163,7 @@ export default function UsageMeter() {
             '&:hover': { borderColor: 'primary.main', color: 'primary.main' },
           }}
         >
-          {formatUsd(sessionTotal, true)}
+          {formatUsd(sessionTotal)}
         </Button>
       </Tooltip>
       <Popover
