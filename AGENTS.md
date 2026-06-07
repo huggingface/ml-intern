@@ -19,6 +19,7 @@ Notes:
 - Vite proxies `/api` and `/auth` to `http://localhost:7860`.
 - If `127.0.0.1:7860` is already owned by another local process, binding the backend to `::1` lets the Vite proxy resolve `localhost` cleanly.
 - Prefer `npm ci` over `npm install` for setup, since `npm install` may rewrite `frontend/package-lock.json` metadata depending on npm version.
+- After a PR is merged and the local branch/worktree is being retired, run `uv run --frozen python scripts/dev_server.py down`, then `uv run --frozen python scripts/dev_server.py cleanup` before removing the worktree.
 - Non-local LLM calls use `https://router.huggingface.co/v1` with the active Hugging Face user's token. Web sessions default to Kimi K2.6 for free users and Claude Opus 4.8 for Pro users; the CLI default is Claude Opus 4.8. For local development, set `HF_TOKEN` and optionally `ML_INTERN_DEFAULT_MODEL_ID`.
 
 ## Development Checks
