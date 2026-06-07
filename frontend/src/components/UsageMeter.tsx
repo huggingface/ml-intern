@@ -115,8 +115,12 @@ function AccountUsageSection({
         />
         <UsageRow label="LLM calls" value={formatCount(telemetry?.llm_calls)} />
         <UsageRow
-          label="Tokens"
-          value={formatCount(telemetry?.total_tokens)}
+          label="Input tokens"
+          value={formatCount(telemetry?.prompt_tokens)}
+        />
+        <UsageRow
+          label="Output tokens"
+          value={formatCount(telemetry?.completion_tokens)}
         />
       </UsageGrid>
     </Box>
