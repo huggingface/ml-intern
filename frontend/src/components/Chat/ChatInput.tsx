@@ -25,8 +25,11 @@ import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import {
   CLAUDE_OPUS_48_MODEL_PATH,
+  DEEPSEEK_V4_PRO_MODEL_PATH,
+  GLM_51_MODEL_PATH,
   GPT_55_MODEL_PATH,
   KIMI_K26_MODEL_PATH,
+  MINIMAX_M27_MODEL_PATH,
   isClaudePath,
 } from '@/utils/model';
 
@@ -67,19 +70,19 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   {
     id: 'minimax-m2.7',
     name: 'MiniMax M2.7',
-    modelPath: 'MiniMaxAI/MiniMax-M2.7',
+    modelPath: MINIMAX_M27_MODEL_PATH,
     avatarUrl: getHfAvatarUrl('MiniMaxAI/MiniMax-M2.7'),
   },
   {
     id: 'glm-5.1',
     name: 'GLM 5.1',
-    modelPath: 'zai-org/GLM-5.1',
+    modelPath: GLM_51_MODEL_PATH,
     avatarUrl: getHfAvatarUrl('zai-org/GLM-5.1'),
   },
   {
     id: 'deepseek-v4-pro',
     name: 'DeepSeek V4 Pro',
-    modelPath: 'deepseek-ai/DeepSeek-V4-Pro:deepinfra',
+    modelPath: DEEPSEEK_V4_PRO_MODEL_PATH,
     avatarUrl: getHfAvatarUrl('deepseek-ai/DeepSeek-V4-Pro'),
   },
 ];
