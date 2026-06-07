@@ -20,6 +20,10 @@ Notes:
 - Before every commit, run `uv run ruff check .` and `uv run ruff format --check .`.
 - If formatting fails, run `uv run ruff format .`, then re-run the Ruff checks before committing.
 
+## Git Workflow
+
+- Before creating any new branch or worktree, switch to `main` and pull the latest changes.
+
 ## GitHub CLI
 
 - Always use the `gh` CLI for GitHub operations such as opening, editing, inspecting, or commenting on PRs and issues.
