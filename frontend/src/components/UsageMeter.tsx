@@ -230,7 +230,7 @@ export default function UsageMeter() {
           Usage
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          Estimated from HF account usage during this session.
+          Estimated from HF account usage per session.
         </Typography>
 
         {error ? (
