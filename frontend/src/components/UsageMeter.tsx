@@ -230,7 +230,7 @@ export default function UsageMeter() {
           Usage
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          Billing window resets when you switch back to a task.
+          Estimated from HF account usage during this session.
         </Typography>
 
         {error ? (
