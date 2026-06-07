@@ -94,6 +94,7 @@ class SessionInfo(BaseModel):
 
     session_id: str
     created_at: str
+    usage_window_started_at: str | None = None
     is_active: bool
     is_processing: bool = False
     message_count: int

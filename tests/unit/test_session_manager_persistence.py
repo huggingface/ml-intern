@@ -128,6 +128,28 @@ def _runtime_agent_session(
     )
 
 
+@pytest.mark.asyncio
+async def test_reset_session_usage_window_updates_runtime_and_store():
+    store = RestoreStore()
+    manager = _manager_with_store(store)
+    agent_session = _runtime_agent_session("s1")
+    manager.sessions["s1"] = agent_session
+    started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
+
+    info = await manager.reset_session_usage_window("s1", started_at=started_at)
+
+    assert agent_session.usage_window_started_at == started_at
+    assert info is not None
+    assert info["usage_window_started_at"] == started_at.isoformat()
+    assert store.updated_fields[-1] == (
+        "s1",
+        {
+            "usage_window_started_at": started_at,
+            "last_active_at": agent_session.last_active_at,
+        },
+    )
+
+
 def test_unknown_saved_model_defaults_to_kimi():
     model = SessionManager._model_from_saved_metadata("unsupported/model")
 

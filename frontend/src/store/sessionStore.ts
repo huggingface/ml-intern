@@ -30,6 +30,7 @@ interface SessionStore {
     session_id: string;
     title?: string | null;
     created_at: string;
+    usage_window_started_at?: string | null;
     is_active?: boolean;
     is_processing?: boolean;
     model?: string | null;
@@ -60,10 +61,12 @@ export const useSessionStore = create<SessionStore>()(
       activeSessionId: null,
 
       createSession: (id: string, model?: string | null) => {
+        const now = new Date().toISOString();
         const newSession: SessionMeta = {
           id,
           title: `Chat ${get().sessions.length + 1}`,
-          createdAt: new Date().toISOString(),
+          createdAt: now,
+          usageWindowStartedAt: now,
           isActive: true,
           needsAttention: false,
           model: model ?? null,
@@ -124,6 +127,8 @@ export const useSessionStore = create<SessionStore>()(
                 isActive: server.is_active ?? existing.isActive,
                 isProcessing: Boolean(server.is_processing),
                 model: server.model ?? existing.model ?? null,
+                usageWindowStartedAt:
+                  server.usage_window_started_at ?? existing.usageWindowStartedAt ?? null,
                 needsAttention: Boolean(server.pending_approval?.length) || existing.needsAttention,
                 expired: false,
                 ...(auto
@@ -144,6 +149,7 @@ export const useSessionStore = create<SessionStore>()(
               id,
               title: server.title || `Chat ${merged.length + 1}`,
               createdAt: server.created_at || new Date().toISOString(),
+              usageWindowStartedAt: server.usage_window_started_at ?? null,
               isActive: server.is_active ?? true,
               isProcessing: Boolean(server.is_processing),
               needsAttention: Boolean(server.pending_approval?.length),

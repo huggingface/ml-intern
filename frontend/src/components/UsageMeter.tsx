@@ -214,7 +214,7 @@ export default function UsageMeter() {
           Usage
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          Session billing uses HF account usage since session start.
+          Billing window resets when this task is opened.
         </Typography>
 
         {error ? (

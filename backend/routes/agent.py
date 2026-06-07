@@ -507,6 +507,20 @@ async def get_session(
     return SessionInfo(**info)
 
 
+@router.post("/session/{session_id}/activate", response_model=SessionInfo)
+async def activate_session(
+    session_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> SessionInfo:
+    """Mark a session as actively revisited and reset its usage meter window."""
+    await _check_session_access(session_id, user, request)
+    info = await session_manager.reset_session_usage_window(session_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return SessionInfo(**info)
+
+
 @router.post("/session/{session_id}/model")
 async def set_session_model(
     session_id: str,

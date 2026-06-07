@@ -319,17 +319,22 @@ async def _fetch_hf_billing_usage_v2(
         return None
 
 
-def _session_started_at(manager: Any, session_id: str | None) -> datetime | None:
+def _session_usage_window_started_at(
+    manager: Any, session_id: str | None
+) -> datetime | None:
     if not session_id:
         return None
     agent_session = getattr(manager, "sessions", {}).get(session_id)
+    usage_window_started_at = getattr(agent_session, "usage_window_started_at", None)
+    if isinstance(usage_window_started_at, datetime):
+        return _utc(usage_window_started_at)
     created_at = getattr(agent_session, "created_at", None)
     if isinstance(created_at, datetime):
         return _utc(created_at)
     return None
 
 
-async def _load_persisted_session_started_at(
+async def _load_persisted_session_usage_window_started_at(
     manager: Any,
     session_id: str | None,
 ) -> datetime | None:
@@ -340,10 +345,14 @@ async def _load_persisted_session_started_at(
         return None
     loaded = await store.load_session(session_id)
     metadata = loaded.get("metadata") if isinstance(loaded, dict) else None
-    created_at = metadata.get("created_at") if isinstance(metadata, dict) else None
-    if isinstance(created_at, datetime):
-        return _utc(created_at)
-    parsed = _parse_timestamp(created_at)
+    started_at = None
+    if isinstance(metadata, dict):
+        started_at = metadata.get("usage_window_started_at") or metadata.get(
+            "created_at"
+        )
+    if isinstance(started_at, datetime):
+        return _utc(started_at)
+    parsed = _parse_timestamp(started_at)
     return _utc(parsed) if parsed is not None else None
 
 
@@ -370,9 +379,11 @@ async def _build_hf_account_usage(
         account_usage["error"] = "missing_hf_token"
         return account_usage
 
-    session_start = _session_started_at(manager, session_id)
+    session_start = _session_usage_window_started_at(manager, session_id)
     if session_start is None:
-        session_start = await _load_persisted_session_started_at(manager, session_id)
+        session_start = await _load_persisted_session_usage_window_started_at(
+            manager, session_id
+        )
 
     window_tasks: dict[str, tuple[datetime, asyncio.Task[dict[str, Any] | None]]] = {
         "month": (

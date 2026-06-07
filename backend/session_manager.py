@@ -112,6 +112,11 @@ class AgentSession:
     is_reaping: bool = False
     broadcaster: Any = None
     title: str | None = None
+    usage_window_started_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.usage_window_started_at is None:
+            self.usage_window_started_at = self.created_at
 
 
 class SessionCapacityError(Exception):
@@ -591,6 +596,7 @@ class SessionManager:
                     agent_session.session
                 ),
                 created_at=agent_session.created_at,
+                usage_window_started_at=agent_session.usage_window_started_at,
                 notification_destinations=list(
                     agent_session.session.notification_destinations
                 ),
@@ -750,6 +756,9 @@ class SessionManager:
         created_at = meta.get("created_at")
         if not isinstance(created_at, datetime):
             created_at = datetime.utcnow()
+        usage_window_started_at = meta.get("usage_window_started_at")
+        if not isinstance(usage_window_started_at, datetime):
+            usage_window_started_at = created_at
 
         agent_session = AgentSession(
             session_id=session_id,
@@ -760,6 +769,7 @@ class SessionManager:
             hf_username=hf_username,
             hf_token=hf_token,
             created_at=created_at,
+            usage_window_started_at=usage_window_started_at,
             is_active=True,
             is_processing=False,
             title=meta.get("title"),
@@ -1477,6 +1487,9 @@ class SessionManager:
         return {
             "session_id": session_id,
             "created_at": agent_session.created_at.isoformat(),
+            "usage_window_started_at": (
+                agent_session.usage_window_started_at or agent_session.created_at
+            ).isoformat(),
             "is_active": agent_session.is_active,
             "is_processing": agent_session.is_processing,
             "message_count": len(agent_session.session.context_manager.items),
@@ -1489,6 +1502,30 @@ class SessionManager:
             ),
             "auto_approval": self._auto_approval_summary(agent_session.session),
         }
+
+    async def reset_session_usage_window(
+        self,
+        session_id: str,
+        *,
+        started_at: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Reset the account-billing window used for the visible usage meter."""
+        agent_session = self.sessions.get(session_id)
+        if not agent_session:
+            return None
+
+        window_start = started_at or datetime.utcnow()
+        agent_session.usage_window_started_at = window_start
+        self._touch(agent_session)
+
+        store = self._store()
+        if getattr(store, "enabled", False):
+            await store.update_session_fields(
+                session_id,
+                usage_window_started_at=window_start,
+                last_active_at=agent_session.last_active_at,
+            )
+        return self.get_session_info(session_id)
 
     def set_notification_destinations(
         self, session_id: str, destinations: list[str]
@@ -1540,11 +1577,21 @@ class SessionManager:
                     created_at_str = created_at.isoformat()
                 else:
                     created_at_str = str(created_at or datetime.utcnow().isoformat())
+                usage_window_started_at = (
+                    row.get("usage_window_started_at") or created_at
+                )
+                if isinstance(usage_window_started_at, datetime):
+                    usage_window_started_at_str = usage_window_started_at.isoformat()
+                else:
+                    usage_window_started_at_str = str(
+                        usage_window_started_at or created_at_str
+                    )
                 pending = self._pending_docs_for_api(row.get("pending_approval") or [])
                 results.append(
                     {
                         "session_id": str(sid),
                         "created_at": created_at_str,
+                        "usage_window_started_at": usage_window_started_at_str,
                         "is_active": row.get("status") != "ended",
                         "is_processing": row.get("runtime_state") == "processing",
                         "message_count": int(row.get("message_count") or 0),

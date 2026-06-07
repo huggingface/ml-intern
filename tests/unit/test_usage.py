@@ -140,6 +140,19 @@ class _Manager:
         return self.store
 
 
+class _MetadataStore(_NoopStore):
+    enabled = True
+
+    def __init__(self, metadata):
+        self.metadata = metadata
+
+    async def load_session(self, session_id):
+        return {"metadata": {"session_id": session_id, **self.metadata}, "messages": []}
+
+    async def load_usage_events(self, user_id, **kwargs):
+        return []
+
+
 def _agent_session(session_id, user_id, events):
     return SimpleNamespace(
         session_id=session_id,
@@ -278,14 +291,16 @@ async def test_hf_account_usage_reports_billing_unavailable_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_hf_account_usage_uses_session_start_for_current_delta(monkeypatch):
+async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch):
     session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
+    usage_window_started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
     manager = _Manager(
         {
             "s1": SimpleNamespace(
                 session_id="s1",
                 user_id="owner",
                 created_at=session_created_at,
+                usage_window_started_at=usage_window_started_at,
                 session=SimpleNamespace(logged_events=[]),
             )
         }
@@ -294,7 +309,7 @@ async def test_hf_account_usage_uses_session_start_for_current_delta(monkeypatch
 
     async def fake_fetch(_token, *, start, end):
         calls.append((start, end))
-        if start == session_created_at:
+        if start == usage_window_started_at:
             used_nano = 500_000_000
         elif start == datetime(2026, 6, 5, 0, 0, tzinfo=UTC):
             used_nano = 1_000_000_000
@@ -339,6 +354,47 @@ async def test_hf_account_usage_uses_session_start_for_current_delta(monkeypatch
     }
     assert {start for start, _ in calls} == {
         datetime(2026, 6, 5, 0, 0, tzinfo=UTC),
+        datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        usage_window_started_at,
+    }
+
+
+@pytest.mark.asyncio
+async def test_hf_account_usage_falls_back_to_persisted_created_at(monkeypatch):
+    session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
+    store = _MetadataStore({"created_at": session_created_at})
+    manager = _Manager({}, store=store)
+    calls = []
+
+    async def fake_fetch(_token, *, start, end):
+        calls.append((start, end))
+        return {
+            "usage": {
+                "inferenceProviders": {
+                    "usedNanoUsd": 0,
+                    "includedNanoUsd": 0,
+                    "limitNanoUsd": 0,
+                },
+                "jobs": {"usedMicroUsd": 0, "totalMinutes": 0},
+            }
+        }
+
+    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_fetch)
+
+    usage = await build_usage_response(
+        manager,
+        user_id="owner",
+        hf_token="hf_fake",
+        session_id="s1",
+        timezone_name="UTC",
+        now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+        include_rollups=False,
+    )
+
+    assert usage["hf_account"]["current_session"]["window_start"] == (
+        "2026-06-05T12:00:00Z"
+    )
+    assert {start for start, _ in calls} == {
         datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
         session_created_at,
     }

@@ -14,6 +14,7 @@ export interface SessionMeta {
   id: string;
   title: string;
   createdAt: string;
+  usageWindowStartedAt?: string | null;
   isActive: boolean;
   needsAttention: boolean;
   model?: string | null;
