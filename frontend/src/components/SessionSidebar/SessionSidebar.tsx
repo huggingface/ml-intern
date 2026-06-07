@@ -18,6 +18,7 @@ import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import { useSessionStore } from '@/store/sessionStore';
 import { useAgentStore } from '@/store/agentStore';
+import { useUsageStore } from '@/store/usageStore';
 import { apiFetch } from '@/utils/api';
 
 interface SessionSidebarProps {
@@ -122,12 +123,28 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
 
   const handleSelect = useCallback(
     (sessionId: string) => {
+      const shouldResetUsageWindow = sessionId !== activeSessionId;
       switchSession(sessionId);
+      if (shouldResetUsageWindow) {
+        void (async () => {
+          try {
+            const response = await apiFetch(`/api/session/${sessionId}/activate`, {
+              method: 'POST',
+            });
+            if (!response.ok) return;
+            const info = await response.json();
+            mergeServerSessions([info]);
+            void useUsageStore.getState().fetchUsage(sessionId);
+          } catch {
+            /* best effort: usage falls back to the previously persisted window */
+          }
+        })();
+      }
       // Per-session state (plan, panel, activity) is restored automatically
       // by SessionChat's useEffect when isActive flips to true.
       onClose?.();
     },
-    [switchSession, onClose],
+    [activeSessionId, mergeServerSessions, switchSession, onClose],
   );
 
   const formatTime = (d: string) =>

@@ -214,7 +214,7 @@ export default function UsageMeter() {
           Usage
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          Billing window resets when this task is opened.
+          Billing window resets when you switch back to a task.
         </Typography>
 
         {error ? (

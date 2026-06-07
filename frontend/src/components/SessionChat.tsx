@@ -9,7 +9,6 @@ import { useCallback, useEffect, useState } from 'react';
 import { useAgentChat } from '@/hooks/useAgentChat';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
-import { useUsageStore } from '@/store/usageStore';
 import MessageList from '@/components/Chat/MessageList';
 import ChatInput from '@/components/Chat/ChatInput';
 import ExpiredBanner from '@/components/Chat/ExpiredBanner';
@@ -25,8 +24,7 @@ interface SessionChatProps {
 
 export default function SessionChat({ sessionId, isActive, onSessionDead }: SessionChatProps) {
   const { isConnected, isProcessing, activityStatus, updateSession } = useAgentStore();
-  const { updateSessionTitle, sessions, setSessionProcessing, mergeServerSessions } =
-    useSessionStore();
+  const { updateSessionTitle, sessions, setSessionProcessing } = useSessionStore();
   const sessionMeta = sessions.find((s) => s.id === sessionId);
   const isExpired = sessionMeta?.expired === true;
   const [chatError, setChatError] = useState<string | null>(null);
@@ -64,29 +62,6 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
       useAgentStore.getState().setConnected(true);
     }
   }, [isActive, sessionId]);
-
-  useEffect(() => {
-    if (!isActive || isExpired) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const response = await apiFetch(`/api/session/${sessionId}/activate`, {
-          method: 'POST',
-        });
-        if (cancelled || !response.ok) return;
-        const info = await response.json();
-        mergeServerSessions([info]);
-        void useUsageStore.getState().fetchUsage(sessionId);
-      } catch {
-        /* best effort: usage falls back to the previously persisted window */
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isActive, isExpired, mergeServerSessions, sessionId]);
 
   // Re-sync state when the browser tab regains focus (Chrome throttles
   // timers in background tabs which can stall the AI SDK's update flushing).
