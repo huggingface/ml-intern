@@ -387,7 +387,7 @@ export default function WelcomeScreen() {
           variant="caption"
           sx={{ mt: 4, color: 'var(--muted-text)', opacity: 0.5, fontSize: '0.7rem' }}
         >
-          Conversations are stored locally in your browser.
+          Conversations are stored locally in your browser. Usage is billed based on the compute time of your agent's actions.
         </Typography>
       </Box>
     </Box>
