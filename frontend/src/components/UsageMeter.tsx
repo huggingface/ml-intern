@@ -30,10 +30,6 @@ function formatUsd(value: number | undefined, compact = false): string {
   }).format(amount);
 }
 
-function formatCount(value: number | undefined): string {
-  return new Intl.NumberFormat('en-US').format(value ?? 0);
-}
-
 function UsageRow({
   label,
   value,
@@ -98,7 +94,6 @@ function AccountUsageSection({
           label={account ? 'HF Jobs' : 'HF Jobs estimated'}
           value={formatUsd(account?.hf_jobs_usd ?? telemetry?.hf_jobs_estimated_usd)}
         />
-        <UsageRow label="ML Intern tokens" value={formatCount(telemetry?.total_tokens)} />
       </UsageGrid>
     </Box>
   );
