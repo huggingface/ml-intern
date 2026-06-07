@@ -190,7 +190,7 @@ export default function UsageMeter() {
           Usage
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          Current session billing and Inference Providers credits.
+          Session billing is inferred from HF account usage since session start.
         </Typography>
 
         {error ? (
@@ -205,11 +205,6 @@ export default function UsageMeter() {
               telemetry={usage?.session ?? null}
             />
             <CreditsSection credits={usage?.hf_account?.inference_providers_credits} />
-            {usage?.hf_account?.available && (
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', pt: 0.5 }}>
-                Session billing is inferred from HF account usage since session start.
-              </Typography>
-            )}
           </>
         )}
 
