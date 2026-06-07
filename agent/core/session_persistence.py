@@ -168,6 +168,7 @@ class MongoSessionStore(NoopSessionStore):
         surface: str = "frontend",
         created_at: datetime | None = None,
         usage_window_started_at: datetime | None = None,
+        usage_window_baseline: dict[str, Any] | None = None,
         runtime_state: str = "idle",
         status: str = "active",
         message_count: int = 0,
@@ -199,6 +200,7 @@ class MongoSessionStore(NoopSessionStore):
                     "usage_window_started_at": (
                         usage_window_started_at or created_at or now
                     ),
+                    "usage_window_baseline": usage_window_baseline,
                     "status": status,
                     "runtime_state": runtime_state,
                     "updated_at": now,
@@ -229,6 +231,7 @@ class MongoSessionStore(NoopSessionStore):
         pending_approval: list[dict[str, Any]] | None = None,
         created_at: datetime | None = None,
         usage_window_started_at: datetime | None = None,
+        usage_window_baseline: dict[str, Any] | None = None,
         notification_destinations: list[str] | None = None,
         auto_approval_enabled: bool = False,
         auto_approval_cost_cap_usd: float | None = None,
@@ -253,6 +256,7 @@ class MongoSessionStore(NoopSessionStore):
             pending_approval=pending_approval,
             notification_destinations=notification_destinations,
             usage_window_started_at=usage_window_started_at,
+            usage_window_baseline=usage_window_baseline,
             auto_approval_enabled=auto_approval_enabled,
             auto_approval_cost_cap_usd=auto_approval_cost_cap_usd,
             auto_approval_estimated_spend_usd=auto_approval_estimated_spend_usd,

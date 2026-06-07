@@ -360,6 +360,70 @@ async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_hf_account_usage_uses_baseline_for_current_delta(monkeypatch):
+    usage_window_started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
+    month_start = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
+    manager = _Manager(
+        {
+            "s1": SimpleNamespace(
+                session_id="s1",
+                user_id="owner",
+                created_at=datetime(2026, 6, 5, 12, 0, tzinfo=UTC),
+                usage_window_started_at=usage_window_started_at,
+                usage_window_baseline={
+                    "captured_at": usage_window_started_at,
+                    "month_start": month_start,
+                    "total_usd": 2.5,
+                    "inference_providers_usd": 2.0,
+                    "hf_jobs_usd": 0.5,
+                    "inference_provider_requests": 10,
+                    "hf_jobs_minutes": 4.0,
+                },
+                session=SimpleNamespace(logged_events=[]),
+            )
+        }
+    )
+    calls = []
+
+    async def fake_fetch(_token, *, start, end):
+        calls.append((start, end))
+        if start == month_start:
+            return {
+                "usage": {
+                    "inferenceProviders": {
+                        "usedNanoUsd": 2_000_000_000,
+                        "numRequests": 10,
+                    },
+                    "jobs": {"usedMicroUsd": 500_000, "totalMinutes": 4.0},
+                }
+            }
+        return {
+            "usage": {
+                "inferenceProviders": {
+                    "usedNanoUsd": 5_000_000_000,
+                    "numRequests": 99,
+                },
+                "jobs": {"usedMicroUsd": 0, "totalMinutes": 0},
+            }
+        }
+
+    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_fetch)
+
+    usage = await build_usage_response(
+        manager,
+        user_id="owner",
+        hf_token="hf_fake",
+        session_id="s1",
+        timezone_name="UTC",
+        now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+    )
+
+    assert usage["hf_account"]["current_session"]["total_usd"] == 0.0
+    assert usage["hf_account"]["current_session"]["inference_provider_requests"] == 0
+    assert usage_window_started_at not in {start for start, _ in calls}
+
+
+@pytest.mark.asyncio
 async def test_hf_account_usage_falls_back_to_persisted_created_at(monkeypatch):
     session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
     store = _MetadataStore({"created_at": session_created_at})

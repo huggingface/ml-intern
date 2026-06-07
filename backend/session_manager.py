@@ -113,6 +113,7 @@ class AgentSession:
     broadcaster: Any = None
     title: str | None = None
     usage_window_started_at: datetime | None = None
+    usage_window_baseline: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.usage_window_started_at is None:
@@ -597,6 +598,7 @@ class SessionManager:
                 ),
                 created_at=agent_session.created_at,
                 usage_window_started_at=agent_session.usage_window_started_at,
+                usage_window_baseline=agent_session.usage_window_baseline,
                 notification_destinations=list(
                     agent_session.session.notification_destinations
                 ),
@@ -759,6 +761,9 @@ class SessionManager:
         usage_window_started_at = meta.get("usage_window_started_at")
         if not isinstance(usage_window_started_at, datetime):
             usage_window_started_at = created_at
+        usage_window_baseline = meta.get("usage_window_baseline")
+        if not isinstance(usage_window_baseline, dict):
+            usage_window_baseline = None
 
         agent_session = AgentSession(
             session_id=session_id,
@@ -770,6 +775,7 @@ class SessionManager:
             hf_token=hf_token,
             created_at=created_at,
             usage_window_started_at=usage_window_started_at,
+            usage_window_baseline=usage_window_baseline,
             is_active=True,
             is_processing=False,
             title=meta.get("title"),
@@ -1508,6 +1514,7 @@ class SessionManager:
         session_id: str,
         *,
         started_at: datetime | None = None,
+        baseline: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Reset the account-billing window used for the visible usage meter."""
         agent_session = self.sessions.get(session_id)
@@ -1516,6 +1523,7 @@ class SessionManager:
 
         window_start = started_at or datetime.utcnow()
         agent_session.usage_window_started_at = window_start
+        agent_session.usage_window_baseline = baseline
         self._touch(agent_session)
 
         store = self._store()
@@ -1523,6 +1531,7 @@ class SessionManager:
             await store.update_session_fields(
                 session_id,
                 usage_window_started_at=window_start,
+                usage_window_baseline=baseline,
                 last_active_at=agent_session.last_active_at,
             )
         return self.get_session_info(session_id)

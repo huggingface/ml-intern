@@ -65,6 +65,7 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
       }
       const data = await response.json();
       createSession(data.session_id, data.model);
+      void useUsageStore.getState().fetchUsage(data.session_id);
       setPlan([]);
       clearPanel();
       onClose?.();
@@ -109,6 +110,7 @@ export default function SessionSidebar({ onClose }: SessionSidebarProps) {
         if (response.ok) {
           const data = await response.json();
           createSession(data.session_id, data.model);
+          void useUsageStore.getState().fetchUsage(data.session_id);
           setPlan([]);
           clearPanel();
         }

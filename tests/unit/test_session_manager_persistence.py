@@ -135,16 +135,23 @@ async def test_reset_session_usage_window_updates_runtime_and_store():
     agent_session = _runtime_agent_session("s1")
     manager.sessions["s1"] = agent_session
     started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
+    baseline = {"captured_at": started_at, "total_usd": 1.25}
 
-    info = await manager.reset_session_usage_window("s1", started_at=started_at)
+    info = await manager.reset_session_usage_window(
+        "s1",
+        started_at=started_at,
+        baseline=baseline,
+    )
 
     assert agent_session.usage_window_started_at == started_at
+    assert agent_session.usage_window_baseline == baseline
     assert info is not None
     assert info["usage_window_started_at"] == started_at.isoformat()
     assert store.updated_fields[-1] == (
         "s1",
         {
             "usage_window_started_at": started_at,
+            "usage_window_baseline": baseline,
             "last_active_at": agent_session.last_active_at,
         },
     )

@@ -265,6 +265,90 @@ def _account_bucket_from_billing_usage(
     return bucket
 
 
+def _baseline_from_account_bucket(
+    bucket: dict[str, Any],
+    *,
+    captured_at: datetime,
+    month_start: datetime,
+) -> dict[str, Any]:
+    return {
+        "captured_at": _utc(captured_at),
+        "month_start": _utc(month_start),
+        "total_usd": bucket.get("total_usd", 0.0),
+        "inference_providers_usd": bucket.get("inference_providers_usd", 0.0),
+        "hf_jobs_usd": bucket.get("hf_jobs_usd", 0.0),
+        "inference_provider_requests": bucket.get("inference_provider_requests", 0),
+        "hf_jobs_minutes": bucket.get("hf_jobs_minutes", 0.0),
+    }
+
+
+def _baseline_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _utc(value)
+    parsed = _parse_timestamp(value)
+    return _utc(parsed) if parsed is not None else None
+
+
+def _baseline_delta_bucket(
+    bucket: dict[str, Any],
+    baseline: dict[str, Any],
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    timezone: str,
+) -> dict[str, Any]:
+    delta = _empty_hf_account_bucket(
+        window_start=window_start,
+        window_end=window_end,
+        timezone=timezone,
+    )
+    for key in ("inference_providers_usd", "hf_jobs_usd", "hf_jobs_minutes"):
+        delta[key] = round(
+            max(0.0, _coerce_float(bucket.get(key)) - _coerce_float(baseline.get(key))),
+            6 if key != "hf_jobs_minutes" else 3,
+        )
+    delta["inference_provider_requests"] = max(
+        0,
+        _coerce_int(bucket.get("inference_provider_requests"))
+        - _coerce_int(baseline.get("inference_provider_requests")),
+    )
+    delta["total_usd"] = round(
+        delta["inference_providers_usd"] + delta["hf_jobs_usd"],
+        6,
+    )
+    return delta
+
+
+async def capture_hf_account_usage_baseline(
+    hf_token: str | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    if not hf_token:
+        return None
+    windows = resolve_usage_windows("UTC", now=now)
+    now_utc = windows["now_utc"]
+    month_start = windows["month_start_utc"]
+    payload = await _fetch_hf_billing_usage_v2(
+        hf_token,
+        start=month_start,
+        end=now_utc,
+    )
+    if payload is None:
+        return None
+    bucket = _account_bucket_from_billing_usage(
+        payload,
+        window_start=month_start,
+        window_end=now_utc,
+        timezone="UTC",
+    )
+    return _baseline_from_account_bucket(
+        bucket,
+        captured_at=now_utc,
+        month_start=month_start,
+    )
+
+
 def _inference_credits_from_billing_usage(
     payload: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -334,6 +418,17 @@ def _session_usage_window_started_at(
     return None
 
 
+def _session_usage_window_baseline(
+    manager: Any,
+    session_id: str | None,
+) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    agent_session = getattr(manager, "sessions", {}).get(session_id)
+    baseline = getattr(agent_session, "usage_window_baseline", None)
+    return baseline if isinstance(baseline, dict) else None
+
+
 async def _load_persisted_session_usage_window_started_at(
     manager: Any,
     session_id: str | None,
@@ -341,7 +436,7 @@ async def _load_persisted_session_usage_window_started_at(
     if not session_id:
         return None
     store = manager._store()
-    if not getattr(store, "enabled", False):
+    if not getattr(store, "enabled", False) or not hasattr(store, "load_session"):
         return None
     loaded = await store.load_session(session_id)
     metadata = loaded.get("metadata") if isinstance(loaded, dict) else None
@@ -354,6 +449,23 @@ async def _load_persisted_session_usage_window_started_at(
         return _utc(started_at)
     parsed = _parse_timestamp(started_at)
     return _utc(parsed) if parsed is not None else None
+
+
+async def _load_persisted_session_usage_window_baseline(
+    manager: Any,
+    session_id: str | None,
+) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    store = manager._store()
+    if not getattr(store, "enabled", False) or not hasattr(store, "load_session"):
+        return None
+    loaded = await store.load_session(session_id)
+    metadata = loaded.get("metadata") if isinstance(loaded, dict) else None
+    if not isinstance(metadata, dict):
+        return None
+    baseline = metadata.get("usage_window_baseline")
+    return baseline if isinstance(baseline, dict) else None
 
 
 async def _build_hf_account_usage(
@@ -384,6 +496,15 @@ async def _build_hf_account_usage(
         session_start = await _load_persisted_session_usage_window_started_at(
             manager, session_id
         )
+    session_baseline = _session_usage_window_baseline(manager, session_id)
+    if session_baseline is None:
+        session_baseline = await _load_persisted_session_usage_window_baseline(
+            manager,
+            session_id,
+        )
+    baseline_month_start = None
+    if session_baseline is not None:
+        baseline_month_start = _baseline_datetime(session_baseline.get("month_start"))
 
     window_tasks: dict[str, tuple[datetime, asyncio.Task[dict[str, Any] | None]]] = {
         "month": (
@@ -401,12 +522,28 @@ async def _build_hf_account_usage(
             ),
         )
     if session_start is not None:
-        window_tasks["current_session"] = (
-            session_start,
-            asyncio.create_task(
-                _fetch_hf_billing_usage_v2(hf_token, start=session_start, end=now_utc)
-            ),
-        )
+        if baseline_month_start is not None:
+            window_tasks["current_session_baseline"] = (
+                baseline_month_start,
+                asyncio.create_task(
+                    _fetch_hf_billing_usage_v2(
+                        hf_token,
+                        start=baseline_month_start,
+                        end=now_utc,
+                    )
+                ),
+            )
+        else:
+            window_tasks["current_session"] = (
+                session_start,
+                asyncio.create_task(
+                    _fetch_hf_billing_usage_v2(
+                        hf_token,
+                        start=session_start,
+                        end=now_utc,
+                    )
+                ),
+            )
 
     payloads: dict[str, dict[str, Any] | None] = {}
     for name, (_, task) in window_tasks.items():
@@ -419,12 +556,34 @@ async def _build_hf_account_usage(
         return account_usage
 
     for name, (start, _) in window_tasks.items():
+        if name == "current_session_baseline":
+            continue
         payload = payloads.get(name)
         if payload is None:
             continue
         account_usage[name] = _account_bucket_from_billing_usage(
             payload,
             window_start=start,
+            window_end=now_utc,
+            timezone=timezone,
+        )
+
+    if (
+        session_start is not None
+        and session_baseline is not None
+        and baseline_month_start is not None
+        and payloads.get("current_session_baseline") is not None
+    ):
+        baseline_bucket = _account_bucket_from_billing_usage(
+            payloads.get("current_session_baseline"),
+            window_start=baseline_month_start,
+            window_end=now_utc,
+            timezone=timezone,
+        )
+        account_usage["current_session"] = _baseline_delta_bucket(
+            baseline_bucket,
+            session_baseline,
+            window_start=session_start,
             window_end=now_utc,
             timezone=timezone,
         )

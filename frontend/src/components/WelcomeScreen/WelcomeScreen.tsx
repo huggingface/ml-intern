@@ -12,6 +12,7 @@ import LoginIcon from '@mui/icons-material/Login';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import { useSessionStore } from '@/store/sessionStore';
 import { useAgentStore } from '@/store/agentStore';
+import { useUsageStore } from '@/store/usageStore';
 import { apiFetch } from '@/utils/api';
 import { isInIframe, triggerLogin } from '@/hooks/useAuth';
 
@@ -210,6 +211,7 @@ export default function WelcomeScreen() {
       }
       const data = await response.json();
       createSession(data.session_id, data.model);
+      void useUsageStore.getState().fetchUsage(data.session_id);
       setPlan([]);
       clearPanel();
     } catch {

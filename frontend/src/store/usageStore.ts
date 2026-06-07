@@ -139,7 +139,13 @@ export const useUsageStore = create<UsageStore>()((set, get) => ({
   error: null,
 
   fetchUsage: async (sessionId?: string | null) => {
-    set({ isLoading: true, error: null });
+    const current = get().usage;
+    set({
+      usage:
+        sessionId && current?.session?.session_id !== sessionId ? null : current,
+      isLoading: true,
+      error: null,
+    });
     try {
       let response = await apiFetch(usageUrl(sessionId));
       if (response.status === 404 && sessionId) {

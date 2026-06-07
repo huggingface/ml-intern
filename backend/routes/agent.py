@@ -7,6 +7,7 @@ dependency. In dev mode (no OAUTH_CLIENT_ID), auth is bypassed automatically.
 import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 from dependencies import (
@@ -63,7 +64,7 @@ from agent.core.model_ids import (
     MINIMAX_M27_MODEL_ID,
     strip_huggingface_model_prefix,
 )
-from usage import build_usage_response
+from usage import build_usage_response, capture_hf_account_usage_baseline
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,20 @@ DEFAULT_OPUS_MODEL_ID = CLAUDE_OPUS_48_MODEL_ID
 DEFAULT_GPT_MODEL_ID = GPT_55_MODEL_ID
 DEFAULT_FREE_MODEL_ID = KIMI_K26_MODEL_ID
 DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
+
+
+async def _reset_usage_window_with_hf_baseline(
+    session_id: str,
+    hf_token: str | None,
+) -> dict[str, Any] | None:
+    baseline = await capture_hf_account_usage_baseline(hf_token)
+    captured_at = baseline.get("captured_at") if baseline else None
+    started_at = captured_at if isinstance(captured_at, datetime) else datetime.utcnow()
+    return await session_manager.reset_session_usage_window(
+        session_id,
+        started_at=started_at,
+        baseline=baseline,
+    )
 
 
 def _available_models() -> list[dict[str, Any]]:
@@ -431,6 +446,8 @@ async def create_session(
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
+    await _reset_usage_window_with_hf_baseline(session_id, hf_token)
+
     return SessionResponse(
         session_id=session_id,
         ready=True,
@@ -471,6 +488,8 @@ async def restore_session_summary(
         )
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+    await _reset_usage_window_with_hf_baseline(session_id, hf_token)
 
     await _check_session_access(
         session_id,
@@ -515,7 +534,8 @@ async def activate_session(
 ) -> SessionInfo:
     """Mark a session as actively revisited and reset its usage meter window."""
     await _check_session_access(session_id, user, request)
-    info = await session_manager.reset_session_usage_window(session_id)
+    hf_token = resolve_hf_request_token(request)
+    info = await _reset_usage_window_with_hf_baseline(session_id, hf_token)
     if not info:
         raise HTTPException(status_code=404, detail="Session not found")
     return SessionInfo(**info)
