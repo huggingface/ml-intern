@@ -242,6 +242,42 @@ async def test_runtime_usage_interprets_naive_timestamps_in_browser_timezone():
 
 
 @pytest.mark.asyncio
+async def test_hf_account_usage_reports_missing_token_error():
+    manager = _Manager({})
+
+    usage = await build_usage_response(
+        manager,
+        user_id="owner",
+        timezone_name="UTC",
+        now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+    )
+
+    assert usage["hf_account"]["available"] is False
+    assert usage["hf_account"]["error"] == "missing_hf_token"
+
+
+@pytest.mark.asyncio
+async def test_hf_account_usage_reports_billing_unavailable_error(monkeypatch):
+    manager = _Manager({})
+
+    async def fake_fetch(_token, *, start, end):
+        return None
+
+    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_fetch)
+
+    usage = await build_usage_response(
+        manager,
+        user_id="owner",
+        hf_token="hf_fake",
+        timezone_name="UTC",
+        now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+    )
+
+    assert usage["hf_account"]["available"] is False
+    assert usage["hf_account"]["error"] == "billing_usage_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_hf_account_usage_uses_session_start_for_current_delta(monkeypatch):
     session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
     manager = _Manager(
