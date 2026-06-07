@@ -37,6 +37,28 @@ GITHUB_TOKEN=<github-personal-access-token>
 
 All API-based model calls go through Hugging Face [Inference Providers](https://huggingface.co/docs/inference-providers/en/index), so your `HF_TOKEN` must be allowed to make Inference Provider calls. If no `HF_TOKEN` is set, the CLI will prompt you to paste one on first launch unless you start on a local model. To get a `GITHUB_TOKEN` follow the tutorial [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token). See the [local models section below](#local-models) for instructions on using agents that run on your hardware.
 
+### Local Web Dev
+
+Use the managed local stack when working across concurrent branches or
+worktrees:
+
+```bash
+uv run --frozen python scripts/dev_server.py up
+```
+
+The helper starts the backend and frontend together, picks free ports when the
+defaults are busy, points the Vite proxy at the selected backend, and writes
+state/logs to ignored `scratch/dev-server/`.
+
+```bash
+uv run --frozen python scripts/dev_server.py status
+uv run --frozen python scripts/dev_server.py restart
+uv run --frozen python scripts/dev_server.py down
+```
+
+If frontend dependencies are missing, run `cd frontend && npm ci` first, or
+pass `--install` to let the helper run it.
+
 ### Usage
 
 #### Interactive mode (start a chat session):

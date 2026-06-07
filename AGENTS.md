@@ -2,9 +2,14 @@
 
 ## Local Dev Servers
 
+- Managed stack: from the repo root, run `uv run --frozen python scripts/dev_server.py up`.
+- Stop the managed stack with `uv run --frozen python scripts/dev_server.py down`.
+- Restart it with `uv run --frozen python scripts/dev_server.py restart`.
+- The helper picks free frontend/backend ports, writes logs and state under ignored `scratch/dev-server/`, and prints the URLs it selected.
 - Frontend: from `frontend/`, run `npm ci` if dependencies are missing, then `npm run dev`.
 - Backend: from `backend/`, run `uv run uvicorn main:app --host ::1 --port 7860`.
-- Frontend URL: http://localhost:5173/
+- Default managed frontend URL: http://127.0.0.1:5173/
+- Manual frontend URL: http://localhost:5173/
 - Backend health check: `curl -g http://[::1]:7860/api`
 - Frontend proxy health check: `curl http://localhost:5173/api`
 
