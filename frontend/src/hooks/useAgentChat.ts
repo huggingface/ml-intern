@@ -32,6 +32,13 @@ interface UseAgentChatOptions {
   onSessionDead?: (sessionId: string) => void;
 }
 
+function textFromUIMessage(message: UIMessage): string {
+  return message.parts
+    .filter((p): p is Extract<typeof p, { type: 'text' }> => p.type === 'text')
+    .map(p => p.text)
+    .join('');
+}
+
 export function useAgentChat({ sessionId, isActive, isProcessing = false, onReady, onError, onSessionDead }: UseAgentChatOptions) {
   const callbacksRef = useRef({ onReady, onError, onSessionDead });
   callbacksRef.current = { onReady, onError, onSessionDead };
@@ -348,6 +355,74 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         useUsageStore.getState().applyUsageEvent(sessionId, eventType, data);
       },
       onInterrupted: () => { /* no-op — handled by stop() caller */ },
+      onRecoverMessages: async ({ submittedText, currentMessageCount, currentUserMessageCount }) => {
+        try {
+          const [msgsRes, infoRes] = await Promise.all([
+            apiFetch(`/api/session/${sessionId}/messages`),
+            apiFetch(`/api/session/${sessionId}`),
+          ]);
+
+          if (infoRes.status === 404 && msgsRes.status === 404) {
+            callbacksRef.current.onSessionDead?.(sessionId);
+            return false;
+          }
+          if (!msgsRes.ok) return false;
+
+          const data = await msgsRes.json();
+          if (!Array.isArray(data) || data.length === 0) return false;
+          saveBackendMessages(sessionId, data);
+
+          let pendingIds: Set<string> | undefined;
+          let backendIsProcessing = false;
+          if (infoRes.ok) {
+            const info = await infoRes.json();
+            backendIsProcessing = !!info.is_processing;
+            if (info.pending_approval && Array.isArray(info.pending_approval)) {
+              pendingIds = new Set(
+                info.pending_approval.map((t: { tool_call_id: string }) => t.tool_call_id)
+              );
+              if (pendingIds.size > 0) setNeedsAttention(sessionId, true);
+            }
+            if (info.auto_approval) {
+              updateSessionYolo(sessionId, info.auto_approval);
+            }
+          }
+
+          const uiMsgs = llmMessagesToUIMessages(
+            data,
+            pendingIds,
+            chatActionsRef.current.messages,
+          );
+          const setMsgs = chatActionsRef.current.setMessages;
+          if (setMsgs && uiMsgs.length > 0) {
+            setMsgs(uiMsgs);
+            saveMessages(sessionId, uiMsgs);
+          }
+
+          if (backendIsProcessing) {
+            setProcessingState(true, { activityStatus: { type: 'thinking' } });
+            return false;
+          }
+          if (pendingIds && pendingIds.size > 0) {
+            setProcessingState(false, { activityStatus: { type: 'waiting-approval' } });
+          } else {
+            setProcessingState(false);
+          }
+
+          if (uiMsgs.length > currentMessageCount) return true;
+          if (!submittedText) return false;
+
+          const userMessages = uiMsgs.filter((m) => m.role === 'user');
+          const lastUser = userMessages[userMessages.length - 1];
+          return (
+            userMessages.length >= currentUserMessageCount &&
+            !!lastUser &&
+            textFromUIMessage(lastUser).trim() === submittedText.trim()
+          );
+        } catch {
+          return false;
+        }
+      },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sessionId, setProcessingState],

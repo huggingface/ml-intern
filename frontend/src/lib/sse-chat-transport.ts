@@ -41,6 +41,13 @@ export interface SideChannelCallbacks {
   onToolRunning: (toolName: string, description?: string) => void;
   onUsageEvent: (eventType: 'llm_call' | 'hf_job_complete', data: Record<string, unknown>) => void;
   onInterrupted: () => void;
+  onRecoverMessages: (context: MessageRecoveryContext) => Promise<boolean>;
+}
+
+export interface MessageRecoveryContext {
+  submittedText?: string;
+  currentMessageCount: number;
+  currentUserMessageCount: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +75,28 @@ async function readErrorResponse(response: Response): Promise<string> {
   } catch {
     return raw;
   }
+}
+
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  if (!(error instanceof Error)) return false;
+  return error.name === 'AbortError';
+}
+
+function isRecoverableFetchError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === 'TypeError') return true;
+
+  const message = error.message.toLowerCase();
+  return [
+    'load failed',
+    'failed to fetch',
+    'networkerror',
+    'network error',
+    'network request failed',
+    'connection',
+    'fetch',
+  ].some((pattern) => message.includes(pattern));
 }
 
 /** Parse an SSE text stream into AgentEvent objects. */
@@ -126,6 +155,15 @@ function createSSEParserStream(sessionId: string): TransformStream<string, Agent
         data += line.slice(5).trimStart() + '\n';
       }
       dispatch(controller);
+    },
+  });
+}
+
+function createRecoveredFinishedStream(): ReadableStream<UIMessageChunk> {
+  return new ReadableStream<UIMessageChunk>({
+    start(controller) {
+      controller.enqueue({ type: 'finish', finishReason: 'stop' });
+      controller.close();
     },
   });
 }
@@ -369,6 +407,66 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
     // Nothing to clean up — no persistent connections
   }
 
+  private async connectToEventStream(): Promise<ReadableStream<UIMessageChunk> | null> {
+    const lastSeq = localStorage.getItem(lastEventKey(this.sessionId));
+    const qs = lastSeq ? `?after=${encodeURIComponent(lastSeq)}` : '';
+    const response = await apiFetch(`/api/events/${this.sessionId}${qs}`, {
+      headers: { 'Accept': 'text/event-stream' },
+    });
+    if (!response.ok || !response.body) return null;
+
+    this.sideChannel.onProcessing();
+
+    return response.body
+      .pipeThrough(new TextDecoderStream())
+      .pipeThrough(createSSEParserStream(this.sessionId))
+      .pipeThrough(createEventToChunkStream(this.sideChannel));
+  }
+
+  private async recoverFailedSend(
+    context: MessageRecoveryContext,
+  ): Promise<ReadableStream<UIMessageChunk>> {
+    let infoRes: Response;
+    try {
+      infoRes = await apiFetch(`/api/session/${this.sessionId}`);
+    } catch {
+      throw new Error(
+        'Connection to the Space was interrupted before the message was accepted. Please retry.',
+      );
+    }
+
+    if (infoRes.status === 404) {
+      this.sideChannel.onSessionDead(this.sessionId);
+      throw new Error('Session not found or inactive');
+    }
+    if (!infoRes.ok) {
+      throw new Error(
+        'Connection to the Space was interrupted before the message was accepted. Please retry.',
+      );
+    }
+
+    const info = await infoRes.json();
+    if (info.is_processing) {
+      try {
+        const stream = await this.connectToEventStream();
+        if (stream) return stream;
+      } catch {
+        // Fall through to message hydration; the turn may have completed
+        // between the status probe and the event-stream reconnect.
+      }
+    }
+
+    const recovered = await this.sideChannel.onRecoverMessages(context);
+    if (recovered) {
+      this.sideChannel.onProcessingDone();
+      return createRecoveredFinishedStream();
+    }
+
+    throw new Error(
+      'Connection to the Space was interrupted before the message was accepted. Please retry.',
+    );
+  }
+
   // -- ChatTransport interface ---------------------------------------------
 
   async sendMessages(
@@ -391,6 +489,7 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
     ) || [];
 
     let body: Record<string, unknown>;
+    let submittedText: string | undefined;
     if (approvedParts.length > 0) {
       // Approval continuation — extract approval decisions
       const approvals = approvedParts.map((p) => {
@@ -415,19 +514,33 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
             .map(p => p.text)
             .join('')
         : '';
+      submittedText = text;
       body = { text };
     }
 
     // POST to SSE endpoint
-    const response = await apiFetch(`/api/chat/${sessionId}`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-      signal: options.abortSignal,
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-      },
-    });
+    let response: Response;
+    try {
+      response = await apiFetch(`/api/chat/${sessionId}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+        signal: options.abortSignal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        },
+      });
+    } catch (error) {
+      if (isAbortError(error, options.abortSignal) || !isRecoverableFetchError(error)) {
+        throw error;
+      }
+      logger.warn('Chat POST failed; attempting session recovery:', error);
+      return this.recoverFailedSend({
+        submittedText,
+        currentMessageCount: options.messages.length,
+        currentUserMessageCount: options.messages.filter(m => m.role === 'user').length,
+      });
+    }
 
     if (response.status === 404) {
       // Backend lost this session (e.g. Space restart). Signal the UI so
@@ -460,20 +573,7 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
       const info = await infoRes.json();
       if (!info.is_processing) return null;
 
-      // Session is mid-turn — subscribe to its event broadcast.
-      const lastSeq = localStorage.getItem(lastEventKey(this.sessionId));
-      const qs = lastSeq ? `?after=${encodeURIComponent(lastSeq)}` : '';
-      const response = await apiFetch(`/api/events/${this.sessionId}${qs}`, {
-        headers: { 'Accept': 'text/event-stream' },
-      });
-      if (!response.ok || !response.body) return null;
-
-      this.sideChannel.onProcessing();
-
-      return response.body
-        .pipeThrough(new TextDecoderStream())
-        .pipeThrough(createSSEParserStream(this.sessionId))
-        .pipeThrough(createEventToChunkStream(this.sideChannel));
+      return this.connectToEventStream();
     } catch {
       return null;
     }
