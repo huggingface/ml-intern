@@ -85,18 +85,24 @@ function isAbortError(error: unknown, signal?: AbortSignal): boolean {
 
 function isRecoverableFetchError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  if (error.name === 'TypeError') return true;
 
+  const name = error.name.toLowerCase();
   const message = error.message.toLowerCase();
-  return [
+  const networkFailureMessages = [
     'load failed',
     'failed to fetch',
+    'fetch failed',
     'networkerror',
     'network error',
     'network request failed',
-    'connection',
-    'fetch',
-  ].some((pattern) => message.includes(pattern));
+    'network connection was lost',
+    'internet connection appears to be offline',
+  ];
+
+  return (
+    name === 'networkerror' ||
+    (name === 'typeerror' && networkFailureMessages.some((pattern) => message.includes(pattern)))
+  );
 }
 
 /** Parse an SSE text stream into AgentEvent objects. */

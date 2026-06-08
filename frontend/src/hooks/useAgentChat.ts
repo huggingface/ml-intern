@@ -393,8 +393,20 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             pendingIds,
             chatActionsRef.current.messages,
           );
+          const backendAdvanced = uiMsgs.length > currentMessageCount;
+          let submittedTurnAccepted = false;
+          if (submittedText) {
+            const userMessages = uiMsgs.filter((m) => m.role === 'user');
+            const lastUser = userMessages[userMessages.length - 1];
+            submittedTurnAccepted = (
+              userMessages.length >= currentUserMessageCount &&
+              !!lastUser &&
+              textFromUIMessage(lastUser).trim() === submittedText.trim()
+            );
+          }
+
           const setMsgs = chatActionsRef.current.setMessages;
-          if (setMsgs && uiMsgs.length > 0) {
+          if (setMsgs && uiMsgs.length >= currentMessageCount) {
             setMsgs(uiMsgs);
             saveMessages(sessionId, uiMsgs);
           }
@@ -409,16 +421,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             setProcessingState(false);
           }
 
-          if (uiMsgs.length > currentMessageCount) return true;
-          if (!submittedText) return false;
-
-          const userMessages = uiMsgs.filter((m) => m.role === 'user');
-          const lastUser = userMessages[userMessages.length - 1];
-          return (
-            userMessages.length >= currentUserMessageCount &&
-            !!lastUser &&
-            textFromUIMessage(lastUser).trim() === submittedText.trim()
-          );
+          return backendAdvanced || submittedTurnAccepted;
         } catch {
           return false;
         }
