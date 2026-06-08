@@ -29,6 +29,7 @@ Notes:
 - Always use the `gh` CLI for GitHub operations such as opening, editing, inspecting, or commenting on PRs and issues.
 - For multiline PR descriptions, prefer `gh pr edit <number> --body-file <file>` over inline `--body` so shell quoting, `$` env-var names, backticks, and newlines are preserved correctly.
 - If `gh` reports an invalid token or auth failure, retry the command with `GH_TOKEN` and `GITHUB_TOKEN` unset, for example `env -u GH_TOKEN -u GITHUB_TOKEN gh pr create ...`, so `gh` can use the stored login token instead of a stale environment token.
+- In Codex, sandboxed `gh` auth checks can report a valid keyring login as invalid when GitHub network access is restricted. Before telling the user to re-authenticate, retry with both env tokens unset and GitHub network access enabled.
 
 ## GitHub PRs
 
