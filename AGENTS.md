@@ -14,6 +14,7 @@ Notes:
 - If `127.0.0.1:7860` is already owned by another local process, binding the backend to `::1` lets the Vite proxy resolve `localhost` cleanly.
 - Prefer `npm ci` over `npm install` for setup, since `npm install` may rewrite `frontend/package-lock.json` metadata depending on npm version.
 - Non-local LLM calls use `https://router.huggingface.co/v1` with the active Hugging Face user's token. Web sessions default to Kimi K2.6 for free users and Claude Opus 4.8 for Pro users; the CLI default is Claude Opus 4.8. For local development, set `HF_TOKEN` and optionally `ML_INTERN_DEFAULT_MODEL_ID`.
+- When debugging a web app issue tied to a session ID, inspect the session data in `smolagents/ml-intern-sessions` for additional context.
 
 ## Development Checks
 
@@ -29,6 +30,7 @@ Notes:
 - Always use the `gh` CLI for GitHub operations such as opening, editing, inspecting, or commenting on PRs and issues.
 - For multiline PR descriptions, prefer `gh pr edit <number> --body-file <file>` over inline `--body` so shell quoting, `$` env-var names, backticks, and newlines are preserved correctly.
 - If `gh` reports an invalid token or auth failure, retry the command with `GH_TOKEN` and `GITHUB_TOKEN` unset, for example `env -u GH_TOKEN -u GITHUB_TOKEN gh pr create ...`, so `gh` can use the stored login token instead of a stale environment token.
+- In Codex, sandboxed `gh` auth checks can report a valid keyring login as invalid when GitHub network access is restricted. Before telling the user to re-authenticate, retry with both env tokens unset and GitHub network access enabled.
 
 ## GitHub PRs
 
