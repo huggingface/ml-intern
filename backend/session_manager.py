@@ -140,14 +140,14 @@ SANDBOX_SHUTDOWN_CLEANUP_CONCURRENCY: int = 10
 SANDBOX_SHUTDOWN_CLEANUP_TIMEOUT_S: float = 60.0
 
 # ── Idle-session reaper ─────────────────────────────────────────────
-# A live session idle ≥ REAPER_IDLE_HOURS with no in-flight work has its
+# A live session idle ≥ REAPER_IDLE_MINUTES with no in-flight work has its
 # sandbox + RAM released and is evicted from the live pool, while staying
 # fully resumable from Mongo (it reappears as a normal chat, never "ended").
 # This frees both the global pool and the user's concurrent slots.
-REAPER_IDLE_HOURS: float = float(os.environ.get("REAPER_IDLE_HOURS", "2"))
+REAPER_IDLE_MINUTES: float = float(os.environ.get("REAPER_IDLE_MINUTES", "15"))
 REAPER_INTERVAL_S: float = float(os.environ.get("REAPER_INTERVAL_S", "300"))
 REAP_TEARDOWN_TIMEOUT_S: float = float(os.environ.get("REAP_TEARDOWN_TIMEOUT_S", "30"))
-REAPER_IDLE = timedelta(hours=REAPER_IDLE_HOURS)
+REAPER_IDLE = timedelta(minutes=REAPER_IDLE_MINUTES)
 
 
 class SessionManager:
@@ -821,7 +821,7 @@ class SessionManager:
 
         Raises:
             SessionCapacityError: If the server or user has reached the
-                maximum number of concurrent sessions.
+                maximum number of live sessions.
         """
         # ── Capacity checks ──────────────────────────────────────────
         # Reserve a global slot under the lock so concurrent creates can't all
@@ -843,7 +843,9 @@ class SessionManager:
                 if user_count >= MAX_SESSIONS_PER_USER:
                     raise SessionCapacityError(
                         f"You have reached the maximum of {MAX_SESSIONS_PER_USER} "
-                        "concurrent sessions. Please close an existing session first.",
+                        f"live sessions. Close an existing session, or wait "
+                        f"{REAPER_IDLE_MINUTES:g} minutes after your last activity "
+                        "for an idle session to be released.",
                         error_type="per_user",
                     )
             self._pending_creates += 1

@@ -31,6 +31,11 @@ from session_manager import (  # noqa: E402
 from agent.core.session import OpType  # noqa: E402
 
 
+def test_reaper_idle_default_is_fifteen_minutes():
+    assert sm.REAPER_IDLE_MINUTES == 15
+    assert sm.REAPER_IDLE == timedelta(minutes=15)
+
+
 class RecordingStore(NoopSessionStore):
     """Captures every save_snapshot call so tests can assert persistence."""
 
@@ -371,6 +376,12 @@ async def test_per_user_cap_frees_up_after_slot_reclaimed():
         with pytest.raises(SessionCapacityError) as exc:
             await manager.create_session(user_id="owner")
         assert exc.value.error_type == "per_user"
+        message = str(exc.value)
+        assert f"maximum of {sm.MAX_SESSIONS_PER_USER} live sessions" in message
+        assert "Close an existing session" in message
+        assert f"wait {sm.REAPER_IDLE_MINUTES:g} minutes" in message
+        assert "after your last activity" in message
+        assert "idle session to be released" in message
 
         # Reclaiming a slot (the reaper evicts an idle session) frees capacity.
         manager.sessions.pop("owner-0")
