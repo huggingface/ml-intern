@@ -355,14 +355,35 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         useUsageStore.getState().applyUsageEvent(sessionId, eventType, data);
       },
       onInterrupted: () => { /* no-op — handled by stop() caller */ },
-      onRecoverMessages: async ({ submittedText, currentMessageCount, currentUserMessageCount }) => {
+      onRecoverMessages: async ({
+        submittedText,
+        currentMessageCount,
+        currentUserMessageCount,
+        sessionInfo,
+      }) => {
         try {
-          const [msgsRes, infoRes] = await Promise.all([
-            apiFetch(`/api/session/${sessionId}/messages`),
-            apiFetch(`/api/session/${sessionId}`),
-          ]);
+          let msgsRes: Response;
+          let info = sessionInfo;
 
-          if (infoRes.status === 404 && msgsRes.status === 404) {
+          if (sessionInfo) {
+            msgsRes = await apiFetch(`/api/session/${sessionId}/messages`);
+          } else {
+            const [fetchedMsgsRes, infoRes] = await Promise.all([
+              apiFetch(`/api/session/${sessionId}/messages`),
+              apiFetch(`/api/session/${sessionId}`),
+            ]);
+            msgsRes = fetchedMsgsRes;
+
+            if (infoRes.status === 404 && msgsRes.status === 404) {
+              callbacksRef.current.onSessionDead?.(sessionId);
+              return false;
+            }
+            if (infoRes.ok) {
+              info = await infoRes.json();
+            }
+          }
+
+          if (sessionInfo && msgsRes.status === 404) {
             callbacksRef.current.onSessionDead?.(sessionId);
             return false;
           }
@@ -374,8 +395,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
 
           let pendingIds: Set<string> | undefined;
           let backendIsProcessing = false;
-          if (infoRes.ok) {
-            const info = await infoRes.json();
+          if (info) {
             backendIsProcessing = !!info.is_processing;
             if (info.pending_approval && Array.isArray(info.pending_approval)) {
               pendingIds = new Set(

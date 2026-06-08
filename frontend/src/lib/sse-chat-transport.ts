@@ -48,6 +48,18 @@ export interface MessageRecoveryContext {
   submittedText?: string;
   currentMessageCount: number;
   currentUserMessageCount: number;
+  sessionInfo?: RecoverySessionInfo;
+}
+
+export interface RecoverySessionInfo {
+  is_processing?: boolean;
+  pending_approval?: Array<{ tool_call_id: string }> | null;
+  auto_approval?: {
+    enabled: boolean;
+    cost_cap_usd?: number | null;
+    estimated_spend_usd?: number;
+    remaining_usd?: number | null;
+  } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +463,7 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
       );
     }
 
-    const info = await infoRes.json();
+    const info = await infoRes.json() as RecoverySessionInfo;
     if (info.is_processing) {
       try {
         const stream = await this.connectToEventStream();
@@ -462,7 +474,10 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
       }
     }
 
-    const recovered = await this.sideChannel.onRecoverMessages(context);
+    const recovered = await this.sideChannel.onRecoverMessages({
+      ...context,
+      sessionInfo: info.is_processing ? undefined : info,
+    });
     if (recovered) {
       this.sideChannel.onProcessingDone();
       return createRecoveredFinishedStream();
