@@ -33,6 +33,7 @@ Notes:
 ## GitHub PRs
 
 - Open code changes as GitHub PRs first. Do not push code changes directly to the Hugging Face Space deployment branch or Space remote before the PR has been opened, reviewed, and merged, unless the user explicitly asks to bypass the PR flow.
+- After implementing a plan, run the required checks, commit the changes, open a GitHub PR, then start the backend and frontend local dev servers for testing.
 
 ## Hugging Face Space Deploys
 
