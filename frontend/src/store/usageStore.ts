@@ -49,7 +49,6 @@ export interface HfAccountUsage {
   available: boolean;
   error?: string | null;
   current_session: HfAccountUsageBucket | null;
-  today: HfAccountUsageBucket | null;
   month: HfAccountUsageBucket | null;
   inference_providers_credits: HfInferenceProvidersCredits | null;
 }
@@ -60,8 +59,6 @@ export interface UsageResponse {
   generated_at: string;
   timezone: string;
   session: UsageBucket | null;
-  today: UsageBucket;
-  month: UsageBucket;
   hf_account?: HfAccountUsage | null;
   links: Record<string, string>;
 }
@@ -96,7 +93,6 @@ function usageUrl(sessionId?: string | null): string {
   const params = new URLSearchParams();
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   params.set('tz', timezone);
-  params.set('include_rollups', 'false');
   if (sessionId) params.set('session_id', sessionId);
   return `/api/usage?${params.toString()}`;
 }
@@ -186,8 +182,6 @@ export const useUsageStore = create<UsageStore>()((set, get) => ({
           current.session?.session_id === sessionId
             ? applyEventToBucket(current.session, eventType, data)
             : current.session,
-        today: applyEventToBucket(current.today, eventType, data) ?? current.today,
-        month: applyEventToBucket(current.month, eventType, data) ?? current.month,
       },
     });
   },

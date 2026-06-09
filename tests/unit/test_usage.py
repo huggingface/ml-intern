@@ -211,7 +211,6 @@ def test_usage_windows_respect_browser_timezone():
     )
 
     assert windows["timezone"] == "America/Los_Angeles"
-    assert windows["today_start_utc"] == datetime(2026, 6, 1, 7, 0, tzinfo=UTC)
     assert windows["month_start_utc"] == datetime(2026, 6, 1, 7, 0, tzinfo=UTC)
 
 
@@ -261,7 +260,7 @@ def _agent_session(session_id, user_id, events):
 
 
 @pytest.mark.asyncio
-async def test_runtime_usage_excludes_other_users():
+async def test_usage_response_omits_app_rollups_without_session():
     manager = _Manager(
         {
             "owner-session": _agent_session(
@@ -285,9 +284,9 @@ async def test_runtime_usage_excludes_other_users():
         now=datetime(2026, 6, 1, 13, 0, tzinfo=UTC),
     )
 
-    assert usage["today"]["llm_calls"] == 1
-    assert usage["today"]["inference_usd"] == 0.5
-    assert usage["month"]["inference_usd"] == 0.5
+    assert usage["session"] is None
+    assert "today" not in usage
+    assert "month" not in usage
 
 
 @pytest.mark.asyncio
@@ -318,11 +317,12 @@ async def test_runtime_usage_includes_requested_session_total():
 
     assert usage["session"]["session_id"] == "s1"
     assert usage["session"]["inference_usd"] == 0.25
-    assert usage["today"]["inference_usd"] == 0.0
+    assert "today" not in usage
+    assert "month" not in usage
 
 
 @pytest.mark.asyncio
-async def test_runtime_usage_interprets_naive_timestamps_in_browser_timezone():
+async def test_runtime_usage_includes_requested_session_tokens():
     manager = _Manager(
         {
             "s1": _agent_session(
@@ -348,9 +348,9 @@ async def test_runtime_usage_interprets_naive_timestamps_in_browser_timezone():
     )
 
     assert usage["session"]["llm_calls"] == 1
-    assert usage["today"]["llm_calls"] == 1
-    assert usage["month"]["llm_calls"] == 1
-    assert usage["today"]["total_tokens"] == 42
+    assert usage["session"]["total_tokens"] == 42
+    assert "today" not in usage
+    assert "month" not in usage
 
 
 @pytest.mark.asyncio
@@ -410,8 +410,6 @@ async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch)
         calls.append((start, end))
         if start == usage_window_started_at:
             used_nano = 500_000_000
-        elif start == datetime(2026, 6, 5, 0, 0, tzinfo=UTC):
-            used_nano = 1_000_000_000
         else:
             used_nano = 2_000_000_000
         return {
@@ -439,7 +437,7 @@ async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch)
 
     assert usage["hf_account"]["available"] is True
     assert usage["hf_account"]["current_session"]["inference_providers_usd"] == 0.5
-    assert usage["hf_account"]["today"]["inference_providers_usd"] == 1.0
+    assert "today" not in usage["hf_account"]
     assert usage["hf_account"]["month"]["inference_providers_usd"] == 2.0
     assert usage["hf_account"]["inference_providers_credits"] == {
         "included_usd": 2.0,
@@ -452,7 +450,6 @@ async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch)
         "period_end": None,
     }
     assert {start for start, _ in calls} == {
-        datetime(2026, 6, 5, 0, 0, tzinfo=UTC),
         datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
         usage_window_started_at,
     }
@@ -551,7 +548,6 @@ async def test_hf_account_usage_falls_back_to_persisted_created_at(monkeypatch):
         session_id="s1",
         timezone_name="UTC",
         now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
-        include_rollups=False,
     )
 
     assert usage["hf_account"]["current_session"]["window_start"] == (
@@ -564,7 +560,7 @@ async def test_hf_account_usage_falls_back_to_persisted_created_at(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_compact_usage_skips_unused_rollup_loads(monkeypatch):
+async def test_usage_response_loads_only_session_events(monkeypatch):
     session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
     store = _RecordingStore()
     manager = _Manager(
@@ -602,7 +598,6 @@ async def test_compact_usage_skips_unused_rollup_loads(monkeypatch):
         session_id="s1",
         timezone_name="UTC",
         now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
-        include_rollups=False,
     )
 
     assert store.calls == [("owner", {"session_id": "s1", "start": None, "end": None})]
@@ -611,7 +606,7 @@ async def test_compact_usage_skips_unused_rollup_loads(monkeypatch):
         session_created_at,
     }
     assert datetime(2026, 6, 5, 0, 0, tzinfo=UTC) not in billing_starts
-    assert usage["today"]["llm_calls"] == 0
-    assert usage["month"]["llm_calls"] == 0
-    assert usage["hf_account"]["today"] is None
+    assert "today" not in usage
+    assert "month" not in usage
+    assert "today" not in usage["hf_account"]
     assert usage["hf_account"]["month"]["inference_providers_usd"] == 0.0

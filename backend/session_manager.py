@@ -481,7 +481,6 @@ class SessionManager:
             hf_token=agent_session.hf_token,
             session_id=agent_session.session_id,
             timezone_name="UTC",
-            include_rollups=False,
         )
         spend, billing_source = self._usage_spend_from_response(response)
         agent_session.usage_warning_spend_cache = {

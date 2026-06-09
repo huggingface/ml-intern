@@ -119,7 +119,7 @@ def resolve_usage_windows(
     *,
     now: datetime | None = None,
 ) -> dict[str, datetime | str]:
-    """Return UTC day/month windows for a browser timezone."""
+    """Return UTC month window for a browser timezone."""
     try:
         tz = ZoneInfo(timezone_name or "UTC")
     except (ZoneInfoNotFoundError, ValueError):
@@ -127,12 +127,10 @@ def resolve_usage_windows(
 
     now_utc = _utc(now or datetime.now(UTC))
     local_now = now_utc.astimezone(tz)
-    today_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    month_local = today_local.replace(day=1)
+    month_local = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return {
         "timezone": tz.key,
         "now_utc": now_utc,
-        "today_start_utc": today_local.astimezone(UTC),
         "month_start_utc": month_local.astimezone(UTC),
     }
 
@@ -615,15 +613,12 @@ async def _build_hf_account_usage(
     session_id: str | None,
     timezone: str,
     now_utc: datetime,
-    today_start: datetime,
     month_start: datetime,
-    include_rollups: bool = True,
 ) -> dict[str, Any]:
     account_usage: dict[str, Any] = {
         "source": "hf_billing_usage_v2",
         "available": False,
         "current_session": None,
-        "today": None,
         "month": None,
         "inference_providers_credits": None,
     }
@@ -654,13 +649,6 @@ async def _build_hf_account_usage(
             ),
         ),
     }
-    if include_rollups:
-        window_tasks["today"] = (
-            today_start,
-            asyncio.create_task(
-                _fetch_hf_billing_usage_v2(hf_token, start=today_start, end=now_utc)
-            ),
-        )
     if session_start is not None:
         if baseline_month_start is not None:
             window_tasks["current_session_baseline"] = (
@@ -817,12 +805,10 @@ async def build_usage_response(
     session_id: str | None = None,
     timezone_name: str | None = None,
     now: datetime | None = None,
-    include_rollups: bool = True,
 ) -> dict[str, Any]:
     windows = resolve_usage_windows(timezone_name, now=now)
     timezone = str(windows["timezone"])
     now_utc = windows["now_utc"]
-    today_start = windows["today_start_utc"]
     month_start = windows["month_start_utc"]
 
     session_events: list[dict[str, Any]] = []
@@ -833,32 +819,13 @@ async def build_usage_response(
             session_id=session_id,
         )
 
-    today_events: list[dict[str, Any]] = []
-    month_events: list[dict[str, Any]] = []
-    if include_rollups:
-        today_events = await _load_usage_events(
-            manager,
-            user_id=user_id,
-            start=today_start,
-            end=now_utc,
-            timezone_name=timezone,
-        )
-        month_events = await _load_usage_events(
-            manager,
-            user_id=user_id,
-            start=month_start,
-            end=now_utc,
-            timezone_name=timezone,
-        )
     hf_account = await _build_hf_account_usage(
         manager,
         hf_token=hf_token,
         session_id=session_id,
         timezone=timezone,
         now_utc=now_utc,
-        today_start=today_start,
         month_start=month_start,
-        include_rollups=include_rollups,
     )
 
     return {
@@ -870,18 +837,6 @@ async def build_usage_response(
             aggregate_usage_events(session_events, session_id=session_id)
             if session_id
             else None
-        ),
-        "today": aggregate_usage_events(
-            today_events,
-            window_start=today_start,
-            window_end=now_utc,
-            timezone=timezone,
-        ),
-        "month": aggregate_usage_events(
-            month_events,
-            window_start=month_start,
-            window_end=now_utc,
-            timezone=timezone,
         ),
         "hf_account": hf_account,
         "links": {

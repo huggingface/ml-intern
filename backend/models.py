@@ -177,7 +177,6 @@ class HfAccountUsage(BaseModel):
     available: bool = False
     error: str | None = None
     current_session: HfAccountUsageBucket | None = None
-    today: HfAccountUsageBucket | None = None
     month: HfAccountUsageBucket | None = None
     inference_providers_credits: HfInferenceProvidersCredits | None = None
 
@@ -190,8 +189,6 @@ class UsageResponse(BaseModel):
     generated_at: str
     timezone: str
     session: UsageBucket | None = None
-    today: UsageBucket
-    month: UsageBucket
     hf_account: HfAccountUsage | None = None
     links: dict[str, str] = Field(default_factory=dict)
 
