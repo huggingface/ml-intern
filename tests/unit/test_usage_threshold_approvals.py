@@ -125,3 +125,22 @@ async def test_usage_threshold_rejection_stops_turn(monkeypatch):
     assert session.events[1].data["success"] is False
     assert session.turn_count == 1
     assert session.auto_saved is True
+
+
+@pytest.mark.asyncio
+async def test_abandon_complete_turn_usage_threshold_completes_prior_turn():
+    session = FakeUsageApprovalSession(continuation="complete_turn")
+
+    await Handlers._abandon_pending_approval(session)
+
+    assert session.pending_approval is None
+    assert [event.event_type for event in session.events] == [
+        "tool_state_change",
+        "turn_complete",
+    ]
+    assert session.events[-1].data == {
+        "history_size": 3,
+        "final_response": "done",
+    }
+    assert session.turn_count == 1
+    assert session.auto_saved is True

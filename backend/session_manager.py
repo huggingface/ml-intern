@@ -6,7 +6,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -33,6 +33,7 @@ from agent.messaging.gateway import NotificationGateway
 # Get project root (parent of backend directory)
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_CONFIG_PATH = str(PROJECT_ROOT / "configs" / "frontend_agent_config.json")
+USAGE_WARNING_SPEND_CACHE_TTL_SECONDS = 30.0
 
 
 # These dataclasses match agent/main.py structure
@@ -123,6 +124,7 @@ class AgentSession:
     usage_window_started_at: datetime | None = None
     usage_window_baseline: dict[str, Any] | None = None
     usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
+    usage_warning_spend_cache: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.usage_window_started_at is None:
@@ -452,7 +454,22 @@ class SessionManager:
     async def _current_session_usage_spend(
         self,
         agent_session: AgentSession,
+        *,
+        use_cache: bool = True,
     ) -> tuple[float, str]:
+        now = datetime.now(UTC)
+        cache = agent_session.usage_warning_spend_cache
+        cache_expires_at = cache.get("expires_at")
+        if (
+            use_cache
+            and isinstance(cache_expires_at, datetime)
+            and cache_expires_at > now
+        ):
+            return (
+                float(cache.get("spend_usd") or 0.0),
+                str(cache.get("billing_source") or "app_telemetry_session"),
+            )
+
         from usage import build_usage_response
 
         response = await build_usage_response(
@@ -463,7 +480,39 @@ class SessionManager:
             timezone_name="UTC",
             include_rollups=False,
         )
-        return self._usage_spend_from_response(response)
+        spend, billing_source = self._usage_spend_from_response(response)
+        agent_session.usage_warning_spend_cache = {
+            "spend_usd": spend,
+            "billing_source": billing_source,
+            "expires_at": now
+            + timedelta(seconds=USAGE_WARNING_SPEND_CACHE_TTL_SECONDS),
+        }
+        return spend, billing_source
+
+    @staticmethod
+    def _runtime_session_usage_spend(agent_session: AgentSession) -> float:
+        from usage import aggregate_usage_events, event_created_at
+
+        window_start = agent_session.usage_window_started_at
+        if isinstance(window_start, datetime):
+            if window_start.tzinfo is None:
+                window_start = window_start.replace(tzinfo=UTC)
+            else:
+                window_start = window_start.astimezone(UTC)
+        events = []
+        for raw_event in getattr(agent_session.session, "logged_events", []) or []:
+            if raw_event.get("event_type") not in {"llm_call", "hf_job_complete"}:
+                continue
+            if isinstance(window_start, datetime):
+                created_at = event_created_at(raw_event, timezone_name="UTC")
+                if created_at is not None and created_at < window_start:
+                    continue
+            events.append(raw_event)
+        bucket = aggregate_usage_events(
+            events,
+            session_id=agent_session.session_id,
+        )
+        return float(bucket.get("total_usd") or 0.0)
 
     async def _maybe_request_usage_threshold_approval(
         self,
@@ -485,8 +534,14 @@ class SessionManager:
                 agent_session.usage_warning_next_threshold_usd,
             )
         )
+        force_check = bool(continuation_payload.get("force_check"))
+        local_spend = self._runtime_session_usage_spend(agent_session)
+        if not force_check and local_spend < threshold:
+            return False
+
         current_spend, billing_source = await self._current_session_usage_spend(
-            agent_session
+            agent_session,
+            use_cache=not force_check,
         )
         if current_spend < threshold:
             return False

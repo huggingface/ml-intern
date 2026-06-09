@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
-from datetime import datetime, UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,6 +35,7 @@ class FakeRuntimeSession:
         self.auto_approval_estimated_spend_usd = 0.0
         self.usage_warning_next_threshold_usd = 5.0
         self.usage_threshold_checker = None
+        self.logged_events = []
         self.sandbox = None
         self.sandbox_hardware = None
         self.sandbox_preload_task = None
@@ -256,9 +257,16 @@ def test_usage_spend_falls_back_when_hf_total_is_unavailable():
 async def test_usage_threshold_checker_creates_synthetic_pending_approval(monkeypatch):
     manager = _manager_with_store(NoopSessionStore())
     agent_session = _runtime_agent_session("s1")
+    agent_session.session.logged_events.append(
+        {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "event_type": "llm_call",
+            "data": {"cost_usd": 6.0},
+        }
+    )
     manager.sessions["s1"] = agent_session
 
-    async def fake_current_session_usage_spend(_agent_session):
+    async def fake_current_session_usage_spend(_agent_session, **_kwargs):
         return 12.25, "app_telemetry_session"
 
     monkeypatch.setattr(
@@ -280,6 +288,106 @@ async def test_usage_threshold_checker_creates_synthetic_pending_approval(monkey
     assert pending["next_threshold_usd"] == 20.0
     assert pending["billing_source"] == "app_telemetry_session"
     assert agent_session.session.events[-1].event_type == "approval_required"
+
+
+@pytest.mark.asyncio
+async def test_usage_threshold_checker_skips_billing_when_local_spend_below_threshold(
+    monkeypatch,
+):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    manager.sessions["s1"] = agent_session
+    calls = 0
+
+    async def fake_current_session_usage_spend(_agent_session, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return 12.25, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_usage_threshold_checker(agent_session)
+
+    paused = await agent_session.session.usage_threshold_checker(
+        {"continuation": "continue_agent", "history_size": 4}
+    )
+
+    assert paused is False
+    assert calls == 0
+    assert agent_session.session.pending_approval is None
+
+
+@pytest.mark.asyncio
+async def test_usage_threshold_checker_forces_billing_at_complete_turn(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    manager.sessions["s1"] = agent_session
+    calls = 0
+
+    async def fake_current_session_usage_spend(_agent_session, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return 12.25, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_usage_threshold_checker(agent_session)
+
+    paused = await agent_session.session.usage_threshold_checker(
+        {
+            "continuation": "complete_turn",
+            "force_check": True,
+            "history_size": 4,
+        }
+    )
+
+    assert paused is True
+    assert calls == 1
+    assert agent_session.session.pending_approval["continuation"] == "complete_turn"
+
+
+@pytest.mark.asyncio
+async def test_usage_threshold_checker_uses_cached_spend_after_local_crossing(
+    monkeypatch,
+):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.logged_events.append(
+        {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "event_type": "llm_call",
+            "data": {"cost_usd": 6.0},
+        }
+    )
+    manager.sessions["s1"] = agent_session
+
+    async def fail_build_usage_response(*_args, **_kwargs):
+        raise AssertionError("fresh billing usage should not be fetched")
+
+    monkeypatch.setattr("usage.build_usage_response", fail_build_usage_response)
+    agent_session.usage_warning_spend_cache = {
+        "spend_usd": 4.5,
+        "billing_source": "hf_billing_current_session",
+        "expires_at": datetime.now(UTC) + timedelta(seconds=30),
+    }
+    manager._install_usage_threshold_checker(agent_session)
+
+    first = await agent_session.session.usage_threshold_checker(
+        {"continuation": "continue_agent", "history_size": 4}
+    )
+    second = await agent_session.session.usage_threshold_checker(
+        {"continuation": "continue_agent", "history_size": 4}
+    )
+
+    assert first is False
+    assert second is False
+    assert agent_session.session.pending_approval is None
 
 
 def test_unknown_saved_model_defaults_to_kimi():

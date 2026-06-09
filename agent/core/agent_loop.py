@@ -169,6 +169,7 @@ async def _maybe_pause_for_usage_threshold(
         return False
     payload: dict[str, Any] = {
         "continuation": continuation,
+        "force_check": continuation == "complete_turn",
         "history_size": len(session.context_manager.items),
     }
     if final_response is not None:
@@ -1128,7 +1129,8 @@ class Handlers:
         abandoned.
         """
         if is_usage_threshold_pending(session.pending_approval):
-            tool_call_id = str(session.pending_approval.get("tool_call_id") or "")
+            pending = session.pending_approval
+            tool_call_id = str(pending.get("tool_call_id") or "")
             session.pending_approval = None
             if tool_call_id:
                 await session.send_event(
@@ -1141,6 +1143,24 @@ class Handlers:
                         },
                     )
                 )
+            if pending.get("continuation") == "complete_turn":
+                final_response = pending.get("final_response")
+                await session.send_event(
+                    Event(
+                        event_type="turn_complete",
+                        data={
+                            "history_size": int(
+                                pending.get("history_size")
+                                or len(session.context_manager.items)
+                            ),
+                            "final_response": final_response
+                            if isinstance(final_response, str)
+                            else None,
+                        },
+                    )
+                )
+                session.increment_turn()
+                await session.auto_save_if_needed()
             return
 
         tool_calls = session.pending_approval.get("tool_calls", [])
