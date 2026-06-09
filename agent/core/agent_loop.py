@@ -26,6 +26,11 @@ from agent.core.cost_estimation import CostEstimate, estimate_tool_cost
 from agent.messaging.gateway import NotificationGateway
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
+from agent.core.hf_access import (
+    HF_BILLING_URL,
+    HF_PRO_SUBSCRIBE_URL,
+    is_inference_billing_error,
+)
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
 from agent.core.session import DEFAULT_SESSION_LOG_DIR, Event, OpType, Session
@@ -543,7 +548,33 @@ async def _heal_effort_and_rebuild_params(
     )
 
 
-def _friendly_error_message(error: Exception) -> str | None:
+def _inference_credit_error_message(user_plan: str | None = None) -> str:
+    plan = (user_plan or "unknown").lower()
+    if plan == "pro":
+        return (
+            "Hugging Face Inference Providers credits are exhausted for this "
+            "account.\n\n"
+            f"Add credits to continue: {HF_BILLING_URL}"
+        )
+    if plan == "free":
+        return (
+            "Your monthly Hugging Face Inference Providers credits are exhausted.\n\n"
+            f"Subscribe to HF PRO for more monthly usage: {HF_PRO_SUBSCRIBE_URL}\n"
+            f"Or add pay-as-you-go credits: {HF_BILLING_URL}"
+        )
+    return (
+        "Hugging Face Inference Providers credits appear to be exhausted for "
+        "this account.\n\n"
+        f"Add pay-as-you-go credits: {HF_BILLING_URL}\n"
+        f"If this is a free account, HF PRO adds more monthly usage: {HF_PRO_SUBSCRIBE_URL}"
+    )
+
+
+def _friendly_error_message(
+    error: Exception,
+    *,
+    user_plan: str | None = None,
+) -> str | None:
     """Return a user-friendly message for known error types, or None to fall back to traceback."""
     err_str = str(error).lower()
 
@@ -559,11 +590,8 @@ def _friendly_error_message(error: Exception) -> str | None:
             "To switch models, use the /model command."
         )
 
-    if "insufficient" in err_str and "credit" in err_str:
-        return (
-            "Insufficient Hugging Face Inference Providers credits. Add credits "
-            "or upgrade your HF account to continue."
-        )
+    if is_inference_billing_error(error):
+        return _inference_credit_error_message(user_plan)
 
     if "not supported by provider" in err_str or "no provider supports" in err_str:
         return (
@@ -1653,7 +1681,10 @@ class Handlers:
             except Exception as e:
                 import traceback
 
-                error_msg = _friendly_error_message(e)
+                error_msg = _friendly_error_message(
+                    e,
+                    user_plan=getattr(session, "user_plan", None),
+                )
                 if error_msg is None:
                     error_msg = str(e) + "\n" + traceback.format_exc()
 
@@ -2051,6 +2082,7 @@ async def submission_loop(
     notification_gateway: NotificationGateway | None = None,
     notification_destinations: list[str] | None = None,
     defer_turn_complete_notification: bool = False,
+    user_plan: str | None = None,
 ) -> None:
     """
     Main agent loop - processes submissions and dispatches to handlers.
@@ -2064,6 +2096,7 @@ async def submission_loop(
         tool_router=tool_router,
         hf_token=hf_token,
         user_id=user_id,
+        user_plan=user_plan,
         local_mode=local_mode,
         stream=stream,
         notification_gateway=notification_gateway,

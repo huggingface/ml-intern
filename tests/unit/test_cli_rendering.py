@@ -9,8 +9,13 @@ import pytest
 from rich.console import Console
 
 import agent.main as main_mod
+from agent.core.session import Event
 from agent.tools.research_tool import _get_research_model
 from agent.utils import terminal_display
+
+
+async def _fake_hf_user_plan(_token):
+    return "pro"
 
 
 def test_router_anthropic_research_model_is_unchanged():
@@ -189,6 +194,7 @@ async def test_interactive_main_applies_model_override_before_banner(monkeypatch
     monkeypatch.setattr(main_mod, "PromptSession", lambda: object())
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: "hf-token")
     monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
+    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", _fake_hf_user_plan)
     monkeypatch.setattr(
         main_mod,
         "load_config",
@@ -223,6 +229,7 @@ async def test_local_model_local_runtime_skips_hf_token_prompt(monkeypatch):
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: None)
     monkeypatch.setattr(main_mod, "_prompt_and_save_hf_token", fail_prompt)
     monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: None)
+    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", _fake_hf_user_plan)
     monkeypatch.setattr(
         main_mod,
         "load_config",
@@ -261,6 +268,7 @@ async def test_local_model_sandbox_runtime_prompts_for_hf_token(monkeypatch):
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: None)
     monkeypatch.setattr(main_mod, "_prompt_and_save_hf_token", fake_prompt)
     monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
+    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", _fake_hf_user_plan)
     monkeypatch.setattr(
         main_mod,
         "load_config",
@@ -305,6 +313,7 @@ async def test_interactive_main_passes_sandbox_runtime_to_tool_router(monkeypatc
     monkeypatch.setattr(main_mod, "PromptSession", lambda: object())
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: "hf-token")
     monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
+    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", _fake_hf_user_plan)
     monkeypatch.setattr(main_mod, "print_banner", lambda **_kwargs: None)
     monkeypatch.setattr(hf_router_catalog, "prewarm", lambda: None)
     monkeypatch.setattr(
@@ -325,6 +334,160 @@ async def test_interactive_main_passes_sandbox_runtime_to_tool_router(monkeypatc
 
     assert seen["hf_token"] == "hf-token"
     assert seen["local_mode"] is False
+
+
+@pytest.mark.asyncio
+async def test_interactive_main_passes_user_plan_to_submission_loop(monkeypatch):
+    seen: dict[str, object] = {}
+
+    async def fake_fetch_hf_user_plan(token):
+        seen["plan_token"] = token
+        return "free"
+
+    class FakeGateway:
+        def __init__(self, _config):
+            pass
+
+        async def start(self):
+            pass
+
+        async def close(self):
+            pass
+
+    class FakeToolRouter:
+        def __init__(self, _mcp_servers, *, hf_token=None, local_mode=True):
+            self.hf_token = hf_token
+            self.local_mode = local_mode
+
+        async def __aexit__(self, *_args):
+            pass
+
+    async def fake_submission_loop(submission_queue, _event_queue, **kwargs):
+        seen["user_plan"] = kwargs.get("user_plan")
+        seen["hf_token"] = kwargs.get("hf_token")
+        while True:
+            submission = await submission_queue.get()
+            if submission.operation.op_type == main_mod.OpType.SHUTDOWN:
+                return
+
+    async def fake_event_listener(
+        _event_queue,
+        _submission_queue,
+        _turn_complete_event,
+        ready_event,
+        _prompt_session,
+        _config,
+        *,
+        session_holder=None,
+    ):
+        ready_event.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            return
+
+    async def fake_get_user_input(_prompt_session):
+        return "/quit"
+
+    from agent.core import hf_router_catalog
+
+    monkeypatch.setattr(main_mod, "_clear_terminal", lambda: None)
+    monkeypatch.setattr(main_mod, "PromptSession", lambda: object())
+    monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: "hf-token")
+    monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
+    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", fake_fetch_hf_user_plan)
+    monkeypatch.setattr(main_mod, "print_banner", lambda **_kwargs: None)
+    monkeypatch.setattr(main_mod, "NotificationGateway", FakeGateway)
+    monkeypatch.setattr(main_mod, "ToolRouter", FakeToolRouter)
+    monkeypatch.setattr(main_mod, "submission_loop", fake_submission_loop)
+    monkeypatch.setattr(main_mod, "event_listener", fake_event_listener)
+    monkeypatch.setattr(main_mod, "get_user_input", fake_get_user_input)
+    monkeypatch.setattr(hf_router_catalog, "prewarm", lambda: None)
+    monkeypatch.setattr(
+        main_mod,
+        "load_config",
+        lambda _path, **_kwargs: SimpleNamespace(
+            model_name="anthropic/claude-opus-4.8:fal-ai",
+            mcpServers={},
+            messaging=SimpleNamespace(default_auto_destinations=lambda: []),
+            tool_runtime="local",
+        ),
+    )
+
+    await main_mod.main()
+
+    assert seen == {
+        "plan_token": "hf-token",
+        "user_plan": "free",
+        "hf_token": "hf-token",
+    }
+
+
+@pytest.mark.asyncio
+async def test_headless_main_passes_user_plan_to_submission_loop(monkeypatch):
+    seen: dict[str, object] = {}
+
+    async def fake_fetch_hf_user_plan(token):
+        seen["plan_token"] = token
+        return "pro"
+
+    class FakeGateway:
+        def __init__(self, _config):
+            pass
+
+        async def start(self):
+            pass
+
+        async def close(self):
+            pass
+
+    class FakeToolRouter:
+        def __init__(self, _mcp_servers, *, hf_token=None, local_mode=True):
+            self.hf_token = hf_token
+            self.local_mode = local_mode
+
+        async def __aexit__(self, *_args):
+            pass
+
+    async def fake_submission_loop(submission_queue, event_queue, **kwargs):
+        seen["user_plan"] = kwargs.get("user_plan")
+        seen["hf_token"] = kwargs.get("hf_token")
+        await event_queue.put(Event(event_type="ready"))
+        submission = await submission_queue.get()
+        seen["prompt"] = submission.operation.data["text"]
+        await event_queue.put(
+            Event(event_type="turn_complete", data={"history_size": 0})
+        )
+        shutdown = await submission_queue.get()
+        assert shutdown.operation.op_type == main_mod.OpType.SHUTDOWN
+
+    monkeypatch.setattr(main_mod, "_clear_terminal", lambda: None)
+    monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: "hf-token")
+    monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
+    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", fake_fetch_hf_user_plan)
+    monkeypatch.setattr(main_mod, "NotificationGateway", FakeGateway)
+    monkeypatch.setattr(main_mod, "ToolRouter", FakeToolRouter)
+    monkeypatch.setattr(main_mod, "submission_loop", fake_submission_loop)
+    monkeypatch.setattr(
+        main_mod,
+        "load_config",
+        lambda _path, **_kwargs: SimpleNamespace(
+            model_name="anthropic/claude-opus-4.8:fal-ai",
+            mcpServers={},
+            messaging=SimpleNamespace(default_auto_destinations=lambda: []),
+            tool_runtime="local",
+            max_iterations=3,
+        ),
+    )
+
+    await main_mod.headless_main("train a model")
+
+    assert seen == {
+        "plan_token": "hf-token",
+        "user_plan": "pro",
+        "hf_token": "hf-token",
+        "prompt": "train a model",
+    }
 
 
 @pytest.mark.asyncio

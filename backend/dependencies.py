@@ -16,7 +16,7 @@ from fastapi import HTTPException, Request, status
 
 from agent.core.hf_tokens import bearer_token_from_header, clean_hf_token
 
-from agent.core.hf_access import fetch_whoami_v2
+from agent.core.hf_access import fetch_whoami_v2, normalize_hf_user_plan
 
 logger = logging.getLogger(__name__)
 
@@ -139,13 +139,7 @@ def _user_from_info(user_info: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_user_plan(whoami: Any) -> str:
     """Normalize a whoami-v2 payload to the app's supported plan tiers."""
-    if not isinstance(whoami, dict):
-        return "free"
-
-    if whoami.get("isPro") is True:
-        return "pro"
-
-    return "free"
+    return normalize_hf_user_plan(whoami) or "free"
 
 
 async def _fetch_user_plan(token: str) -> str:

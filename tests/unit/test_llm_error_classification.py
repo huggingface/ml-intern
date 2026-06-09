@@ -16,6 +16,7 @@ from agent.core.agent_loop import (
     _MAX_LLM_RETRIES,
     _LLM_RATE_LIMIT_RETRY_DELAYS,
     _LLM_RETRY_DELAYS,
+    _friendly_error_message,
     _is_context_overflow_error,
     _is_rate_limit_error,
     _is_transient_error,
@@ -100,3 +101,38 @@ def test_rate_limit_total_budget_covers_token_bucket_recovery():
     exceed a typical ~60s provider token-bucket recovery window."""
     assert len(_LLM_RATE_LIMIT_RETRY_DELAYS) == _MAX_LLM_RETRIES - 1
     assert sum(_LLM_RATE_LIMIT_RETRY_DELAYS) > 60
+
+
+def test_free_user_credit_error_mentions_pro_and_billing_links():
+    msg = _friendly_error_message(
+        Exception("402 Payment Required: monthly credits exhausted"),
+        user_plan="free",
+    )
+
+    assert msg is not None
+    assert "https://huggingface.co/subscribe/pro" in msg
+    assert "https://huggingface.co/settings/billing" in msg
+
+
+def test_pro_user_credit_error_mentions_billing_only():
+    msg = _friendly_error_message(
+        Exception("insufficient_quota"),
+        user_plan="pro",
+    )
+
+    assert msg is not None
+    assert "https://huggingface.co/settings/billing" in msg
+    assert "https://huggingface.co/subscribe/pro" not in msg
+
+
+def test_unknown_plan_credit_error_uses_fallback_wording():
+    msg = _friendly_error_message(
+        Exception("exhausted monthly credits"),
+        user_plan="unknown",
+    )
+
+    assert msg is not None
+    assert "appear to be exhausted" in msg
+    assert "If this is a free account" in msg
+    assert "https://huggingface.co/settings/billing" in msg
+    assert "https://huggingface.co/subscribe/pro" in msg
