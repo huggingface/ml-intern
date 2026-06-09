@@ -212,7 +212,7 @@ async def test_load_usage_events_scopes_mongo_queries_to_current_user_and_window
             None,
         )
     ]
-    assert store.db.session_events.cursors[0].sort_calls == []
+    assert store.db.session_events.cursors[0].sort_calls == [(("created_at", 1), {})]
 
 
 @pytest.mark.asyncio
