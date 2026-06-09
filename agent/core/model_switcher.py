@@ -59,7 +59,8 @@ def is_valid_model_id(model_id: str) -> bool:
     """Loose format check — lets users pick any model id.
 
     Accepts:
-      • ollama/<model>, vllm/<model>, lm_studio/<model>, llamacpp/<model>
+      • ollama/<model>, vllm/<model>, lm_studio/<model>, llamacpp/<model>,
+        custom-proxy/<model>
       • <org>/<model>[:<tag>]            (HF router; tag = provider or policy)
       • huggingface/<org>/<model>[:<tag>] (same, optional LiteLLM prefix)
 
@@ -163,8 +164,9 @@ def print_model_listing(config, console) -> None:
     console.print(
         "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M2.7').\n"
         "Add ':fastest', ':cheapest', ':preferred', or ':<provider>' to override routing.\n"
-        "Use 'ollama/<model>', 'vllm/<model>', 'lm_studio/<model>', or "
-        "'llamacpp/<model>' for local OpenAI-compatible endpoints.[/dim]"
+        "Use 'ollama/<model>', 'vllm/<model>', 'lm_studio/<model>', "
+        "'llamacpp/<model>', or 'custom-proxy/<model>' for local/custom "
+        "OpenAI-compatible endpoints.[/dim]"
     )
 
 
@@ -173,7 +175,8 @@ def print_invalid_id(arg: str, console) -> None:
     console.print(
         "[dim]Expected:\n"
         "  • <org>/<model>[:tag]    (HF router — paste from huggingface.co)\n"
-        "  • ollama/<model> | vllm/<model> | lm_studio/<model> | llamacpp/<model>[/dim]"
+        "  • ollama/<model> | vllm/<model> | lm_studio/<model> | "
+        "llamacpp/<model> | custom-proxy/<model>[/dim]"
     )
 
 

@@ -21,6 +21,12 @@ LOCAL_MODEL_PROVIDERS: dict[str, dict[str, str]] = {
         "base_url_default": "http://localhost:8080",
         "api_key_env": "LLAMACPP_API_KEY",
     },
+    "custom-proxy/": {
+        "base_url_env": "CUSTOM_PROXY_BASE_URL",
+        "base_url_default": "",
+        "api_key_env": "CUSTOM_PROXY_API_KEY",
+        "base_url_mode": "exact",
+    },
 }
 
 LOCAL_MODEL_PREFIXES = tuple(LOCAL_MODEL_PROVIDERS)
@@ -48,10 +54,15 @@ def local_model_name(model_id: str) -> str | None:
 
 
 def is_local_model_id(model_id: str) -> bool:
-    """Return True for non-empty, whitespace-free local model ids."""
-    if not model_id or any(char.isspace() for char in model_id):
+    """Return True for valid local/custom model ids."""
+    if not model_id:
         return False
-    return local_model_name(model_id) is not None
+    name = local_model_name(model_id)
+    if name is None:
+        return False
+    if model_id.startswith("custom-proxy/"):
+        return bool(name.strip())
+    return not any(char.isspace() for char in model_id)
 
 
 def is_reserved_local_model_id(model_id: str) -> bool:
