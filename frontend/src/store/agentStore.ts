@@ -60,7 +60,7 @@ export type ActivityStatus =
   | { type: 'idle' }
   | { type: 'thinking' }
   | { type: 'tool'; toolName: string; description?: string }
-  | { type: 'waiting-approval' }
+  | { type: 'waiting-approval'; approvalKind?: 'tool' | 'usage' }
   | { type: 'streaming' }
   | { type: 'cancelled' };
 

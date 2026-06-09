@@ -30,6 +30,11 @@ from agent.core.llm_params import _resolve_llm_params
 from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
 from agent.core.session import DEFAULT_SESSION_LOG_DIR, Event, OpType, Session
 from agent.core.tools import ToolRouter
+from agent.core.usage_thresholds import (
+    USAGE_THRESHOLD_TOOL_NAME,
+    is_usage_threshold_pending,
+    next_usage_warning_threshold,
+)
 from agent.tools.jobs_tool import CPU_FLAVORS
 from agent.tools.sandbox_tool import (
     DEFAULT_CPU_SANDBOX_HARDWARE,
@@ -133,6 +138,46 @@ def _detect_repeated_malformed(
             return streak_tool
 
     return None
+
+
+def _coerce_float(value: Any) -> float:
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _usage_output_message(pending: dict[str, Any]) -> str:
+    current = _coerce_float(pending.get("current_spend_usd"))
+    next_threshold = _coerce_float(pending.get("next_threshold_usd"))
+    return (
+        f"Current-session usage warning acknowledged at ${current:.2f}. "
+        f"The next warning is at ${next_threshold:.2f}."
+    )
+
+
+async def _maybe_pause_for_usage_threshold(
+    session: Session,
+    *,
+    continuation: str,
+    final_response: str | None = None,
+) -> bool:
+    checker = getattr(session, "usage_threshold_checker", None)
+    if checker is None or session.pending_approval:
+        return False
+    payload: dict[str, Any] = {
+        "continuation": continuation,
+        "history_size": len(session.context_manager.items),
+    }
+    if final_response is not None:
+        payload["final_response"] = final_response
+    try:
+        return bool(await checker(payload))
+    except Exception as e:
+        logger.debug("Usage threshold check failed: %s", e)
+        return False
 
 
 def _validate_tool_args(tool_args: dict) -> tuple[bool, str | None]:
@@ -1082,6 +1127,22 @@ class Handlers:
         history stays valid) and notifies the frontend that those tools were
         abandoned.
         """
+        if is_usage_threshold_pending(session.pending_approval):
+            tool_call_id = str(session.pending_approval.get("tool_call_id") or "")
+            session.pending_approval = None
+            if tool_call_id:
+                await session.send_event(
+                    Event(
+                        event_type="tool_state_change",
+                        data={
+                            "tool_call_id": tool_call_id,
+                            "tool": USAGE_THRESHOLD_TOOL_NAME,
+                            "state": "abandoned",
+                        },
+                    )
+                )
+            return
+
         tool_calls = session.pending_approval.get("tool_calls", [])
         for tc in tool_calls:
             tool_name = tc.function.name
@@ -1160,6 +1221,12 @@ class Handlers:
             await _compact_and_notify(session)
             if not session.is_running:
                 break
+
+            if await _maybe_pause_for_usage_threshold(
+                session,
+                continuation="continue_agent",
+            ):
+                return final_response
 
             # Doom-loop detection: break out of repeated tool call patterns
             doom_prompt = check_for_doom_loop(session.context_manager.items)
@@ -1670,6 +1737,14 @@ class Handlers:
             await _cleanup_on_cancel(session)
             await session.send_event(Event(event_type="interrupted"))
         elif not errored:
+            if await _maybe_pause_for_usage_threshold(
+                session,
+                continuation="complete_turn",
+                final_response=final_response
+                if isinstance(final_response, str)
+                else None,
+            ):
+                return final_response
             await session.send_event(
                 Event(
                     event_type="turn_complete",
@@ -1724,6 +1799,113 @@ class Handlers:
         await session.send_event(Event(event_type="resume_complete", data=result))
 
     @staticmethod
+    async def _exec_usage_threshold_approval(
+        session: Session, approvals: list[dict]
+    ) -> None:
+        pending = (
+            session.pending_approval
+            if isinstance(session.pending_approval, dict)
+            else {}
+        )
+        tool_call_id = str(pending.get("tool_call_id") or "")
+        approval = next(
+            (item for item in approvals if item.get("tool_call_id") == tool_call_id),
+            {"approved": False},
+        )
+        approved = bool(approval.get("approved"))
+
+        session.pending_approval = None
+        if not tool_call_id:
+            await session.send_event(
+                Event(
+                    event_type="error",
+                    data={"error": "Usage approval is missing its approval id"},
+                )
+            )
+            return
+
+        if not approved:
+            feedback = str(approval.get("feedback") or "Stopped by user").strip()
+            await session.send_event(
+                Event(
+                    event_type="tool_state_change",
+                    data={
+                        "tool_call_id": tool_call_id,
+                        "tool": USAGE_THRESHOLD_TOOL_NAME,
+                        "state": "rejected",
+                    },
+                )
+            )
+            await session.send_event(
+                Event(
+                    event_type="tool_output",
+                    data={
+                        "tool": USAGE_THRESHOLD_TOOL_NAME,
+                        "tool_call_id": tool_call_id,
+                        "output": feedback,
+                        "success": False,
+                    },
+                )
+            )
+            await session.send_event(Event(event_type="interrupted"))
+            session.increment_turn()
+            await session.auto_save_if_needed()
+            return
+
+        current_spend = _coerce_float(pending.get("current_spend_usd"))
+        acknowledged_threshold = _coerce_float(pending.get("threshold_usd"))
+        next_threshold = next_usage_warning_threshold(
+            current_spend,
+            acknowledged_threshold,
+        )
+        session.usage_warning_next_threshold_usd = next_threshold
+        pending["next_threshold_usd"] = next_threshold
+
+        await session.send_event(
+            Event(
+                event_type="tool_state_change",
+                data={
+                    "tool_call_id": tool_call_id,
+                    "tool": USAGE_THRESHOLD_TOOL_NAME,
+                    "state": "approved",
+                },
+            )
+        )
+        await session.send_event(
+            Event(
+                event_type="tool_output",
+                data={
+                    "tool": USAGE_THRESHOLD_TOOL_NAME,
+                    "tool_call_id": tool_call_id,
+                    "output": _usage_output_message(pending),
+                    "success": True,
+                },
+            )
+        )
+
+        if pending.get("continuation") == "complete_turn":
+            final_response = pending.get("final_response")
+            await session.send_event(
+                Event(
+                    event_type="turn_complete",
+                    data={
+                        "history_size": int(
+                            pending.get("history_size")
+                            or len(session.context_manager.items)
+                        ),
+                        "final_response": final_response
+                        if isinstance(final_response, str)
+                        else None,
+                    },
+                )
+            )
+            session.increment_turn()
+            await session.auto_save_if_needed()
+            return
+
+        await Handlers.run_agent(session, "")
+
+    @staticmethod
     async def exec_approval(session: Session, approvals: list[dict]) -> None:
         """Handle batch job execution approval"""
         if not session.pending_approval:
@@ -1733,6 +1915,10 @@ class Handlers:
                     data={"error": "No pending approval to process"},
                 )
             )
+            return
+
+        if is_usage_threshold_pending(session.pending_approval):
+            await Handlers._exec_usage_threshold_approval(session, approvals)
             return
 
         tool_calls = session.pending_approval.get("tool_calls", [])

@@ -178,6 +178,7 @@ class MongoSessionStore(NoopSessionStore):
         auto_approval_enabled: bool = False,
         auto_approval_cost_cap_usd: float | None = None,
         auto_approval_estimated_spend_usd: float = 0.0,
+        usage_warning_next_threshold_usd: float = 5.0,
     ) -> None:
         if not self._ready():
             return
@@ -212,6 +213,7 @@ class MongoSessionStore(NoopSessionStore):
                     "auto_approval_enabled": auto_approval_enabled,
                     "auto_approval_cost_cap_usd": auto_approval_cost_cap_usd,
                     "auto_approval_estimated_spend_usd": auto_approval_estimated_spend_usd,
+                    "usage_warning_next_threshold_usd": usage_warning_next_threshold_usd,
                 },
             },
             upsert=True,
@@ -236,6 +238,7 @@ class MongoSessionStore(NoopSessionStore):
         auto_approval_enabled: bool = False,
         auto_approval_cost_cap_usd: float | None = None,
         auto_approval_estimated_spend_usd: float = 0.0,
+        usage_warning_next_threshold_usd: float = 5.0,
         raise_on_error: bool = False,
     ) -> None:
         if not self._ready():
@@ -260,6 +263,7 @@ class MongoSessionStore(NoopSessionStore):
             auto_approval_enabled=auto_approval_enabled,
             auto_approval_cost_cap_usd=auto_approval_cost_cap_usd,
             auto_approval_estimated_spend_usd=auto_approval_estimated_spend_usd,
+            usage_warning_next_threshold_usd=usage_warning_next_threshold_usd,
         )
         ops: list[Any] = []
         for idx, raw in enumerate(messages):

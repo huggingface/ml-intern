@@ -14,13 +14,15 @@ import { SSEChatTransport, type SideChannelCallbacks } from '@/lib/sse-chat-tran
 import { loadMessages, saveMessages } from '@/lib/chat-message-store';
 import { saveBackendMessages } from '@/lib/backend-message-store';
 import { saveResearch, loadResearch, clearResearch, RESEARCH_MAX_STEPS } from '@/lib/research-store';
-import { llmMessagesToUIMessages } from '@/lib/convert-llm-messages';
+import { llmMessagesToUIMessages, type PendingApprovalItem } from '@/lib/convert-llm-messages';
 import { apiFetch } from '@/utils/api';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import { useUsageStore } from '@/store/usageStore';
 import { useLayoutStore } from '@/store/layoutStore';
 import { logger } from '@/utils/logger';
+
+const USAGE_THRESHOLD_TOOL_NAME = 'usage_threshold';
 
 interface UseAgentChatOptions {
   sessionId: string;
@@ -37,6 +39,36 @@ function textFromUIMessage(message: UIMessage): string {
     .filter((p): p is Extract<typeof p, { type: 'text' }> => p.type === 'text')
     .map(p => p.text)
     .join('');
+}
+
+function pendingApprovalItemsFromInfo(info: unknown): PendingApprovalItem[] | undefined {
+  const pending = (info as { pending_approval?: unknown } | null)?.pending_approval;
+  if (!Array.isArray(pending)) return undefined;
+  const items = pending.filter((item): item is PendingApprovalItem => {
+    if (!item || typeof item !== 'object') return false;
+    const raw = item as Record<string, unknown>;
+    return (
+      typeof raw.tool === 'string' &&
+      typeof raw.tool_call_id === 'string' &&
+      !!raw.arguments &&
+      typeof raw.arguments === 'object'
+    );
+  });
+  return items.length > 0 ? items : undefined;
+}
+
+function pendingApprovalIds(items: PendingApprovalItem[] | undefined): Set<string> | undefined {
+  if (!items?.length) return undefined;
+  return new Set(items.map((item) => item.tool_call_id));
+}
+
+function waitingApprovalStatus(items: PendingApprovalItem[] | undefined) {
+  return {
+    type: 'waiting-approval' as const,
+    approvalKind: items?.some((item) => item.tool === USAGE_THRESHOLD_TOOL_NAME)
+      ? 'usage' as const
+      : 'tool' as const,
+  };
 }
 
 export function useAgentChat({ sessionId, isActive, isProcessing = false, onReady, onError, onSessionDead }: UseAgentChatOptions) {
@@ -222,6 +254,11 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
       onApprovalRequired: (tools) => {
         if (!tools.length) return;
         setNeedsAttention(sessionId, true);
+        const pendingItems = tools.map((tool) => ({
+          tool: tool.tool,
+          tool_call_id: tool.tool_call_id,
+          arguments: tool.arguments,
+        }));
 
         const store = useAgentStore.getState();
         for (const tool of tools) {
@@ -243,7 +280,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         // feeds shouldReactivate) so a backgrounded waiting-approval session
         // doesn't stay "processing" until the next /sessions merge —
         // activityStatus still surfaces the waiting-approval state.
-        setProcessingState(false, { activityStatus: { type: 'waiting-approval' } });
+        setProcessingState(false, { activityStatus: waitingApprovalStatus(pendingItems) });
         refreshUsage();
 
         // Build panel data for this session's pending approval
@@ -393,16 +430,14 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
           if (!Array.isArray(data) || data.length === 0) return false;
           saveBackendMessages(sessionId, data);
 
+          let pendingItems: PendingApprovalItem[] | undefined;
           let pendingIds: Set<string> | undefined;
           let backendIsProcessing = false;
           if (info) {
             backendIsProcessing = !!info.is_processing;
-            if (info.pending_approval && Array.isArray(info.pending_approval)) {
-              pendingIds = new Set(
-                info.pending_approval.map((t: { tool_call_id: string }) => t.tool_call_id)
-              );
-              if (pendingIds.size > 0) setNeedsAttention(sessionId, true);
-            }
+            pendingItems = pendingApprovalItemsFromInfo(info);
+            pendingIds = pendingApprovalIds(pendingItems);
+            if (pendingIds && pendingIds.size > 0) setNeedsAttention(sessionId, true);
             if (info.auto_approval) {
               updateSessionYolo(sessionId, info.auto_approval);
             }
@@ -412,6 +447,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             data,
             pendingIds,
             chatActionsRef.current.messages,
+            pendingItems,
           );
           const backendAdvanced = uiMsgs.length > currentMessageCount;
           let submittedTurnAccepted = false;
@@ -436,7 +472,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             return false;
           }
           if (pendingIds && pendingIds.size > 0) {
-            setProcessingState(false, { activityStatus: { type: 'waiting-approval' } });
+            setProcessingState(false, { activityStatus: waitingApprovalStatus(pendingItems) });
           } else {
             setProcessingState(false);
           }
@@ -536,15 +572,15 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
           return;
         }
 
+        let pendingItems: PendingApprovalItem[] | undefined;
         let pendingIds: Set<string> | undefined;
         let backendIsProcessing = false;
         if (infoRes.ok) {
           const info = await infoRes.json();
           backendIsProcessing = !!info.is_processing;
-          if (info.pending_approval && Array.isArray(info.pending_approval)) {
-            pendingIds = new Set(
-              info.pending_approval.map((t: { tool_call_id: string }) => t.tool_call_id)
-            );
+          pendingItems = pendingApprovalItemsFromInfo(info);
+          pendingIds = pendingApprovalIds(pendingItems);
+          if (pendingIds) {
             if (pendingIds.size > 0) {
               setNeedsAttention(sessionId, true);
             }
@@ -557,7 +593,12 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
           // Cache the raw backend messages so we can restore this session
           // into a fresh backend if the Space restarts.
           saveBackendMessages(sessionId, data);
-          const uiMsgs = llmMessagesToUIMessages(data, pendingIds, chatActionsRef.current.messages);
+          const uiMsgs = llmMessagesToUIMessages(
+            data,
+            pendingIds,
+            chatActionsRef.current.messages,
+            pendingItems,
+          );
           if (uiMsgs.length > 0) {
             chat.setMessages(uiMsgs);
             saveMessages(sessionId, uiMsgs);
@@ -583,7 +624,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             }),
           });
         } else if (pendingIds && pendingIds.size > 0) {
-          setProcessingState(false, { activityStatus: { type: 'waiting-approval' } });
+          setProcessingState(false, { activityStatus: waitingApprovalStatus(pendingItems) });
           clearResearch(sessionId);
         } else {
           setProcessingState(false);
@@ -623,21 +664,19 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         // into a fresh backend if the Space restarts.
         saveBackendMessages(sessionId, data);
 
+        let pendingItems: PendingApprovalItem[] | undefined;
         let pendingIds: Set<string> | undefined;
         if (infoRes.ok) {
           const info = await infoRes.json();
-          if (info.pending_approval && Array.isArray(info.pending_approval)) {
-            pendingIds = new Set(
-              info.pending_approval.map((t: { tool_call_id: string }) => t.tool_call_id)
-            );
-            if (pendingIds.size > 0) setNeedsAttention(sessionId, true);
-          }
+          pendingItems = pendingApprovalItemsFromInfo(info);
+          pendingIds = pendingApprovalIds(pendingItems);
+          if (pendingIds && pendingIds.size > 0) setNeedsAttention(sessionId, true);
           if (info.auto_approval) {
             updateSessionYolo(sessionId, info.auto_approval);
           }
-          return { data, pendingIds, info };
+          return { data, pendingIds, pendingItems, info };
         }
-        return { data, pendingIds, info: null };
+        return { data, pendingIds, pendingItems, info: null };
       } catch {
         return null;
       }
@@ -710,7 +749,12 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             // Final hydration to get the complete message state
             const result = await hydrateMessages();
             if (result) {
-              const uiMsgs = llmMessagesToUIMessages(result.data, result.pendingIds, chatActionsRef.current.messages);
+              const uiMsgs = llmMessagesToUIMessages(
+                result.data,
+                result.pendingIds,
+                chatActionsRef.current.messages,
+                result.pendingItems,
+              );
               if (uiMsgs.length > 0) {
                 chat.setMessages(uiMsgs);
                 saveMessages(sessionId, uiMsgs);
@@ -732,7 +776,12 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             stopReconnect();
             const result = await hydrateMessages();
             if (result) {
-              const uiMsgs = llmMessagesToUIMessages(result.data, result.pendingIds, chatActionsRef.current.messages);
+              const uiMsgs = llmMessagesToUIMessages(
+                result.data,
+                result.pendingIds,
+                chatActionsRef.current.messages,
+                result.pendingItems,
+              );
               if (uiMsgs.length > 0) {
                 chat.setMessages(uiMsgs);
                 saveMessages(sessionId, uiMsgs);
@@ -782,8 +831,13 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
       const result = await hydrateMessages();
       if (!result) return;
 
-      const { data, pendingIds, info } = result;
-      const uiMsgs = llmMessagesToUIMessages(data, pendingIds, chatActionsRef.current.messages);
+      const { data, pendingIds, pendingItems, info } = result;
+      const uiMsgs = llmMessagesToUIMessages(
+        data,
+        pendingIds,
+        chatActionsRef.current.messages,
+        pendingItems,
+      );
       if (uiMsgs.length > 0) {
         chat.setMessages(uiMsgs);
         saveMessages(sessionId, uiMsgs);
@@ -806,7 +860,12 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         pollTimerRef.current = setInterval(async () => {
           const fresh = await hydrateMessages();
           if (!fresh) return;
-          const msgs = llmMessagesToUIMessages(fresh.data, fresh.pendingIds, chatActionsRef.current.messages);
+          const msgs = llmMessagesToUIMessages(
+            fresh.data,
+            fresh.pendingIds,
+            chatActionsRef.current.messages,
+            fresh.pendingItems,
+          );
 
           const currentCount = chatActionsRef.current.messages.length;
           if (msgs.length > currentCount || currentCount === 0) {
@@ -965,15 +1024,13 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
       if (!Array.isArray(data) || data.length === 0) return false;
       saveBackendMessages(sessionId, data);
 
+      let pendingItems: PendingApprovalItem[] | undefined;
       let pendingIds: Set<string> | undefined;
       if (infoRes.ok) {
         const info = await infoRes.json();
-        if (info.pending_approval && Array.isArray(info.pending_approval)) {
-          pendingIds = new Set(
-            info.pending_approval.map((t: { tool_call_id: string }) => t.tool_call_id)
-          );
-          if (pendingIds.size > 0) setNeedsAttention(sessionId, true);
-        }
+        pendingItems = pendingApprovalItemsFromInfo(info);
+        pendingIds = pendingApprovalIds(pendingItems);
+        if (pendingIds && pendingIds.size > 0) setNeedsAttention(sessionId, true);
         if (info.auto_approval) {
           updateSessionYolo(sessionId, info.auto_approval);
         }
@@ -983,6 +1040,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
         data,
         pendingIds,
         chatActionsRef.current.messages,
+        pendingItems,
       );
       const setMsgs = chatActionsRef.current.setMessages;
       if (setMsgs && uiMsgs.length > 0) {

@@ -610,7 +610,7 @@ async def upload_session_dataset(
         if agent_session.session.pending_approval:
             raise HTTPException(
                 status_code=409,
-                detail="Approve or reject pending tools before uploading a dataset.",
+                detail="Resolve pending approvals before uploading a dataset.",
             )
 
         hf_token = (

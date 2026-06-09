@@ -20,6 +20,24 @@ type DynamicToolPart = Extract<UIMessage['parts'][number], { type: 'dynamic-tool
 
 type ToolPartState = DynamicToolPart['state'];
 
+const USAGE_THRESHOLD_TOOL_NAME = 'usage_threshold';
+
+function formatApprovalUsd(value: unknown): string {
+  const amount = typeof value === 'number' && Number.isFinite(value) ? value : Number(value || 0);
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(amount) ? amount : 0);
+}
+
+function usageSourceLabel(source: unknown): string {
+  return source === 'hf_billing_current_session'
+    ? 'HF billing'
+    : 'app telemetry';
+}
+
 /** Check if a tool part was cancelled (output-error with cancellation message). */
 function isCancelledTool(tool: DynamicToolPart): boolean {
   return tool.state === 'output-error' &&
@@ -506,6 +524,7 @@ function InlineApproval({
   const { setPanel, getEditedScript } = useAgentStore();
   const { setRightPanelOpen, setLeftSidebarOpen } = useLayoutStore();
   const hasEditedScript = !!getEditedScript(toolCallId);
+  const isUsageThreshold = toolName === USAGE_THRESHOLD_TOOL_NAME;
 
   const handleScriptClick = useCallback(() => {
     if (toolName === 'hf_jobs' && args?.script) {
@@ -519,6 +538,87 @@ function InlineApproval({
       setLeftSidebarOpen(false);
     }
   }, [toolCallId, toolName, args, scriptLabel, setPanel, getEditedScript, setRightPanelOpen, setLeftSidebarOpen]);
+
+  if (isUsageThreshold) {
+    return (
+      <Box sx={{ px: 1.5, py: 1.5, borderTop: '1px solid var(--tool-border)' }}>
+        <Alert
+          severity="warning"
+          sx={{
+            mb: 1.5,
+            py: 0.5,
+            bgcolor: 'rgba(245,158,11,0.08)',
+            border: '1px solid rgba(245,158,11,0.18)',
+            color: 'var(--text)',
+            '& .MuiAlert-icon': { color: 'var(--accent-yellow)' },
+          }}
+        >
+          <Typography variant="body2" sx={{ fontSize: '0.74rem' }}>
+            Current session usage is {formatApprovalUsd(args?.current_spend_usd)} and crossed the{' '}
+            {formatApprovalUsd(args?.threshold_usd)} warning threshold.
+          </Typography>
+        </Alert>
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: '1fr auto',
+            gap: 0.75,
+            mb: 1.5,
+            fontSize: '0.72rem',
+          }}
+        >
+          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+            Next warning
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+            {formatApprovalUsd(args?.next_threshold_usd)}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+            Source
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem' }}>
+            {usageSourceLabel(args?.billing_source)}
+          </Typography>
+        </Box>
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <Button
+            size="small"
+            onClick={() => onResolve(toolCallId, false, 'Stopped at usage warning')}
+            sx={{
+              flex: 1,
+              textTransform: 'none',
+              border: '1px solid rgba(255,255,255,0.05)',
+              color: 'var(--accent-red)',
+              fontSize: '0.75rem',
+              py: 0.75,
+              borderRadius: '8px',
+              '&:hover': { bgcolor: 'rgba(224,90,79,0.05)', borderColor: 'var(--accent-red)' },
+            }}
+          >
+            Stop here
+          </Button>
+          <Button
+            size="small"
+            onClick={() => onResolve(toolCallId, true)}
+            sx={{
+              flex: 1,
+              textTransform: 'none',
+              border: '1px solid var(--accent-green)',
+              color: 'var(--accent-green)',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              py: 0.75,
+              borderRadius: '8px',
+              bgcolor: 'rgba(47,204,113,0.08)',
+              '&:hover': { bgcolor: 'rgba(47,204,113,0.1)' },
+            }}
+          >
+            Continue
+          </Button>
+        </Box>
+      </Box>
+    );
+  }
 
   return (
     <Box sx={{ px: 1.5, py: 1.5, borderTop: '1px solid var(--tool-border)' }}>
@@ -815,6 +915,8 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
     for (const t of tools) {
       if (t.toolName === 'research') {
         displayMap[t.toolCallId] = 'research';
+      } else if (t.toolName === USAGE_THRESHOLD_TOOL_NAME) {
+        displayMap[t.toolCallId] = 'Usage warning';
       }
     }
     return { scriptLabelMap: scriptMap, toolDisplayMap: displayMap };

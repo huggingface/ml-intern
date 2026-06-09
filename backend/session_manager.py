@@ -20,6 +20,14 @@ from agent.core.model_ids import (
 from agent.core.session import Event, OpType, Session
 from agent.core.session_persistence import get_session_store
 from agent.core.tools import ToolRouter
+from agent.core.usage_thresholds import (
+    USAGE_THRESHOLD_TOOL_NAME,
+    USAGE_WARNING_FIRST_THRESHOLD_USD,
+    is_usage_threshold_pending,
+    next_usage_warning_threshold,
+    normalize_usage_threshold,
+    usage_threshold_pending_to_tool,
+)
 from agent.messaging.gateway import NotificationGateway
 
 # Get project root (parent of backend directory)
@@ -114,6 +122,7 @@ class AgentSession:
     title: str | None = None
     usage_window_started_at: datetime | None = None
     usage_window_baseline: dict[str, Any] | None = None
+    usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
 
     def __post_init__(self) -> None:
         if self.usage_window_started_at is None:
@@ -270,6 +279,8 @@ class SessionManager:
 
     def _serialize_pending_approval(self, session: Session) -> list[dict[str, Any]]:
         pending = session.pending_approval or {}
+        if is_usage_threshold_pending(pending):
+            return [dict(pending)]
         tool_calls = pending.get("tool_calls") or []
         serialized: list[dict[str, Any]] = []
         for tc in tool_calls:
@@ -282,6 +293,8 @@ class SessionManager:
     @staticmethod
     def _pending_tools_for_api(session: Session) -> list[dict[str, Any]] | None:
         pending = session.pending_approval or {}
+        if is_usage_threshold_pending(pending):
+            return [usage_threshold_pending_to_tool(pending)]
         tool_calls = pending.get("tool_calls") or []
         if not tool_calls:
             return None
@@ -305,6 +318,10 @@ class SessionManager:
     ) -> None:
         if not pending_approval:
             session.pending_approval = None
+            return
+        first = pending_approval[0]
+        if isinstance(first, dict) and first.get("kind") == USAGE_THRESHOLD_TOOL_NAME:
+            session.pending_approval = dict(first)
             return
         from litellm import ChatCompletionMessageToolCall as ToolCall
 
@@ -334,6 +351,9 @@ class SessionManager:
     ) -> list[dict[str, Any]] | None:
         if not pending_approval:
             return None
+        first = pending_approval[0]
+        if isinstance(first, dict) and first.get("kind") == USAGE_THRESHOLD_TOOL_NAME:
+            return [usage_threshold_pending_to_tool(first)]
         result: list[dict[str, Any]] = []
         for raw in pending_approval:
             if "function" in raw:
@@ -384,6 +404,126 @@ class SessionManager:
             "estimated_spend_usd": round(estimated, 4),
             "remaining_usd": remaining,
         }
+
+    def _install_usage_threshold_checker(self, agent_session: AgentSession) -> None:
+        threshold = normalize_usage_threshold(
+            getattr(
+                agent_session.session,
+                "usage_warning_next_threshold_usd",
+                agent_session.usage_warning_next_threshold_usd,
+            )
+        )
+        agent_session.usage_warning_next_threshold_usd = threshold
+        agent_session.session.usage_warning_next_threshold_usd = threshold
+
+        async def _checker(payload: dict[str, Any]) -> bool:
+            return await self._maybe_request_usage_threshold_approval(
+                agent_session.session_id,
+                payload,
+            )
+
+        agent_session.session.usage_threshold_checker = _checker
+
+    @staticmethod
+    def _usage_spend_from_response(response: dict[str, Any]) -> tuple[float, str]:
+        def coerce_spend(value: Any) -> float | None:
+            if isinstance(value, bool) or value is None:
+                return None
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                return None
+
+        hf_account = response.get("hf_account")
+        if isinstance(hf_account, dict):
+            current_session = hf_account.get("current_session")
+            if isinstance(current_session, dict):
+                spend = coerce_spend(current_session.get("total_usd"))
+                if spend is not None:
+                    return spend, "hf_billing_current_session"
+
+        session_bucket = response.get("session")
+        if isinstance(session_bucket, dict):
+            spend = coerce_spend(session_bucket.get("total_usd"))
+            if spend is not None:
+                return spend, "app_telemetry_session"
+        return 0.0, "app_telemetry_session"
+
+    async def _current_session_usage_spend(
+        self,
+        agent_session: AgentSession,
+    ) -> tuple[float, str]:
+        from usage import build_usage_response
+
+        response = await build_usage_response(
+            self,
+            user_id=agent_session.user_id,
+            hf_token=agent_session.hf_token,
+            session_id=agent_session.session_id,
+            timezone_name="UTC",
+            include_rollups=False,
+        )
+        return self._usage_spend_from_response(response)
+
+    async def _maybe_request_usage_threshold_approval(
+        self,
+        session_id: str,
+        continuation_payload: dict[str, Any],
+    ) -> bool:
+        agent_session = self.sessions.get(session_id)
+        if not agent_session or not agent_session.is_active:
+            return False
+
+        session = agent_session.session
+        if session.pending_approval:
+            return False
+
+        threshold = normalize_usage_threshold(
+            getattr(
+                session,
+                "usage_warning_next_threshold_usd",
+                agent_session.usage_warning_next_threshold_usd,
+            )
+        )
+        current_spend, billing_source = await self._current_session_usage_spend(
+            agent_session
+        )
+        if current_spend < threshold:
+            return False
+
+        next_threshold = next_usage_warning_threshold(current_spend, threshold)
+        tool_call_id = f"usage-threshold-{uuid.uuid4().hex[:10]}"
+        pending: dict[str, Any] = {
+            "kind": USAGE_THRESHOLD_TOOL_NAME,
+            "tool_call_id": tool_call_id,
+            "threshold_usd": round(threshold, 4),
+            "current_spend_usd": round(current_spend, 6),
+            "next_threshold_usd": next_threshold,
+            "billing_source": billing_source,
+            "continuation": continuation_payload.get("continuation")
+            or "continue_agent",
+            "history_size": int(
+                continuation_payload.get("history_size")
+                or len(session.context_manager.items)
+            ),
+        }
+        final_response = continuation_payload.get("final_response")
+        if isinstance(final_response, str):
+            pending["final_response"] = final_response
+
+        session.pending_approval = pending
+        self._touch(agent_session)
+        await session.send_event(
+            Event(
+                event_type="approval_required",
+                data={
+                    "tools": [usage_threshold_pending_to_tool(pending)],
+                    "count": 1,
+                    "usage_threshold": True,
+                },
+            )
+        )
+        return True
 
     async def _start_agent_session(
         self,
@@ -616,6 +756,13 @@ class SessionManager:
                     )
                     or 0.0
                 ),
+                usage_warning_next_threshold_usd=normalize_usage_threshold(
+                    getattr(
+                        agent_session.session,
+                        "usage_warning_next_threshold_usd",
+                        agent_session.usage_warning_next_threshold_usd,
+                    )
+                ),
                 raise_on_error=raise_on_error,
             )
         except Exception as e:
@@ -645,6 +792,7 @@ class SessionManager:
                     hf_token=hf_token,
                     hf_username=hf_username,
                 )
+                self._install_usage_threshold_checker(existing)
                 self._restart_cpu_preload_if_token_recovered(
                     existing,
                     preload_sandbox=preload_sandbox,
@@ -666,6 +814,7 @@ class SessionManager:
                     hf_token=hf_token,
                     hf_username=hf_username,
                 )
+                self._install_usage_threshold_checker(existing)
                 self._restart_cpu_preload_if_token_recovered(
                     existing,
                     preload_sandbox=preload_sandbox,
@@ -754,6 +903,9 @@ class SessionManager:
         session.auto_approval_estimated_spend_usd = float(
             meta.get("auto_approval_estimated_spend_usd") or 0.0
         )
+        session.usage_warning_next_threshold_usd = normalize_usage_threshold(
+            meta.get("usage_warning_next_threshold_usd")
+        )
 
         created_at = meta.get("created_at")
         if not isinstance(created_at, datetime):
@@ -776,10 +928,12 @@ class SessionManager:
             created_at=created_at,
             usage_window_started_at=usage_window_started_at,
             usage_window_baseline=usage_window_baseline,
+            usage_warning_next_threshold_usd=session.usage_warning_next_threshold_usd,
             is_active=True,
             is_processing=False,
             title=meta.get("title"),
         )
+        self._install_usage_threshold_checker(agent_session)
         started = await self._start_agent_session(
             agent_session=agent_session,
             event_queue=event_queue,
@@ -879,6 +1033,7 @@ class SessionManager:
                 hf_username=hf_username,
                 hf_token=hf_token,
             )
+            self._install_usage_threshold_checker(agent_session)
 
             await self._start_agent_session(
                 agent_session=agent_session,
