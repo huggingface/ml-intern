@@ -242,6 +242,7 @@ async def _check_session_access(
         user["user_id"],
         hf_token=hf_token,
         hf_username=user.get("username"),
+        user_plan=user.get("plan"),
         preload_sandbox=preload_sandbox,
     )
     if not agent_session:
@@ -440,6 +441,7 @@ async def create_session(
             user_id=user["user_id"],
             hf_username=user.get("username"),
             hf_token=hf_token,
+            user_plan=user.get("plan"),
             model=model,
             is_pro=user.get("plan") == "pro",
         )
@@ -483,6 +485,7 @@ async def restore_session_summary(
             user_id=user["user_id"],
             hf_username=user.get("username"),
             hf_token=hf_token,
+            user_plan=user.get("plan"),
             model=model,
             is_pro=user.get("plan") == "pro",
         )
@@ -610,7 +613,7 @@ async def upload_session_dataset(
         if agent_session.session.pending_approval:
             raise HTTPException(
                 status_code=409,
-                detail="Approve or reject pending tools before uploading a dataset.",
+                detail="Resolve pending approvals before uploading a dataset.",
             )
 
         hf_token = (

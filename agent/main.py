@@ -26,6 +26,7 @@ from agent.config import load_config
 from agent.core.approval_policy import is_scheduled_operation
 from agent.core.agent_loop import submission_loop
 from agent.core import model_switcher
+from agent.core.hf_access import fetch_whoami_v2, normalize_hf_user_plan
 from agent.core.hf_tokens import resolve_hf_token
 from agent.core.local_models import is_local_model_id
 from agent.core.model_ids import strip_huggingface_model_prefix
@@ -145,6 +146,25 @@ def _get_hf_user(token: str | None) -> str | None:
         return HfApi(token=token).whoami().get("name")
     except Exception:
         return None
+
+
+def _get_hf_user_from_whoami(whoami: dict[str, Any] | None) -> str | None:
+    if not isinstance(whoami, dict):
+        return None
+    for key in ("name", "user", "preferred_username"):
+        value = whoami.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+async def _get_hf_identity(token: str | None) -> tuple[str | None, str]:
+    if not token:
+        return None, "unknown"
+    whoami = await fetch_whoami_v2(token)
+    if whoami is None:
+        return _get_hf_user(token), "unknown"
+    return _get_hf_user_from_whoami(whoami), normalize_hf_user_plan(whoami) or "unknown"
 
 
 async def _prompt_and_save_hf_token(prompt_session: PromptSession) -> str:
@@ -1178,8 +1198,8 @@ async def main(model: str | None = None, sandbox_tools: bool = False):
     if not hf_token and (not is_local_model_id(config.model_name) or not local_mode):
         hf_token = await _prompt_and_save_hf_token(prompt_session)
 
-    # Resolve username for banner
-    hf_user = _get_hf_user(hf_token)
+    # Resolve username and plan from one whoami-v2 request for banner and CTAs.
+    hf_user, hf_user_plan = await _get_hf_identity(hf_token)
 
     print_banner(
         model=config.model_name,
@@ -1221,6 +1241,7 @@ async def main(model: str | None = None, sandbox_tools: bool = False):
             session_holder=session_holder,
             hf_token=hf_token,
             user_id=hf_user,
+            user_plan=hf_user_plan,
             local_mode=local_mode,
             stream=True,
             notification_gateway=notification_gateway,
@@ -1436,7 +1457,7 @@ async def headless_main(
 
     notification_gateway = NotificationGateway(config.messaging)
     await notification_gateway.start()
-    hf_user = _get_hf_user(hf_token)
+    hf_user, hf_user_plan = await _get_hf_identity(hf_token)
 
     if max_iterations is not None:
         config.max_iterations = max_iterations
@@ -1464,6 +1485,7 @@ async def headless_main(
             session_holder=session_holder,
             hf_token=hf_token,
             user_id=hf_user,
+            user_plan=hf_user_plan,
             local_mode=local_mode,
             stream=stream,
             notification_gateway=notification_gateway,

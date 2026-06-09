@@ -12,11 +12,16 @@ import asyncio
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 OPENID_PROVIDER_URL = os.environ.get("OPENID_PROVIDER_URL", "https://huggingface.co")
+HF_BILLING_URL = "https://huggingface.co/settings/billing"
+HF_PRO_SUBSCRIBE_URL = "https://huggingface.co/subscribe/pro"
+
+HfUserPlan = Literal["free", "pro"]
+HfUserPlanStatus = Literal["free", "pro", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -95,6 +100,15 @@ def jobs_access_from_whoami(whoami: dict[str, Any]) -> JobsAccess:
     )
 
 
+def normalize_hf_user_plan(whoami: Any) -> HfUserPlan | None:
+    """Normalize a whoami-v2 payload to the supported HF account plan tiers."""
+    if not isinstance(whoami, dict):
+        return None
+    if whoami.get("isPro") is True:
+        return "pro"
+    return "free"
+
+
 async def fetch_whoami_v2(token: str, timeout: float = 5.0) -> dict[str, Any] | None:
     if not token:
         return None
@@ -110,6 +124,17 @@ async def fetch_whoami_v2(token: str, timeout: float = 5.0) -> dict[str, Any] | 
             return payload if isinstance(payload, dict) else None
         except (httpx.HTTPError, ValueError):
             return None
+
+
+async def fetch_hf_user_plan(
+    token: str | None,
+    timeout: float = 5.0,
+) -> HfUserPlanStatus:
+    """Return the token owner's HF plan, or ``unknown`` if lookup fails."""
+    if not token:
+        return "unknown"
+    whoami = await fetch_whoami_v2(token, timeout=timeout)
+    return normalize_hf_user_plan(whoami) or "unknown"
 
 
 async def get_jobs_access(token: str) -> JobsAccess | None:
@@ -157,8 +182,17 @@ async def resolve_jobs_namespace(
 
 
 _BILLING_PATTERNS = re.compile(
-    r"\b(insufficient[_\s-]?credits?|out\s+of\s+credits?|payment\s+required|"
-    r"billing|no\s+credits?|add\s+credits?|requires?\s+credits?)\b",
+    r"\b(insufficient[_\s-]?credits?|out\s+of\s+credits?|"
+    r"payment\s+required|billing|no\s+credits?|add\s+credits?|requires?\s+credits?|"
+    r"credits?\s+(?:exhausted|used\s+up|limit))\b",
+    re.IGNORECASE,
+)
+
+_INFERENCE_BILLING_PATTERNS = re.compile(
+    r"\b(insufficient[_\s-]?quota|out\s+of\s+monthly\s+credits?|"
+    r"exhausted\s+monthly\s+credits?|"
+    r"quota[_\s-]?(?:exceeded|exhausted|limit|insufficient)|"
+    r"monthly\s+credits?\s+(?:exhausted|used\s+up|limit))\b",
     re.IGNORECASE,
 )
 
@@ -170,3 +204,11 @@ def is_billing_error(message: str) -> bool:
     if "402" in message:
         return True
     return bool(_BILLING_PATTERNS.search(message))
+
+
+def is_inference_billing_error(error: Exception | str) -> bool:
+    """True if an Inference Providers error looks like exhausted credits."""
+    message = str(error)
+    return is_billing_error(message) or bool(
+        _INFERENCE_BILLING_PATTERNS.search(message)
+    )

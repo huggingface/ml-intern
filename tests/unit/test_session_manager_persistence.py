@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
-from datetime import datetime, UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,12 +18,20 @@ if str(_BACKEND_DIR) not in sys.path:
 
 from agent.core.model_ids import KIMI_K26_MODEL_ID  # noqa: E402
 from agent.core.session_persistence import NoopSessionStore  # noqa: E402
+from agent.core.usage_thresholds import USAGE_THRESHOLD_TOOL_NAME  # noqa: E402
 from session_manager import AgentSession, SessionManager  # noqa: E402
 
 
 class FakeRuntimeSession:
-    def __init__(self, *, hf_token: str | None = None, model: str = "test-model"):
+    def __init__(
+        self,
+        *,
+        hf_token: str | None = None,
+        user_plan: str | None = None,
+        model: str = "test-model",
+    ):
         self.hf_token = hf_token
+        self.user_plan = user_plan
         self.context_manager = SimpleNamespace(items=[])
         self.pending_approval = None
         self.turn_count = 0
@@ -32,10 +40,18 @@ class FakeRuntimeSession:
         self.auto_approval_enabled = False
         self.auto_approval_cost_cap_usd = None
         self.auto_approval_estimated_spend_usd = 0.0
+        self.usage_warning_next_threshold_usd = 5.0
+        self.usage_threshold_checker = None
+        self.logged_events = []
         self.sandbox = None
         self.sandbox_hardware = None
         self.sandbox_preload_task = None
         self.sandbox_preload_cancel_event = None
+        self.events = []
+        self.session_id = "s1"
+
+    async def send_event(self, event):
+        self.events.append(event)
 
     def auto_approval_policy_summary(self):
         cap = self.auto_approval_cost_cap_usd
@@ -116,8 +132,9 @@ def _runtime_agent_session(
     *,
     user_id: str = "owner",
     hf_token: str | None = "owner-token",
+    user_plan: str | None = None,
 ) -> AgentSession:
-    runtime_session = FakeRuntimeSession(hf_token=hf_token)
+    runtime_session = FakeRuntimeSession(hf_token=hf_token, user_plan=user_plan)
     return AgentSession(
         session_id=session_id,
         session=runtime_session,  # type: ignore[arg-type]
@@ -125,6 +142,7 @@ def _runtime_agent_session(
         submission_queue=asyncio.Queue(),
         user_id=user_id,
         hf_token=hf_token,
+        user_plan=user_plan,
     )
 
 
@@ -155,6 +173,230 @@ async def test_reset_session_usage_window_updates_runtime_and_store():
             "last_active_at": agent_session.last_active_at,
         },
     )
+
+
+def test_usage_threshold_pending_approval_serializes_and_restores():
+    manager = _manager_with_store(NoopSessionStore())
+    pending = {
+        "kind": USAGE_THRESHOLD_TOOL_NAME,
+        "tool_call_id": "usage-threshold-1",
+        "threshold_usd": 5.0,
+        "current_spend_usd": 5.25,
+        "next_threshold_usd": 10.0,
+        "billing_source": "app_telemetry_session",
+        "continuation": "continue_agent",
+        "history_size": 3,
+    }
+    runtime = FakeRuntimeSession()
+    runtime.pending_approval = pending
+
+    assert manager._serialize_pending_approval(runtime) == [pending]
+    assert manager._pending_tools_for_api(runtime) == [
+        {
+            "tool": USAGE_THRESHOLD_TOOL_NAME,
+            "tool_call_id": "usage-threshold-1",
+            "arguments": {
+                "threshold_usd": 5.0,
+                "current_spend_usd": 5.25,
+                "next_threshold_usd": 10.0,
+                "billing_source": "app_telemetry_session",
+            },
+        }
+    ]
+
+    restored = FakeRuntimeSession()
+    manager._restore_pending_approval(restored, [pending])
+
+    assert restored.pending_approval == pending
+
+
+def test_usage_spend_prefers_hf_current_session_over_telemetry():
+    spend, source = SessionManager._usage_spend_from_response(
+        {
+            "hf_account": {
+                "current_session": {
+                    "total_usd": 7.5,
+                },
+            },
+            "session": {
+                "total_usd": 2.0,
+            },
+        }
+    )
+
+    assert spend == 7.5
+    assert source == "hf_billing_current_session"
+
+
+def test_usage_spend_falls_back_to_app_telemetry():
+    spend, source = SessionManager._usage_spend_from_response(
+        {
+            "hf_account": {
+                "current_session": None,
+            },
+            "session": {
+                "total_usd": 2.0,
+            },
+        }
+    )
+
+    assert spend == 2.0
+    assert source == "app_telemetry_session"
+
+
+def test_usage_spend_falls_back_when_hf_total_is_unavailable():
+    spend, source = SessionManager._usage_spend_from_response(
+        {
+            "hf_account": {
+                "current_session": {
+                    "total_usd": None,
+                },
+            },
+            "session": {
+                "total_usd": 3.5,
+            },
+        }
+    )
+
+    assert spend == 3.5
+    assert source == "app_telemetry_session"
+
+
+@pytest.mark.asyncio
+async def test_usage_threshold_checker_creates_synthetic_pending_approval(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.logged_events.append(
+        {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "event_type": "llm_call",
+            "data": {"cost_usd": 6.0},
+        }
+    )
+    manager.sessions["s1"] = agent_session
+
+    async def fake_current_session_usage_spend(_agent_session, **_kwargs):
+        return 12.25, "app_telemetry_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_usage_threshold_checker(agent_session)
+
+    paused = await agent_session.session.usage_threshold_checker(
+        {"continuation": "continue_agent", "history_size": 4}
+    )
+
+    assert paused is True
+    pending = agent_session.session.pending_approval
+    assert pending["kind"] == USAGE_THRESHOLD_TOOL_NAME
+    assert pending["threshold_usd"] == 5.0
+    assert pending["current_spend_usd"] == 12.25
+    assert pending["next_threshold_usd"] == 20.0
+    assert pending["billing_source"] == "app_telemetry_session"
+    assert agent_session.session.events[-1].event_type == "approval_required"
+
+
+@pytest.mark.asyncio
+async def test_usage_threshold_checker_skips_billing_when_local_spend_below_threshold(
+    monkeypatch,
+):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    manager.sessions["s1"] = agent_session
+    calls = 0
+
+    async def fake_current_session_usage_spend(_agent_session, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return 12.25, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_usage_threshold_checker(agent_session)
+
+    paused = await agent_session.session.usage_threshold_checker(
+        {"continuation": "continue_agent", "history_size": 4}
+    )
+
+    assert paused is False
+    assert calls == 0
+    assert agent_session.session.pending_approval is None
+
+
+@pytest.mark.asyncio
+async def test_usage_threshold_checker_forces_billing_at_complete_turn(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    manager.sessions["s1"] = agent_session
+    calls = 0
+
+    async def fake_current_session_usage_spend(_agent_session, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return 12.25, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_usage_threshold_checker(agent_session)
+
+    paused = await agent_session.session.usage_threshold_checker(
+        {
+            "continuation": "complete_turn",
+            "force_check": True,
+            "history_size": 4,
+        }
+    )
+
+    assert paused is True
+    assert calls == 1
+    assert agent_session.session.pending_approval["continuation"] == "complete_turn"
+
+
+@pytest.mark.asyncio
+async def test_usage_threshold_checker_uses_cached_spend_after_local_crossing(
+    monkeypatch,
+):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.logged_events.append(
+        {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "event_type": "llm_call",
+            "data": {"cost_usd": 6.0},
+        }
+    )
+    manager.sessions["s1"] = agent_session
+
+    async def fail_build_usage_response(*_args, **_kwargs):
+        raise AssertionError("fresh billing usage should not be fetched")
+
+    monkeypatch.setattr("usage.build_usage_response", fail_build_usage_response)
+    agent_session.usage_warning_spend_cache = {
+        "spend_usd": 4.5,
+        "billing_source": "hf_billing_current_session",
+        "expires_at": datetime.now(UTC) + timedelta(seconds=30),
+    }
+    manager._install_usage_threshold_checker(agent_session)
+
+    first = await agent_session.session.usage_threshold_checker(
+        {"continuation": "continue_agent", "history_size": 4}
+    )
+    second = await agent_session.session.usage_threshold_checker(
+        {"continuation": "continue_agent", "history_size": 4}
+    )
+
+    assert first is False
+    assert second is False
+    assert agent_session.session.pending_approval is None
 
 
 def test_unknown_saved_model_defaults_to_kimi():
@@ -188,6 +430,7 @@ def _install_fake_runtime(manager: SessionManager) -> asyncio.Event:
     def fake_create_session_sync(**kwargs: Any):
         return object(), FakeRuntimeSession(
             hf_token=kwargs.get("hf_token"),
+            user_plan=kwargs.get("user_plan"),
             model=kwargs.get("model") or "test-model",
         )
 
@@ -321,6 +564,19 @@ async def test_existing_session_updates_token_after_access_check():
     assert result is existing
     assert existing.hf_token == "new-token"
     assert existing.session.hf_token == "new-token"
+
+
+@pytest.mark.asyncio
+async def test_existing_session_updates_plan_after_access_check():
+    manager = _manager_with_store(NoopSessionStore())
+    existing = _runtime_agent_session("s1", user_id="owner", user_plan="free")
+    manager.sessions["s1"] = existing
+
+    result = await manager.ensure_session_loaded("s1", user_id="owner", user_plan="pro")
+
+    assert result is existing
+    assert existing.user_plan == "pro"
+    assert existing.session.user_plan == "pro"
 
 
 @pytest.mark.asyncio
@@ -459,11 +715,17 @@ async def test_create_session_schedules_cpu_sandbox_preload():
     manager._start_cpu_sandbox_preload = fake_start_cpu_sandbox_preload  # type: ignore[method-assign]
 
     try:
-        session_id = await manager.create_session(user_id="owner", hf_token="token")
+        session_id = await manager.create_session(
+            user_id="owner",
+            hf_token="token",
+            user_plan="pro",
+        )
 
         assert scheduled == [session_id]
         assert session_id in manager.sessions
+        assert manager.sessions[session_id].user_plan == "pro"
         runtime_session = manager.sessions[session_id].session
+        assert runtime_session.user_plan == "pro"
         assert not hasattr(runtime_session, "_ml_intern_artifact_collection_task")
         assert not hasattr(runtime_session, "_ml_intern_artifact_collection_slug")
     finally:
@@ -484,12 +746,16 @@ async def test_lazy_restore_schedules_cpu_sandbox_preload():
 
     try:
         restored = await manager.ensure_session_loaded(
-            "persisted-session", user_id="owner"
+            "persisted-session",
+            user_id="owner",
+            user_plan="free",
         )
 
         assert restored is not None
         assert scheduled == ["persisted-session"]
         assert "persisted-session" in manager.sessions
+        assert restored.user_plan == "free"
+        assert restored.session.user_plan == "free"
         assert not hasattr(restored.session, "_ml_intern_artifact_collection_task")
         assert not hasattr(restored.session, "_ml_intern_artifact_collection_slug")
     finally:

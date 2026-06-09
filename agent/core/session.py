@@ -17,6 +17,10 @@ from agent.config import Config
 from agent.context_manager.manager import ContextManager
 from agent.messaging.gateway import NotificationGateway
 from agent.messaging.models import NotificationRequest
+from agent.core.usage_thresholds import (
+    USAGE_THRESHOLD_TOOL_NAME,
+    USAGE_WARNING_FIRST_THRESHOLD_USD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +28,23 @@ _DEFAULT_MAX_TOKENS = 200_000
 _TURN_COMPLETE_NOTIFICATION_CHARS = 39000
 
 DEFAULT_SESSION_LOG_DIR = Path("session_logs")
+
+
+def _format_usd(value: Any) -> str:
+    if isinstance(value, bool):
+        return "$0.00"
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        amount = 0.0
+    return f"${amount:.2f}"
+
+
+def _approval_tools_are_usage_thresholds(tools: Any) -> bool:
+    if not isinstance(tools, list) or len(tools) != 1:
+        return False
+    tool = tools[0]
+    return isinstance(tool, dict) and tool.get("tool") == USAGE_THRESHOLD_TOOL_NAME
 
 
 def _get_max_tokens_safe(model_name: str) -> int:
@@ -95,11 +116,13 @@ class Session:
         session_id: str | None = None,
         user_id: str | None = None,
         hf_username: str | None = None,
+        user_plan: str | None = None,
         persistence_store: Any | None = None,
     ):
         self.hf_token: Optional[str] = hf_token
         self.user_id: Optional[str] = user_id
         self.hf_username: Optional[str] = hf_username
+        self.user_plan: str | None = user_plan
         self.local_mode = local_mode
         self.persistence_store = persistence_store
         self.tool_router = tool_router
@@ -134,6 +157,8 @@ class Session:
         self.auto_approval_enabled: bool = False
         self.auto_approval_cost_cap_usd: float | None = None
         self.auto_approval_estimated_spend_usd: float = 0.0
+        self.usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
+        self.usage_threshold_checker: Any | None = None
 
         # Session trajectory logging
         self.logged_events: list[dict] = []
@@ -258,21 +283,38 @@ class Session:
         data = event.data or {}
         if event.event_type == "approval_required":
             tools = data.get("tools", [])
-            tool_names = []
-            for tool in tools if isinstance(tools, list) else []:
-                if isinstance(tool, dict):
-                    tool_name = str(tool.get("tool") or "").strip()
-                    if tool_name and tool_name not in tool_names:
-                        tool_names.append(tool_name)
-            count = len(tools) if isinstance(tools, list) else 0
-            title = "Agent approval required"
-            message = (
-                f"Session {self.session_id} is waiting for approval "
-                f"for {count} tool call(s)."
-            )
-            if tool_names:
-                message += " Tools: " + ", ".join(tool_names)
-            severity = "warning"
+            if _approval_tools_are_usage_thresholds(tools):
+                tool = tools[0]
+                args = tool.get("arguments") if isinstance(tool, dict) else {}
+                args = args if isinstance(args, dict) else {}
+                current = _format_usd(args.get("current_spend_usd"))
+                threshold = _format_usd(args.get("threshold_usd"))
+                next_threshold = _format_usd(args.get("next_threshold_usd"))
+                title = "Usage approval required"
+                message = (
+                    f"Session {self.session_id} reached {current} in current-session "
+                    f"usage, crossing the {threshold} warning threshold."
+                )
+                if next_threshold:
+                    message += f" The next warning is at {next_threshold}."
+                severity = "warning"
+            else:
+                tools = data.get("tools", [])
+                tool_names = []
+                for tool in tools if isinstance(tools, list) else []:
+                    if isinstance(tool, dict):
+                        tool_name = str(tool.get("tool") or "").strip()
+                        if tool_name and tool_name not in tool_names:
+                            tool_names.append(tool_name)
+                count = len(tools) if isinstance(tools, list) else 0
+                title = "Agent approval required"
+                message = (
+                    f"Session {self.session_id} is waiting for approval "
+                    f"for {count} tool call(s)."
+                )
+                if tool_names:
+                    message += " Tools: " + ", ".join(tool_names)
+                severity = "warning"
         elif event.event_type == "error":
             title = "Agent error"
             error = str(data.get("error") or "Unknown error")

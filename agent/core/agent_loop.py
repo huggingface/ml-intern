@@ -26,10 +26,20 @@ from agent.core.cost_estimation import CostEstimate, estimate_tool_cost
 from agent.messaging.gateway import NotificationGateway
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
+from agent.core.hf_access import (
+    HF_BILLING_URL,
+    HF_PRO_SUBSCRIBE_URL,
+    is_inference_billing_error,
+)
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
 from agent.core.session import DEFAULT_SESSION_LOG_DIR, Event, OpType, Session
 from agent.core.tools import ToolRouter
+from agent.core.usage_thresholds import (
+    USAGE_THRESHOLD_TOOL_NAME,
+    is_usage_threshold_pending,
+    next_usage_warning_threshold,
+)
 from agent.tools.jobs_tool import CPU_FLAVORS
 from agent.tools.sandbox_tool import (
     DEFAULT_CPU_SANDBOX_HARDWARE,
@@ -133,6 +143,47 @@ def _detect_repeated_malformed(
             return streak_tool
 
     return None
+
+
+def _coerce_float(value: Any) -> float:
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _usage_output_message(pending: dict[str, Any]) -> str:
+    current = _coerce_float(pending.get("current_spend_usd"))
+    next_threshold = _coerce_float(pending.get("next_threshold_usd"))
+    return (
+        f"Current-session usage warning acknowledged at ${current:.2f}. "
+        f"The next warning is at ${next_threshold:.2f}."
+    )
+
+
+async def _maybe_pause_for_usage_threshold(
+    session: Session,
+    *,
+    continuation: str,
+    final_response: str | None = None,
+) -> bool:
+    checker = getattr(session, "usage_threshold_checker", None)
+    if checker is None or session.pending_approval:
+        return False
+    payload: dict[str, Any] = {
+        "continuation": continuation,
+        "force_check": continuation == "complete_turn",
+        "history_size": len(session.context_manager.items),
+    }
+    if final_response is not None:
+        payload["final_response"] = final_response
+    try:
+        return bool(await checker(payload))
+    except Exception as e:
+        logger.debug("Usage threshold check failed: %s", e)
+        return False
 
 
 def _validate_tool_args(tool_args: dict) -> tuple[bool, str | None]:
@@ -543,7 +594,33 @@ async def _heal_effort_and_rebuild_params(
     )
 
 
-def _friendly_error_message(error: Exception) -> str | None:
+def _inference_credit_error_message(user_plan: str | None = None) -> str:
+    plan = (user_plan or "unknown").lower()
+    if plan == "pro":
+        return (
+            "Hugging Face Inference Providers credits are exhausted for this "
+            "account.\n\n"
+            f"Add credits to continue: {HF_BILLING_URL}"
+        )
+    if plan == "free":
+        return (
+            "Your monthly Hugging Face Inference Providers credits are exhausted.\n\n"
+            f"Subscribe to HF PRO for more monthly usage: {HF_PRO_SUBSCRIBE_URL}\n"
+            f"Or add pay-as-you-go credits: {HF_BILLING_URL}"
+        )
+    return (
+        "Hugging Face Inference Providers credits appear to be exhausted for "
+        "this account.\n\n"
+        f"Add pay-as-you-go credits: {HF_BILLING_URL}\n"
+        f"If this is a free account, HF PRO adds more monthly usage: {HF_PRO_SUBSCRIBE_URL}"
+    )
+
+
+def _friendly_error_message(
+    error: Exception,
+    *,
+    user_plan: str | None = None,
+) -> str | None:
     """Return a user-friendly message for known error types, or None to fall back to traceback."""
     err_str = str(error).lower()
 
@@ -559,11 +636,8 @@ def _friendly_error_message(error: Exception) -> str | None:
             "To switch models, use the /model command."
         )
 
-    if "insufficient" in err_str and "credit" in err_str:
-        return (
-            "Insufficient Hugging Face Inference Providers credits. Add credits "
-            "or upgrade your HF account to continue."
-        )
+    if is_inference_billing_error(error):
+        return _inference_credit_error_message(user_plan)
 
     if "not supported by provider" in err_str or "no provider supports" in err_str:
         return (
@@ -1082,6 +1156,41 @@ class Handlers:
         history stays valid) and notifies the frontend that those tools were
         abandoned.
         """
+        if is_usage_threshold_pending(session.pending_approval):
+            pending = session.pending_approval
+            tool_call_id = str(pending.get("tool_call_id") or "")
+            session.pending_approval = None
+            if tool_call_id:
+                await session.send_event(
+                    Event(
+                        event_type="tool_state_change",
+                        data={
+                            "tool_call_id": tool_call_id,
+                            "tool": USAGE_THRESHOLD_TOOL_NAME,
+                            "state": "abandoned",
+                        },
+                    )
+                )
+            if pending.get("continuation") == "complete_turn":
+                final_response = pending.get("final_response")
+                await session.send_event(
+                    Event(
+                        event_type="turn_complete",
+                        data={
+                            "history_size": int(
+                                pending.get("history_size")
+                                or len(session.context_manager.items)
+                            ),
+                            "final_response": final_response
+                            if isinstance(final_response, str)
+                            else None,
+                        },
+                    )
+                )
+                session.increment_turn()
+                await session.auto_save_if_needed()
+            return
+
         tool_calls = session.pending_approval.get("tool_calls", [])
         for tc in tool_calls:
             tool_name = tc.function.name
@@ -1160,6 +1269,12 @@ class Handlers:
             await _compact_and_notify(session)
             if not session.is_running:
                 break
+
+            if await _maybe_pause_for_usage_threshold(
+                session,
+                continuation="continue_agent",
+            ):
+                return final_response
 
             # Doom-loop detection: break out of repeated tool call patterns
             doom_prompt = check_for_doom_loop(session.context_manager.items)
@@ -1653,7 +1768,10 @@ class Handlers:
             except Exception as e:
                 import traceback
 
-                error_msg = _friendly_error_message(e)
+                error_msg = _friendly_error_message(
+                    e,
+                    user_plan=getattr(session, "user_plan", None),
+                )
                 if error_msg is None:
                     error_msg = str(e) + "\n" + traceback.format_exc()
 
@@ -1670,6 +1788,14 @@ class Handlers:
             await _cleanup_on_cancel(session)
             await session.send_event(Event(event_type="interrupted"))
         elif not errored:
+            if await _maybe_pause_for_usage_threshold(
+                session,
+                continuation="complete_turn",
+                final_response=final_response
+                if isinstance(final_response, str)
+                else None,
+            ):
+                return final_response
             await session.send_event(
                 Event(
                     event_type="turn_complete",
@@ -1724,6 +1850,113 @@ class Handlers:
         await session.send_event(Event(event_type="resume_complete", data=result))
 
     @staticmethod
+    async def _exec_usage_threshold_approval(
+        session: Session, approvals: list[dict]
+    ) -> None:
+        pending = (
+            session.pending_approval
+            if isinstance(session.pending_approval, dict)
+            else {}
+        )
+        tool_call_id = str(pending.get("tool_call_id") or "")
+        approval = next(
+            (item for item in approvals if item.get("tool_call_id") == tool_call_id),
+            {"approved": False},
+        )
+        approved = bool(approval.get("approved"))
+
+        session.pending_approval = None
+        if not tool_call_id:
+            await session.send_event(
+                Event(
+                    event_type="error",
+                    data={"error": "Usage approval is missing its approval id"},
+                )
+            )
+            return
+
+        if not approved:
+            feedback = str(approval.get("feedback") or "Stopped by user").strip()
+            await session.send_event(
+                Event(
+                    event_type="tool_state_change",
+                    data={
+                        "tool_call_id": tool_call_id,
+                        "tool": USAGE_THRESHOLD_TOOL_NAME,
+                        "state": "rejected",
+                    },
+                )
+            )
+            await session.send_event(
+                Event(
+                    event_type="tool_output",
+                    data={
+                        "tool": USAGE_THRESHOLD_TOOL_NAME,
+                        "tool_call_id": tool_call_id,
+                        "output": feedback,
+                        "success": False,
+                    },
+                )
+            )
+            await session.send_event(Event(event_type="interrupted"))
+            session.increment_turn()
+            await session.auto_save_if_needed()
+            return
+
+        current_spend = _coerce_float(pending.get("current_spend_usd"))
+        acknowledged_threshold = _coerce_float(pending.get("threshold_usd"))
+        next_threshold = next_usage_warning_threshold(
+            current_spend,
+            acknowledged_threshold,
+        )
+        session.usage_warning_next_threshold_usd = next_threshold
+        pending["next_threshold_usd"] = next_threshold
+
+        await session.send_event(
+            Event(
+                event_type="tool_state_change",
+                data={
+                    "tool_call_id": tool_call_id,
+                    "tool": USAGE_THRESHOLD_TOOL_NAME,
+                    "state": "approved",
+                },
+            )
+        )
+        await session.send_event(
+            Event(
+                event_type="tool_output",
+                data={
+                    "tool": USAGE_THRESHOLD_TOOL_NAME,
+                    "tool_call_id": tool_call_id,
+                    "output": _usage_output_message(pending),
+                    "success": True,
+                },
+            )
+        )
+
+        if pending.get("continuation") == "complete_turn":
+            final_response = pending.get("final_response")
+            await session.send_event(
+                Event(
+                    event_type="turn_complete",
+                    data={
+                        "history_size": int(
+                            pending.get("history_size")
+                            or len(session.context_manager.items)
+                        ),
+                        "final_response": final_response
+                        if isinstance(final_response, str)
+                        else None,
+                    },
+                )
+            )
+            session.increment_turn()
+            await session.auto_save_if_needed()
+            return
+
+        await Handlers.run_agent(session, "")
+
+    @staticmethod
     async def exec_approval(session: Session, approvals: list[dict]) -> None:
         """Handle batch job execution approval"""
         if not session.pending_approval:
@@ -1733,6 +1966,10 @@ class Handlers:
                     data={"error": "No pending approval to process"},
                 )
             )
+            return
+
+        if is_usage_threshold_pending(session.pending_approval):
+            await Handlers._exec_usage_threshold_approval(session, approvals)
             return
 
         tool_calls = session.pending_approval.get("tool_calls", [])
@@ -2051,6 +2288,7 @@ async def submission_loop(
     notification_gateway: NotificationGateway | None = None,
     notification_destinations: list[str] | None = None,
     defer_turn_complete_notification: bool = False,
+    user_plan: str | None = None,
 ) -> None:
     """
     Main agent loop - processes submissions and dispatches to handlers.
@@ -2064,6 +2302,7 @@ async def submission_loop(
         tool_router=tool_router,
         hf_token=hf_token,
         user_id=user_id,
+        user_plan=user_plan,
         local_mode=local_mode,
         stream=stream,
         notification_gateway=notification_gateway,

@@ -54,8 +54,14 @@ class RecordingStore(NoopSessionStore):
 class FakeSession:
     """Minimal Session stand-in supporting both persistence and _run_session."""
 
-    def __init__(self, *, hf_token: str | None = "token") -> None:
+    def __init__(
+        self,
+        *,
+        hf_token: str | None = "token",
+        user_plan: str | None = None,
+    ) -> None:
         self.hf_token = hf_token
+        self.user_plan = user_plan
         self.context_manager = SimpleNamespace(items=[])
         self.pending_approval: Any = None
         self.turn_count = 0
@@ -140,7 +146,10 @@ def _install_fake_create(manager: SessionManager) -> asyncio.Event:
     stop = asyncio.Event()
 
     def fake_create_session_sync(**kwargs: Any):
-        return object(), FakeSession(hf_token=kwargs.get("hf_token"))
+        return object(), FakeSession(
+            hf_token=kwargs.get("hf_token"),
+            user_plan=kwargs.get("user_plan"),
+        )
 
     async def fake_run_session(*_: Any) -> None:
         await stop.wait()
