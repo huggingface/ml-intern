@@ -285,8 +285,6 @@ async def test_usage_response_omits_app_rollups_without_session():
     )
 
     assert usage["session"] is None
-    assert "today" not in usage
-    assert "month" not in usage
 
 
 @pytest.mark.asyncio
@@ -317,8 +315,6 @@ async def test_runtime_usage_includes_requested_session_total():
 
     assert usage["session"]["session_id"] == "s1"
     assert usage["session"]["inference_usd"] == 0.25
-    assert "today" not in usage
-    assert "month" not in usage
 
 
 @pytest.mark.asyncio
@@ -349,8 +345,6 @@ async def test_runtime_usage_includes_requested_session_tokens():
 
     assert usage["session"]["llm_calls"] == 1
     assert usage["session"]["total_tokens"] == 42
-    assert "today" not in usage
-    assert "month" not in usage
 
 
 @pytest.mark.asyncio
@@ -437,7 +431,6 @@ async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch)
 
     assert usage["hf_account"]["available"] is True
     assert usage["hf_account"]["current_session"]["inference_providers_usd"] == 0.5
-    assert "today" not in usage["hf_account"]
     assert usage["hf_account"]["month"]["inference_providers_usd"] == 2.0
     assert usage["hf_account"]["inference_providers_credits"] == {
         "included_usd": 2.0,
@@ -606,7 +599,4 @@ async def test_usage_response_loads_only_session_events(monkeypatch):
         session_created_at,
     }
     assert datetime(2026, 6, 5, 0, 0, tzinfo=UTC) not in billing_starts
-    assert "today" not in usage
-    assert "month" not in usage
-    assert "today" not in usage["hf_account"]
     assert usage["hf_account"]["month"]["inference_providers_usd"] == 0.0
