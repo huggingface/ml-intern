@@ -209,7 +209,7 @@ async def test_restore_summary_uses_default_model_without_quota_gate(monkeypatch
         cookies = {}
 
     async def fake_create_session(**kwargs):
-        events.append(("create", kwargs["model"]))
+        events.append(("create", kwargs["model"], kwargs.get("user_plan")))
         return "s1"
 
     async def fake_check_session_access(
@@ -235,7 +235,45 @@ async def test_restore_summary_uses_default_model_without_quota_gate(monkeypatch
     assert response.session_id == "s1"
     assert response.model == agent.DEFAULT_FREE_MODEL_ID
     assert events == [
-        ("create", agent.DEFAULT_FREE_MODEL_ID),
+        ("create", agent.DEFAULT_FREE_MODEL_ID, "free"),
         ("check", "s1", False),
         ("seed", "s1"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_check_session_access_passes_user_plan(monkeypatch):
+    seen = {}
+    expected_session = SimpleNamespace(user_id="u1")
+
+    class Request:
+        headers = {"Authorization": "Bearer user-token"}
+        cookies = {}
+
+    async def fake_ensure_session_loaded(session_id, user_id, **kwargs):
+        seen["session_id"] = session_id
+        seen["user_id"] = user_id
+        seen.update(kwargs)
+        return expected_session
+
+    monkeypatch.setattr(
+        agent.session_manager,
+        "ensure_session_loaded",
+        fake_ensure_session_loaded,
+    )
+
+    result = await agent._check_session_access(
+        "s1",
+        {"user_id": "u1", "username": "tester", "plan": "pro"},
+        Request(),
+    )
+
+    assert result is expected_session
+    assert seen == {
+        "session_id": "s1",
+        "user_id": "u1",
+        "hf_token": "user-token",
+        "hf_username": "tester",
+        "user_plan": "pro",
+        "preload_sandbox": True,
+    }

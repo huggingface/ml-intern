@@ -182,11 +182,17 @@ async def resolve_jobs_namespace(
 
 
 _BILLING_PATTERNS = re.compile(
-    r"\b(insufficient[_\s-]?(?:credits?|quota)|out\s+of\s+(?:monthly\s+)?credits?|"
+    r"\b(insufficient[_\s-]?credits?|out\s+of\s+credits?|"
     r"payment\s+required|billing|no\s+credits?|add\s+credits?|requires?\s+credits?|"
-    r"exhausted\s+(?:monthly\s+)?credits?|"
+    r"credits?\s+(?:exhausted|used\s+up|limit))\b",
+    re.IGNORECASE,
+)
+
+_INFERENCE_BILLING_PATTERNS = re.compile(
+    r"\b(insufficient[_\s-]?quota|out\s+of\s+monthly\s+credits?|"
+    r"exhausted\s+monthly\s+credits?|"
     r"quota[_\s-]?(?:exceeded|exhausted|limit|insufficient)|"
-    r"(?:monthly\s+)?credits?\s+(?:exhausted|used\s+up|limit))\b",
+    r"monthly\s+credits?\s+(?:exhausted|used\s+up|limit))\b",
     re.IGNORECASE,
 )
 
@@ -202,4 +208,7 @@ def is_billing_error(message: str) -> bool:
 
 def is_inference_billing_error(error: Exception | str) -> bool:
     """True if an Inference Providers error looks like exhausted credits."""
-    return is_billing_error(str(error))
+    message = str(error)
+    return is_billing_error(message) or bool(
+        _INFERENCE_BILLING_PATTERNS.search(message)
+    )

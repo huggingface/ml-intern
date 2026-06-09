@@ -77,10 +77,17 @@ def test_is_billing_error_detects_402_and_credit_phrasing():
     assert not is_billing_error("")
 
 
+def test_jobs_billing_classifier_ignores_non_credit_quota_errors():
+    assert not is_billing_error("quota exceeded")
+    assert not is_billing_error("insufficient_quota")
+    assert not is_billing_error("flavor quota exceeded")
+
+
 def test_is_inference_billing_error_detects_credit_and_quota_phrasing():
     assert is_inference_billing_error("402 Payment Required")
     assert is_inference_billing_error("exhausted monthly credits")
     assert is_inference_billing_error("insufficient_quota")
+    assert is_inference_billing_error("quota exceeded")
     assert is_inference_billing_error("monthly credits exhausted")
     assert not is_inference_billing_error("503 service unavailable")
 

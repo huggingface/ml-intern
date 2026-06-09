@@ -14,8 +14,8 @@ from agent.tools.research_tool import _get_research_model
 from agent.utils import terminal_display
 
 
-async def _fake_hf_user_plan(_token):
-    return "pro"
+async def _fake_hf_identity(_token):
+    return "tester", "pro"
 
 
 def test_router_anthropic_research_model_is_unchanged():
@@ -109,6 +109,24 @@ def test_subagent_display_does_not_spawn_background_redraw(monkeypatch):
     assert calls == []
 
 
+@pytest.mark.asyncio
+async def test_hf_identity_uses_single_whoami_v2_payload(monkeypatch):
+    calls: list[tuple[str, float]] = []
+
+    async def fake_fetch_whoami_v2(token, timeout=5.0):
+        calls.append((token, timeout))
+        return {"name": "tester", "isPro": True}
+
+    def fail_get_hf_user(_token):
+        raise AssertionError("fallback whoami should not run when whoami-v2 succeeds")
+
+    monkeypatch.setattr(main_mod, "fetch_whoami_v2", fake_fetch_whoami_v2)
+    monkeypatch.setattr(main_mod, "_get_hf_user", fail_get_hf_user)
+
+    assert await main_mod._get_hf_identity("hf-token") == ("tester", "pro")
+    assert calls == [("hf-token", 5.0)]
+
+
 def test_cli_forwards_model_flag_to_interactive_main(monkeypatch):
     seen: dict[str, object] = {}
 
@@ -193,8 +211,7 @@ async def test_interactive_main_applies_model_override_before_banner(monkeypatch
     monkeypatch.setattr(main_mod.os, "system", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(main_mod, "PromptSession", lambda: object())
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: "hf-token")
-    monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
-    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", _fake_hf_user_plan)
+    monkeypatch.setattr(main_mod, "_get_hf_identity", _fake_hf_identity)
     monkeypatch.setattr(
         main_mod,
         "load_config",
@@ -228,8 +245,6 @@ async def test_local_model_local_runtime_skips_hf_token_prompt(monkeypatch):
     monkeypatch.setattr(main_mod, "PromptSession", lambda: object())
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: None)
     monkeypatch.setattr(main_mod, "_prompt_and_save_hf_token", fail_prompt)
-    monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: None)
-    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", _fake_hf_user_plan)
     monkeypatch.setattr(
         main_mod,
         "load_config",
@@ -267,8 +282,7 @@ async def test_local_model_sandbox_runtime_prompts_for_hf_token(monkeypatch):
     monkeypatch.setattr(main_mod, "PromptSession", lambda: object())
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: None)
     monkeypatch.setattr(main_mod, "_prompt_and_save_hf_token", fake_prompt)
-    monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
-    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", _fake_hf_user_plan)
+    monkeypatch.setattr(main_mod, "_get_hf_identity", _fake_hf_identity)
     monkeypatch.setattr(
         main_mod,
         "load_config",
@@ -312,8 +326,7 @@ async def test_interactive_main_passes_sandbox_runtime_to_tool_router(monkeypatc
     monkeypatch.setattr(main_mod.os, "system", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(main_mod, "PromptSession", lambda: object())
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: "hf-token")
-    monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
-    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", _fake_hf_user_plan)
+    monkeypatch.setattr(main_mod, "_get_hf_identity", _fake_hf_identity)
     monkeypatch.setattr(main_mod, "print_banner", lambda **_kwargs: None)
     monkeypatch.setattr(hf_router_catalog, "prewarm", lambda: None)
     monkeypatch.setattr(
@@ -340,9 +353,9 @@ async def test_interactive_main_passes_sandbox_runtime_to_tool_router(monkeypatc
 async def test_interactive_main_passes_user_plan_to_submission_loop(monkeypatch):
     seen: dict[str, object] = {}
 
-    async def fake_fetch_hf_user_plan(token):
+    async def fake_get_hf_identity(token):
         seen["plan_token"] = token
-        return "free"
+        return "tester", "free"
 
     class FakeGateway:
         def __init__(self, _config):
@@ -394,8 +407,7 @@ async def test_interactive_main_passes_user_plan_to_submission_loop(monkeypatch)
     monkeypatch.setattr(main_mod, "_clear_terminal", lambda: None)
     monkeypatch.setattr(main_mod, "PromptSession", lambda: object())
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: "hf-token")
-    monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
-    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", fake_fetch_hf_user_plan)
+    monkeypatch.setattr(main_mod, "_get_hf_identity", fake_get_hf_identity)
     monkeypatch.setattr(main_mod, "print_banner", lambda **_kwargs: None)
     monkeypatch.setattr(main_mod, "NotificationGateway", FakeGateway)
     monkeypatch.setattr(main_mod, "ToolRouter", FakeToolRouter)
@@ -427,9 +439,9 @@ async def test_interactive_main_passes_user_plan_to_submission_loop(monkeypatch)
 async def test_headless_main_passes_user_plan_to_submission_loop(monkeypatch):
     seen: dict[str, object] = {}
 
-    async def fake_fetch_hf_user_plan(token):
+    async def fake_get_hf_identity(token):
         seen["plan_token"] = token
-        return "pro"
+        return "tester", "pro"
 
     class FakeGateway:
         def __init__(self, _config):
@@ -463,8 +475,7 @@ async def test_headless_main_passes_user_plan_to_submission_loop(monkeypatch):
 
     monkeypatch.setattr(main_mod, "_clear_terminal", lambda: None)
     monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: "hf-token")
-    monkeypatch.setattr(main_mod, "_get_hf_user", lambda _token: "tester")
-    monkeypatch.setattr(main_mod, "fetch_hf_user_plan", fake_fetch_hf_user_plan)
+    monkeypatch.setattr(main_mod, "_get_hf_identity", fake_get_hf_identity)
     monkeypatch.setattr(main_mod, "NotificationGateway", FakeGateway)
     monkeypatch.setattr(main_mod, "ToolRouter", FakeToolRouter)
     monkeypatch.setattr(main_mod, "submission_loop", fake_submission_loop)
