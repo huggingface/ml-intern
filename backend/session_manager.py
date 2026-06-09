@@ -99,6 +99,7 @@ class AgentSession:
     user_id: str = "dev"  # Owner of this session
     hf_username: str | None = None  # HF namespace used for personal trace uploads
     hf_token: str | None = None  # User's HF OAuth token for tool execution
+    user_plan: str | None = None  # Active HF account plan for plan-aware agent CTAs
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     # Last genuine activity (submit/turn-start/turn-finish/direct user write).
@@ -234,6 +235,7 @@ class SessionManager:
         user_id: str,
         hf_username: str | None,
         hf_token: str | None,
+        user_plan: str | None,
         model: str | None,
         event_queue: asyncio.Queue,
         notification_destinations: list[str] | None = None,
@@ -256,6 +258,7 @@ class SessionManager:
             hf_token=hf_token,
             user_id=user_id,
             hf_username=hf_username,
+            user_plan=user_plan,
             notification_gateway=self.messaging_gateway,
             notification_destinations=notification_destinations or [],
             session_id=session_id,
@@ -437,6 +440,7 @@ class SessionManager:
         *,
         hf_token: str | None,
         hf_username: str | None,
+        user_plan: str | None = None,
     ) -> None:
         if hf_token:
             agent_session.hf_token = hf_token
@@ -444,6 +448,9 @@ class SessionManager:
         if hf_username:
             agent_session.hf_username = hf_username
             agent_session.session.hf_username = hf_username
+        if user_plan is not None:
+            agent_session.user_plan = user_plan
+            agent_session.session.user_plan = user_plan
 
     @staticmethod
     def _has_active_sandbox_preload(agent_session: AgentSession) -> bool:
@@ -633,6 +640,7 @@ class SessionManager:
         user_id: str,
         hf_token: str | None = None,
         hf_username: str | None = None,
+        user_plan: str | None = None,
         preload_sandbox: bool = True,
     ) -> AgentSession | None:
         """Return a live runtime session, lazily restoring it from Mongo."""
@@ -644,6 +652,7 @@ class SessionManager:
                     existing,
                     hf_token=hf_token,
                     hf_username=hf_username,
+                    user_plan=user_plan,
                 )
                 self._restart_cpu_preload_if_token_recovered(
                     existing,
@@ -665,6 +674,7 @@ class SessionManager:
                     existing,
                     hf_token=hf_token,
                     hf_username=hf_username,
+                    user_plan=user_plan,
                 )
                 self._restart_cpu_preload_if_token_recovered(
                     existing,
@@ -697,6 +707,7 @@ class SessionManager:
             user_id=owner or user_id,
             hf_username=hf_username,
             hf_token=hf_token,
+            user_plan=user_plan,
             model=model,
             event_queue=event_queue,
             notification_destinations=meta.get("notification_destinations") or [],
@@ -773,6 +784,7 @@ class SessionManager:
             user_id=owner or user_id,
             hf_username=hf_username,
             hf_token=hf_token,
+            user_plan=user_plan,
             created_at=created_at,
             usage_window_started_at=usage_window_started_at,
             usage_window_baseline=usage_window_baseline,
@@ -790,6 +802,7 @@ class SessionManager:
                 started,
                 hf_token=hf_token,
                 hf_username=hf_username,
+                user_plan=user_plan,
             )
             return started
         if preload_sandbox:
@@ -802,6 +815,7 @@ class SessionManager:
         user_id: str = "dev",
         hf_username: str | None = None,
         hf_token: str | None = None,
+        user_plan: str | None = None,
         model: str | None = None,
         is_pro: bool | None = None,
     ) -> str:
@@ -815,6 +829,7 @@ class SessionManager:
             user_id: The ID of the user who owns this session.
             hf_username: The HF username/namespace used for personal trace uploads.
             hf_token: The user's HF OAuth token, stored for tool execution.
+            user_plan: The active HF account plan used for plan-aware agent CTAs.
             model: Optional model override. When set, replaces ``model_name``
                 on the per-session config clone. None falls back to the
                 config default.
@@ -865,6 +880,7 @@ class SessionManager:
                 user_id=user_id,
                 hf_username=hf_username,
                 hf_token=hf_token,
+                user_plan=user_plan,
                 model=model,
                 event_queue=event_queue,
             )
@@ -878,6 +894,7 @@ class SessionManager:
                 user_id=user_id,
                 hf_username=hf_username,
                 hf_token=hf_token,
+                user_plan=user_plan,
             )
 
             await self._start_agent_session(

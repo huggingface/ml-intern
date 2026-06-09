@@ -95,11 +95,13 @@ class Session:
         session_id: str | None = None,
         user_id: str | None = None,
         hf_username: str | None = None,
+        user_plan: str | None = None,
         persistence_store: Any | None = None,
     ):
         self.hf_token: Optional[str] = hf_token
         self.user_id: Optional[str] = user_id
         self.hf_username: Optional[str] = hf_username
+        self.user_plan: str | None = user_plan
         self.local_mode = local_mode
         self.persistence_store = persistence_store
         self.tool_router = tool_router

@@ -22,8 +22,15 @@ from session_manager import AgentSession, SessionManager  # noqa: E402
 
 
 class FakeRuntimeSession:
-    def __init__(self, *, hf_token: str | None = None, model: str = "test-model"):
+    def __init__(
+        self,
+        *,
+        hf_token: str | None = None,
+        user_plan: str | None = None,
+        model: str = "test-model",
+    ):
         self.hf_token = hf_token
+        self.user_plan = user_plan
         self.context_manager = SimpleNamespace(items=[])
         self.pending_approval = None
         self.turn_count = 0
@@ -116,8 +123,9 @@ def _runtime_agent_session(
     *,
     user_id: str = "owner",
     hf_token: str | None = "owner-token",
+    user_plan: str | None = None,
 ) -> AgentSession:
-    runtime_session = FakeRuntimeSession(hf_token=hf_token)
+    runtime_session = FakeRuntimeSession(hf_token=hf_token, user_plan=user_plan)
     return AgentSession(
         session_id=session_id,
         session=runtime_session,  # type: ignore[arg-type]
@@ -125,6 +133,7 @@ def _runtime_agent_session(
         submission_queue=asyncio.Queue(),
         user_id=user_id,
         hf_token=hf_token,
+        user_plan=user_plan,
     )
 
 
@@ -188,6 +197,7 @@ def _install_fake_runtime(manager: SessionManager) -> asyncio.Event:
     def fake_create_session_sync(**kwargs: Any):
         return object(), FakeRuntimeSession(
             hf_token=kwargs.get("hf_token"),
+            user_plan=kwargs.get("user_plan"),
             model=kwargs.get("model") or "test-model",
         )
 
@@ -321,6 +331,19 @@ async def test_existing_session_updates_token_after_access_check():
     assert result is existing
     assert existing.hf_token == "new-token"
     assert existing.session.hf_token == "new-token"
+
+
+@pytest.mark.asyncio
+async def test_existing_session_updates_plan_after_access_check():
+    manager = _manager_with_store(NoopSessionStore())
+    existing = _runtime_agent_session("s1", user_id="owner", user_plan="free")
+    manager.sessions["s1"] = existing
+
+    result = await manager.ensure_session_loaded("s1", user_id="owner", user_plan="pro")
+
+    assert result is existing
+    assert existing.user_plan == "pro"
+    assert existing.session.user_plan == "pro"
 
 
 @pytest.mark.asyncio
@@ -459,11 +482,17 @@ async def test_create_session_schedules_cpu_sandbox_preload():
     manager._start_cpu_sandbox_preload = fake_start_cpu_sandbox_preload  # type: ignore[method-assign]
 
     try:
-        session_id = await manager.create_session(user_id="owner", hf_token="token")
+        session_id = await manager.create_session(
+            user_id="owner",
+            hf_token="token",
+            user_plan="pro",
+        )
 
         assert scheduled == [session_id]
         assert session_id in manager.sessions
+        assert manager.sessions[session_id].user_plan == "pro"
         runtime_session = manager.sessions[session_id].session
+        assert runtime_session.user_plan == "pro"
         assert not hasattr(runtime_session, "_ml_intern_artifact_collection_task")
         assert not hasattr(runtime_session, "_ml_intern_artifact_collection_slug")
     finally:
@@ -484,12 +513,16 @@ async def test_lazy_restore_schedules_cpu_sandbox_preload():
 
     try:
         restored = await manager.ensure_session_loaded(
-            "persisted-session", user_id="owner"
+            "persisted-session",
+            user_id="owner",
+            user_plan="free",
         )
 
         assert restored is not None
         assert scheduled == ["persisted-session"]
         assert "persisted-session" in manager.sessions
+        assert restored.user_plan == "free"
+        assert restored.session.user_plan == "free"
         assert not hasattr(restored.session, "_ml_intern_artifact_collection_task")
         assert not hasattr(restored.session, "_ml_intern_artifact_collection_slug")
     finally:
