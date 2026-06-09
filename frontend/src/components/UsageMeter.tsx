@@ -125,6 +125,10 @@ function AccountUsageSection({
             useJobEstimate ? telemetry?.hf_jobs_estimated_usd : account?.hf_jobs_usd,
           )}
         />
+        <UsageRow
+          label="HF Sandboxes"
+          value={formatUsd(telemetry?.sandbox_estimated_usd)}
+        />
         <UsageRow label="LLM calls" value={formatCount(telemetry?.llm_calls)} />
         <UsageRow
           label="Input tokens"
@@ -179,7 +183,11 @@ export default function UsageMeter() {
     void fetchUsage(activeSessionId);
   }, [activeSessionId, fetchUsage]);
 
-  const sessionTotal = usage?.hf_account?.current_session?.total_usd;
+  const accountSessionTotal = usage?.hf_account?.current_session?.total_usd;
+  const sessionTotal =
+    accountSessionTotal == null
+      ? usage?.session?.total_usd
+      : accountSessionTotal + (usage?.session?.sandbox_estimated_usd ?? 0);
   const links = useMemo(() => usage?.links ?? {}, [usage?.links]);
   const billingMessage = billingUnavailableMessage(usage?.hf_account?.error);
   const open = Boolean(anchorEl);

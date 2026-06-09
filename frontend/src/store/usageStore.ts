@@ -9,14 +9,17 @@ export interface UsageBucket {
   total_usd: number;
   inference_usd: number;
   hf_jobs_estimated_usd: number;
+  sandbox_estimated_usd: number;
   llm_calls: number;
   hf_jobs_count: number;
+  sandbox_count: number;
   prompt_tokens: number;
   completion_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
   total_tokens: number;
   hf_jobs_billable_seconds_estimate: number;
+  sandbox_billable_seconds_estimate: number;
 }
 
 export interface HfAccountUsageBucket {
@@ -63,7 +66,7 @@ export interface UsageResponse {
   links: Record<string, string>;
 }
 
-type UsageEventType = 'llm_call' | 'hf_job_complete';
+type UsageEventType = 'llm_call' | 'hf_job_complete' | 'sandbox_destroy';
 
 interface UsageStore {
   usage: UsageResponse | null;
@@ -129,7 +132,11 @@ function applyEventToBucket(
       intValue(data.billable_seconds_estimate) || intValue(data.wall_time_s);
   }
 
-  next.total_usd = roundUsd(next.inference_usd + next.hf_jobs_estimated_usd);
+  next.total_usd = roundUsd(
+    next.inference_usd +
+      next.hf_jobs_estimated_usd +
+      (next.sandbox_estimated_usd ?? 0),
+  );
   return next;
 }
 
@@ -165,6 +172,11 @@ export const useUsageStore = create<UsageStore>()((set, get) => ({
   },
 
   applyUsageEvent: (sessionId, eventType, data) => {
+    if (eventType === 'sandbox_destroy') {
+      void get().fetchUsage(sessionId);
+      return;
+    }
+
     const current = get().usage;
     if (!current) return;
     set({

@@ -15,6 +15,8 @@ export type EventType =
   | 'tool_state_change'
   | 'llm_call'
   | 'hf_job_complete'
+  | 'sandbox_create'
+  | 'sandbox_destroy'
   | 'turn_complete'
   | 'compacted'
   | 'error'

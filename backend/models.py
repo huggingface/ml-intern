@@ -131,14 +131,17 @@ class UsageBucket(BaseModel):
     total_usd: float = 0.0
     inference_usd: float = 0.0
     hf_jobs_estimated_usd: float = 0.0
+    sandbox_estimated_usd: float = 0.0
     llm_calls: int = 0
     hf_jobs_count: int = 0
+    sandbox_count: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
     total_tokens: int = 0
     hf_jobs_billable_seconds_estimate: int = 0
+    sandbox_billable_seconds_estimate: int = 0
 
 
 class HfAccountUsageBucket(BaseModel):

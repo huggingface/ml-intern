@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 MAX_BSON_BYTES = 15 * 1024 * 1024
-USAGE_EVENT_TYPES = ("llm_call", "hf_job_complete")
+USAGE_EVENT_TYPES = (
+    "llm_call",
+    "hf_job_complete",
+    "sandbox_create",
+    "sandbox_destroy",
+)
 
 
 def _now() -> datetime:
@@ -415,7 +420,7 @@ class MongoSessionStore(NoopSessionStore):
                 created_at["$lt"] = end
             event_query["created_at"] = created_at
 
-        event_cursor = self.db.session_events.find(event_query)
+        event_cursor = self.db.session_events.find(event_query).sort("created_at", 1)
         return [row async for row in event_cursor]
 
     async def append_trace_message(

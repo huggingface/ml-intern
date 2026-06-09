@@ -2,13 +2,20 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
-USAGE_EVENT_TYPES = ("llm_call", "hf_job_complete")
+from agent.core.cost_estimation import SPACE_PRICE_USD_PER_HOUR
+
+USAGE_EVENT_TYPES = (
+    "llm_call",
+    "hf_job_complete",
+    "sandbox_create",
+    "sandbox_destroy",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,14 +152,17 @@ def _empty_bucket(
         "total_usd": 0.0,
         "inference_usd": 0.0,
         "hf_jobs_estimated_usd": 0.0,
+        "sandbox_estimated_usd": 0.0,
         "llm_calls": 0,
         "hf_jobs_count": 0,
+        "sandbox_count": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "cache_read_tokens": 0,
         "cache_creation_tokens": 0,
         "total_tokens": 0,
         "hf_jobs_billable_seconds_estimate": 0,
+        "sandbox_billable_seconds_estimate": 0,
     }
 
 
@@ -217,14 +227,145 @@ def aggregate_usage_events(
             bucket["hf_jobs_billable_seconds_estimate"] += _coerce_int(
                 data.get("billable_seconds_estimate") or data.get("wall_time_s")
             )
+        elif event_type == "sandbox_destroy":
+            # Sandbox costs are paired and added after the main pass so the
+            # create event can provide hardware pricing metadata.
+            continue
+
+    _aggregate_sandbox_usage(
+        events,
+        bucket,
+        window_start=window_start,
+        window_end=window_end,
+        timezone=timezone,
+    )
 
     bucket["inference_usd"] = round(bucket["inference_usd"], 6)
     bucket["hf_jobs_estimated_usd"] = round(bucket["hf_jobs_estimated_usd"], 6)
+    bucket["sandbox_estimated_usd"] = round(bucket["sandbox_estimated_usd"], 6)
     bucket["total_usd"] = round(
-        bucket["inference_usd"] + bucket["hf_jobs_estimated_usd"],
+        (
+            bucket["inference_usd"]
+            + bucket["hf_jobs_estimated_usd"]
+            + bucket["sandbox_estimated_usd"]
+        ),
         6,
     )
     return bucket
+
+
+def _event_sort_key(
+    indexed_event: tuple[int, dict[str, Any]],
+    *,
+    timezone_name: str | None,
+) -> tuple[bool, datetime, int]:
+    index, event = indexed_event
+    created_at = event_created_at(event, timezone_name=timezone_name)
+    return (
+        created_at is None,
+        created_at or datetime.min.replace(tzinfo=UTC),
+        index,
+    )
+
+
+def _sandbox_id(event: dict[str, Any]) -> str | None:
+    data = event.get("data") or {}
+    sandbox_id = data.get("sandbox_id")
+    return sandbox_id if isinstance(sandbox_id, str) and sandbox_id else None
+
+
+def _sandbox_duration_seconds(
+    create_event: dict[str, Any],
+    destroy_event: dict[str, Any],
+    *,
+    window_start: datetime | None,
+    window_end: datetime | None,
+    timezone_name: str | None,
+) -> int:
+    create_data = create_event.get("data") or {}
+    destroy_data = destroy_event.get("data") or {}
+    lifetime_s = _coerce_int(destroy_data.get("lifetime_s"))
+    create_at = event_created_at(create_event, timezone_name=timezone_name)
+    destroy_at = event_created_at(destroy_event, timezone_name=timezone_name)
+
+    if lifetime_s > 0:
+        if destroy_at is None or (window_start is None and window_end is None):
+            return lifetime_s
+        interval_start = destroy_at - timedelta(seconds=lifetime_s)
+        interval_end = destroy_at
+    else:
+        if create_at is None or destroy_at is None:
+            return 0
+        create_latency_s = max(0, _coerce_int(create_data.get("create_latency_s")))
+        interval_start = create_at - timedelta(seconds=create_latency_s)
+        interval_end = destroy_at
+
+    if interval_end <= interval_start:
+        return 0
+
+    clamp_start = _utc(window_start) if window_start is not None else interval_start
+    clamp_end = _utc(window_end) if window_end is not None else interval_end
+    clamped_start = max(interval_start, clamp_start)
+    clamped_end = min(interval_end, clamp_end)
+    if clamped_end <= clamped_start:
+        return 0
+    return int((clamped_end - clamped_start).total_seconds())
+
+
+def _aggregate_sandbox_usage(
+    events: list[dict[str, Any]],
+    bucket: dict[str, Any],
+    *,
+    window_start: datetime | None,
+    window_end: datetime | None,
+    timezone: str | None,
+) -> None:
+    lifecycle_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("event_type") in {"sandbox_create", "sandbox_destroy"}
+    ]
+    ordered_events = [
+        event
+        for _, event in sorted(
+            lifecycle_events,
+            key=lambda item: _event_sort_key(item, timezone_name=timezone),
+        )
+    ]
+    active_creates: dict[str, dict[str, Any]] = {}
+
+    for event in ordered_events:
+        event_type = event.get("event_type")
+        sandbox_id = _sandbox_id(event)
+        if sandbox_id is None:
+            continue
+
+        if event_type == "sandbox_create":
+            active_creates[sandbox_id] = event
+            continue
+
+        if event_type != "sandbox_destroy":
+            continue
+
+        create_event = active_creates.pop(sandbox_id, None)
+        if create_event is None:
+            continue
+
+        create_data = create_event.get("data") or {}
+        hardware = str(create_data.get("hardware") or "cpu-basic")
+        price_usd_per_hour = SPACE_PRICE_USD_PER_HOUR.get(hardware, 0.0)
+        seconds = _sandbox_duration_seconds(
+            create_event,
+            event,
+            window_start=window_start,
+            window_end=window_end,
+            timezone_name=timezone,
+        )
+
+        bucket["sandbox_count"] += 1
+        if price_usd_per_hour > 0:
+            bucket["sandbox_billable_seconds_estimate"] += seconds
+        bucket["sandbox_estimated_usd"] += price_usd_per_hour * (seconds / 3600)
 
 
 def _account_bucket_from_billing_usage(

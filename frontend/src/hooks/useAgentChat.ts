@@ -702,7 +702,7 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             const state = event.data?.state as string;
             const toolName = event.data?.tool as string;
             if (state === 'running' && toolName) sideChannel.onToolRunning(toolName);
-          } else if (et === 'llm_call' || et === 'hf_job_complete') {
+          } else if (et === 'llm_call' || et === 'hf_job_complete' || et === 'sandbox_destroy') {
             sideChannel.onUsageEvent(et, (event.data || {}) as Record<string, unknown>);
           } else if (et === 'turn_complete' || et === 'error' || et === 'interrupted') {
             sideChannel.onProcessingDone();
