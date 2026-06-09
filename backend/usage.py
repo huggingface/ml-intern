@@ -138,15 +138,9 @@ def resolve_usage_windows(
 def _empty_bucket(
     *,
     session_id: str | None = None,
-    window_start: datetime | None = None,
-    window_end: datetime | None = None,
-    timezone: str | None = None,
 ) -> dict[str, Any]:
     return {
         "session_id": session_id,
-        "window_start": _iso(window_start),
-        "window_end": _iso(window_end),
-        "timezone": timezone,
         "total_usd": 0.0,
         "inference_usd": 0.0,
         "hf_jobs_estimated_usd": 0.0,
@@ -186,16 +180,8 @@ def aggregate_usage_events(
     events: list[dict[str, Any]],
     *,
     session_id: str | None = None,
-    window_start: datetime | None = None,
-    window_end: datetime | None = None,
-    timezone: str | None = None,
 ) -> dict[str, Any]:
-    bucket = _empty_bucket(
-        session_id=session_id,
-        window_start=window_start,
-        window_end=window_end,
-        timezone=timezone,
-    )
+    bucket = _empty_bucket(session_id=session_id)
     for event in events:
         event_type = event.get("event_type")
         data = event.get("data") or {}
@@ -230,13 +216,7 @@ def aggregate_usage_events(
             # create event can provide hardware pricing metadata.
             continue
 
-    _aggregate_sandbox_usage(
-        events,
-        bucket,
-        window_start=window_start,
-        window_end=window_end,
-        timezone=timezone,
-    )
+    _aggregate_sandbox_usage(events, bucket)
 
     bucket["inference_usd"] = round(bucket["inference_usd"], 6)
     bucket["hf_jobs_estimated_usd"] = round(bucket["hf_jobs_estimated_usd"], 6)
@@ -254,11 +234,9 @@ def aggregate_usage_events(
 
 def _event_sort_key(
     indexed_event: tuple[int, dict[str, Any]],
-    *,
-    timezone_name: str | None,
 ) -> tuple[bool, datetime, int]:
     index, event = indexed_event
-    created_at = event_created_at(event, timezone_name=timezone_name)
+    created_at = event_created_at(event)
     return (
         created_at is None,
         created_at or datetime.min.replace(tzinfo=UTC),
@@ -275,48 +253,29 @@ def _sandbox_id(event: dict[str, Any]) -> str | None:
 def _sandbox_duration_seconds(
     create_event: dict[str, Any],
     destroy_event: dict[str, Any],
-    *,
-    window_start: datetime | None,
-    window_end: datetime | None,
-    timezone_name: str | None,
 ) -> int:
     create_data = create_event.get("data") or {}
     destroy_data = destroy_event.get("data") or {}
     lifetime_s = _coerce_int(destroy_data.get("lifetime_s"))
-    create_at = event_created_at(create_event, timezone_name=timezone_name)
-    destroy_at = event_created_at(destroy_event, timezone_name=timezone_name)
 
     if lifetime_s > 0:
-        if destroy_at is None or (window_start is None and window_end is None):
-            return lifetime_s
-        interval_start = destroy_at - timedelta(seconds=lifetime_s)
-        interval_end = destroy_at
-    else:
-        if create_at is None or destroy_at is None:
-            return 0
-        create_latency_s = max(0, _coerce_int(create_data.get("create_latency_s")))
-        interval_start = create_at - timedelta(seconds=create_latency_s)
-        interval_end = destroy_at
+        # Telemetry starts the lifetime clock before create latency elapses.
+        return lifetime_s
 
-    if interval_end <= interval_start:
+    create_at = event_created_at(create_event)
+    destroy_at = event_created_at(destroy_event)
+    if create_at is None or destroy_at is None:
         return 0
-
-    clamp_start = _utc(window_start) if window_start is not None else interval_start
-    clamp_end = _utc(window_end) if window_end is not None else interval_end
-    clamped_start = max(interval_start, clamp_start)
-    clamped_end = min(interval_end, clamp_end)
-    if clamped_end <= clamped_start:
+    create_latency_s = max(0, _coerce_int(create_data.get("create_latency_s")))
+    interval_start = create_at - timedelta(seconds=create_latency_s)
+    if destroy_at <= interval_start:
         return 0
-    return int((clamped_end - clamped_start).total_seconds())
+    return int((destroy_at - interval_start).total_seconds())
 
 
 def _aggregate_sandbox_usage(
     events: list[dict[str, Any]],
     bucket: dict[str, Any],
-    *,
-    window_start: datetime | None,
-    window_end: datetime | None,
-    timezone: str | None,
 ) -> None:
     lifecycle_events = [
         (index, event)
@@ -327,7 +286,7 @@ def _aggregate_sandbox_usage(
         event
         for _, event in sorted(
             lifecycle_events,
-            key=lambda item: _event_sort_key(item, timezone_name=timezone),
+            key=_event_sort_key,
         )
     ]
     active_creates: dict[str, dict[str, Any]] = {}
@@ -352,13 +311,7 @@ def _aggregate_sandbox_usage(
         create_data = create_event.get("data") or {}
         hardware = str(create_data.get("hardware") or "cpu-basic")
         price_usd_per_hour = SPACE_PRICE_USD_PER_HOUR.get(hardware, 0.0)
-        seconds = _sandbox_duration_seconds(
-            create_event,
-            event,
-            window_start=window_start,
-            window_end=window_end,
-            timezone_name=timezone,
-        )
+        seconds = _sandbox_duration_seconds(create_event, event)
 
         bucket["sandbox_count"] += 1
         if price_usd_per_hour > 0:

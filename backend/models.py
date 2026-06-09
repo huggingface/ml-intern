@@ -122,12 +122,9 @@ class SessionYoloRequest(BaseModel):
 
 
 class UsageBucket(BaseModel):
-    """App-attributed usage totals for a session or time window."""
+    """App-attributed usage totals for a session."""
 
     session_id: str | None = None
-    window_start: str | None = None
-    window_end: str | None = None
-    timezone: str | None = None
     total_usd: float = 0.0
     inference_usd: float = 0.0
     hf_jobs_estimated_usd: float = 0.0

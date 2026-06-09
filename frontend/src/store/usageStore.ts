@@ -3,9 +3,6 @@ import { apiFetch } from '@/utils/api';
 
 export interface UsageBucket {
   session_id?: string | null;
-  window_start?: string | null;
-  window_end?: string | null;
-  timezone?: string | null;
   total_usd: number;
   inference_usd: number;
   hf_jobs_estimated_usd: number;
