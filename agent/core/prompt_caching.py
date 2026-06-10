@@ -19,9 +19,13 @@ _CACHEABLE_ROLES = {"system", "user"}
 _OPENROUTER_SESSION_ID_MAX_LENGTH = 256
 
 
-def _is_fal_router_request(llm_params: dict[str, Any]) -> bool:
+def _is_hf_router_request(llm_params: dict[str, Any]) -> bool:
     api_base = str(llm_params.get("api_base") or "").rstrip("/")
-    return api_base == HF_ROUTER_BASE_URL and ":fal" in _router_model(llm_params)
+    return api_base == HF_ROUTER_BASE_URL
+
+
+def _is_fal_router_request(llm_params: dict[str, Any]) -> bool:
+    return _is_hf_router_request(llm_params) and ":fal" in _router_model(llm_params)
 
 
 def _router_model(llm_params: dict[str, Any]) -> str:
@@ -60,11 +64,8 @@ def with_prompt_cache_params(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """Return LiteLLM params with provider-native prompt-cache body hints."""
-    if not _is_fal_router_request(llm_params):
-        return llm_params
-
     updates: dict[str, Any] = {}
-    if session_id:
+    if session_id and _is_hf_router_request(llm_params):
         stable_session_id = session_id[:_OPENROUTER_SESSION_ID_MAX_LENGTH]
         updates["session_id"] = stable_session_id
         if _is_openai_gpt55(llm_params):

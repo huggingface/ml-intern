@@ -123,7 +123,6 @@ class AgentSession:
     broadcaster: Any = None
     title: str | None = None
     usage_window_started_at: datetime | None = None
-    usage_window_baseline: dict[str, Any] | None = None
     usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
     usage_warning_spend_cache: dict[str, Any] = field(default_factory=dict)
 
@@ -440,14 +439,24 @@ class SessionManager:
                 return None
 
         hf_account = response.get("hf_account")
+        session_bucket = response.get("session")
         if isinstance(hf_account, dict):
             current_session = hf_account.get("current_session")
             if isinstance(current_session, dict):
-                spend = coerce_spend(current_session.get("total_usd"))
+                spend = coerce_spend(
+                    current_session.get("inference_providers_usd")
+                    if "inference_providers_usd" in current_session
+                    else current_session.get("total_usd")
+                )
                 if spend is not None:
+                    if isinstance(session_bucket, dict):
+                        for key in (
+                            "hf_jobs_estimated_usd",
+                            "sandbox_estimated_usd",
+                        ):
+                            spend += coerce_spend(session_bucket.get(key)) or 0.0
                     return spend, "hf_billing_current_session"
 
-        session_bucket = response.get("session")
         if isinstance(session_bucket, dict):
             spend = coerce_spend(session_bucket.get("total_usd"))
             if spend is not None:
@@ -799,7 +808,6 @@ class SessionManager:
                 ),
                 created_at=agent_session.created_at,
                 usage_window_started_at=agent_session.usage_window_started_at,
-                usage_window_baseline=agent_session.usage_window_baseline,
                 notification_destinations=list(
                     agent_session.session.notification_destinations
                 ),
@@ -978,9 +986,6 @@ class SessionManager:
         usage_window_started_at = meta.get("usage_window_started_at")
         if not isinstance(usage_window_started_at, datetime):
             usage_window_started_at = created_at
-        usage_window_baseline = meta.get("usage_window_baseline")
-        if not isinstance(usage_window_baseline, dict):
-            usage_window_baseline = None
 
         agent_session = AgentSession(
             session_id=session_id,
@@ -993,7 +998,6 @@ class SessionManager:
             user_plan=user_plan,
             created_at=created_at,
             usage_window_started_at=usage_window_started_at,
-            usage_window_baseline=usage_window_baseline,
             usage_warning_next_threshold_usd=session.usage_warning_next_threshold_usd,
             is_active=True,
             is_processing=False,
@@ -1742,7 +1746,6 @@ class SessionManager:
         session_id: str,
         *,
         started_at: datetime | None = None,
-        baseline: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Reset the account-billing window used for the visible usage meter."""
         agent_session = self.sessions.get(session_id)
@@ -1751,7 +1754,6 @@ class SessionManager:
 
         window_start = started_at or datetime.utcnow()
         agent_session.usage_window_started_at = window_start
-        agent_session.usage_window_baseline = baseline
         self._touch(agent_session)
 
         store = self._store()
@@ -1759,7 +1761,6 @@ class SessionManager:
             await store.update_session_fields(
                 session_id,
                 usage_window_started_at=window_start,
-                usage_window_baseline=baseline,
                 last_active_at=agent_session.last_active_at,
             )
         return self.get_session_info(session_id)

@@ -170,7 +170,7 @@ class HfInferenceProvidersCredits(BaseModel):
 class HfAccountUsage(BaseModel):
     """Authoritative HF account billing usage from the signed-in token."""
 
-    source: Literal["hf_billing_usage_v2"]
+    source: Literal["hf_billing"]
     available: bool = False
     error: str | None = None
     current_session: HfAccountUsageBucket | None = None

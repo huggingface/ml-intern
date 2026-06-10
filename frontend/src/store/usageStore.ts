@@ -42,7 +42,7 @@ export interface HfInferenceProvidersCredits {
 }
 
 export interface HfAccountUsage {
-  source: 'hf_billing_usage_v2';
+  source: 'hf_billing';
   available: boolean;
   error?: string | null;
   current_session: HfAccountUsageBucket | null;

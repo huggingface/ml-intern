@@ -18,6 +18,20 @@ def _gpt55_fal_params() -> dict:
     }
 
 
+def _kimi_novita_params() -> dict:
+    return {
+        "model": "openai/moonshotai/Kimi-K2.6:novita",
+        "api_base": HF_ROUTER_BASE_URL,
+    }
+
+
+def _gpt_oss_cerebras_params() -> dict:
+    return {
+        "model": "openai/openai/gpt-oss-120b:cerebras",
+        "api_base": HF_ROUTER_BASE_URL,
+    }
+
+
 def test_prompt_caching_marks_system_prefix_and_tools_for_fal_router_model():
     messages = [
         Message(role="system", content="stable system prompt"),
@@ -186,6 +200,26 @@ def test_prompt_cache_params_add_session_id_for_fal_router_model():
         "session_id": "session-1",
         "cache_control": {"type": "ephemeral"},
     }
+    assert "extra_body" not in llm_params
+
+
+def test_prompt_cache_params_adds_session_id_for_novita_router_model():
+    llm_params = _kimi_novita_params()
+
+    cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
+
+    assert cached_params is not llm_params
+    assert cached_params["extra_body"] == {"session_id": "session-1"}
+    assert "extra_body" not in llm_params
+
+
+def test_prompt_cache_params_adds_session_id_for_cerebras_router_model():
+    llm_params = _gpt_oss_cerebras_params()
+
+    cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
+
+    assert cached_params is not llm_params
+    assert cached_params["extra_body"] == {"session_id": "session-1"}
     assert "extra_body" not in llm_params
 
 

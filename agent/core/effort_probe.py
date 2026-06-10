@@ -29,6 +29,7 @@ from typing import Any
 from litellm import acompletion
 
 from agent.core.llm_params import UnsupportedEffortError, _resolve_llm_params
+from agent.core.prompt_caching import with_prompt_cache_params
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,10 @@ async def probe_effort(
                 hf_token,
                 reasoning_effort=effort,
                 strict=True,
+            )
+            params = with_prompt_cache_params(
+                params,
+                session_id=getattr(session, "session_id", None),
             )
         except UnsupportedEffortError:
             # Provider can't even accept this effort name (e.g. "max" on

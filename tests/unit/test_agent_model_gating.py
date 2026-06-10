@@ -12,6 +12,7 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 from routes import agent  # noqa: E402
+from dependencies import INTERNAL_HF_TOKEN_KEY  # noqa: E402
 
 
 def test_available_models_exclude_sonnet_and_have_no_pro_gate():
@@ -99,6 +100,63 @@ async def test_llm_health_skips_router_probe_without_token(monkeypatch):
 
     assert response.status == "skipped"
     assert response.model == agent.DEFAULT_FREE_MODEL_ID
+
+
+@pytest.mark.asyncio
+async def test_generate_title_sends_session_id_to_hf_router(monkeypatch):
+    completions = []
+    titles = []
+
+    def fake_resolve_llm_params(
+        model_name,
+        session_hf_token=None,
+        reasoning_effort=None,
+        strict=False,
+    ):
+        return {
+            "model": f"openai/{model_name}",
+            "api_base": "https://router.huggingface.co/v1",
+            "api_key": session_hf_token,
+            "extra_body": {"reasoning_effort": reasoning_effort},
+        }
+
+    async def fake_acompletion(**kwargs):
+        completions.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="Clean title"),
+                )
+            ]
+        )
+
+    async def fake_check_session_access(session_id, user):
+        assert session_id == "session-1"
+        assert user["user_id"] == "u1"
+
+    async def fake_update_session_title(session_id, title):
+        titles.append((session_id, title))
+
+    monkeypatch.setattr(agent, "_resolve_llm_params", fake_resolve_llm_params)
+    monkeypatch.setattr(agent, "acompletion", fake_acompletion)
+    monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
+    monkeypatch.setattr(
+        agent.session_manager,
+        "update_session_title",
+        fake_update_session_title,
+    )
+
+    response = await agent.generate_title(
+        agent.SubmitRequest(session_id="session-1", text="Make something useful"),
+        {"user_id": "u1", INTERNAL_HF_TOKEN_KEY: "hf_fake"},
+    )
+
+    assert response == {"title": "Clean title"}
+    assert completions[0]["extra_body"] == {
+        "reasoning_effort": "low",
+        "session_id": "session-1",
+    }
+    assert titles == [("session-1", "Clean title")]
 
 
 @pytest.mark.asyncio
