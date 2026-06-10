@@ -701,6 +701,7 @@ async def teardown_session_sandbox(session: Any) -> None:
                     session,
                     active_reservation_id,
                     actual_unfinalized,
+                    allow_zero_actual=True,
                 )
                 if active_reservation_id is None and actual_unfinalized:
                     adjust_session_spend(session, actual_unfinalized)

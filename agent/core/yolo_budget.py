@@ -11,7 +11,7 @@ from agent.core.model_ids import strip_huggingface_model_prefix
 
 YOLO_BUDGET_TOOL_NAME = "yolo_budget"
 DEFAULT_LLM_OUTPUT_TOKEN_RESERVE = int(
-    os.environ.get("ML_INTERN_YOLO_LLM_OUTPUT_TOKEN_RESERVE", "8192")
+    os.environ.get("ML_INTERN_YOLO_LLM_OUTPUT_TOKEN_RESERVE", "32768")
 )
 _ROUTING_POLICIES = {"fastest", "cheapest", "preferred"}
 
@@ -42,6 +42,7 @@ class LlmBudgetResult:
     llm_params: dict[str, Any]
     decision: BudgetDecision
     blocked: bool = False
+    injected_output_bound: int | None = None
 
 
 def session_yolo_enabled(session: Any | None) -> bool:
@@ -197,6 +198,8 @@ def reconcile_budget_reservation(
     session: Any | None,
     reservation_id: str | None,
     actual_cost_usd: Any,
+    *,
+    allow_zero_actual: bool = False,
 ) -> None:
     if not session or not reservation_id:
         return
@@ -204,7 +207,7 @@ def reconcile_budget_reservation(
     if reservation is None:
         return
     actual = _coerce_cost(actual_cost_usd)
-    if actual is None:
+    if actual is None or (actual == 0 and not allow_zero_actual):
         return
     adjust_session_spend(session, actual - reservation.amount_usd)
 
@@ -226,13 +229,28 @@ def llm_output_token_bound(llm_params: dict[str, Any]) -> int | None:
 def with_yolo_llm_output_bound(
     llm_params: dict[str, Any],
     session: Any | None,
+    *,
+    model_name: str | None = None,
+    litellm_model: str | None = None,
+    messages: list[Any] | None = None,
+    tools: Any = None,
 ) -> dict[str, Any]:
     if (
         not session_yolo_enabled(session)
         or llm_output_token_bound(llm_params) is not None
     ):
         return llm_params
-    return {**llm_params, "max_completion_tokens": DEFAULT_LLM_OUTPUT_TOKEN_RESERVE}
+    bound = DEFAULT_LLM_OUTPUT_TOKEN_RESERVE
+    if model_name and litellm_model and messages is not None:
+        prompt_tokens = _count_prompt_tokens(
+            litellm_model=litellm_model,
+            messages=messages,
+            tools=tools,
+        )
+        context_length = _router_context_length(model_name)
+        if prompt_tokens is not None and context_length is not None:
+            bound = max(1, min(bound, max(1, context_length - prompt_tokens)))
+    return {**llm_params, "max_completion_tokens": bound}
 
 
 def _message_payload(message: Any) -> Any:
@@ -265,7 +283,7 @@ def _router_prices(model_name: str) -> tuple[float, float] | None:
     from agent.core import hf_router_catalog
 
     normalized = strip_huggingface_model_prefix(model_name) or model_name
-    bare, _, tag = normalized.partition(":")
+    _, _, tag = normalized.partition(":")
     info = hf_router_catalog.lookup(normalized)
     if info is None:
         return None
@@ -296,6 +314,26 @@ def _router_prices(model_name: str) -> tuple[float, float] | None:
         max(float(p.input_price) for p in live),
         max(float(p.output_price) for p in live),
     )
+
+
+def _router_context_length(model_name: str) -> int | None:
+    from agent.core import hf_router_catalog
+
+    normalized = strip_huggingface_model_prefix(model_name) or model_name
+    info = hf_router_catalog.lookup(normalized)
+    return info.max_context_length if info is not None else None
+
+
+def _router_price_unavailable_reason(model_name: str) -> str:
+    from agent.core import hf_router_catalog
+
+    fetch_error = hf_router_catalog.last_fetch_error()
+    if fetch_error:
+        return (
+            "Could not fetch HF Router price metadata safely "
+            f"for model '{model_name}': {fetch_error}."
+        )
+    return f"No HF Router price is available for model '{model_name}'."
 
 
 def estimate_llm_call_cost(
@@ -333,7 +371,7 @@ def estimate_llm_call_cost(
         return CostEstimate(
             estimated_cost_usd=None,
             billable=True,
-            block_reason=f"No HF Router price is available for model '{normalized}'.",
+            block_reason=_router_price_unavailable_reason(normalized),
             label=normalized,
         )
     input_price, output_price = prices
@@ -380,8 +418,6 @@ async def request_yolo_budget_approval(
     decision: BudgetDecision,
     *,
     spend_kind: str,
-    continuation: str = "continue_agent",
-    final_response: str | None = None,
 ) -> bool:
     if session.pending_approval:
         return False
@@ -396,11 +432,8 @@ async def request_yolo_budget_approval(
         "estimated_next_usd": decision.estimated_cost_usd,
         "spend_kind": spend_kind,
         "reason": decision.block_reason or "YOLO budget requires confirmation.",
-        "continuation": continuation,
         "history_size": len(session.context_manager.items),
     }
-    if final_response is not None:
-        pending["final_response"] = final_response
     session.pending_approval = pending
     tool = yolo_budget_pending_to_tool(pending)
     await session.send_event(
@@ -429,11 +462,24 @@ async def reserve_llm_call_budget(
     llm_params: dict[str, Any],
     spend_kind: str,
 ) -> LlmBudgetResult:
-    bounded_params = with_yolo_llm_output_bound(llm_params, session)
+    litellm_model = str(llm_params.get("model") or model_name)
+    had_output_bound = llm_output_token_bound(llm_params) is not None
+    bounded_params = with_yolo_llm_output_bound(
+        llm_params,
+        session,
+        model_name=model_name,
+        litellm_model=litellm_model,
+        messages=messages,
+        tools=tools,
+    )
+    injected_output_bound = (
+        None if had_output_bound else llm_output_token_bound(bounded_params)
+    )
     if not session_yolo_enabled(session):
         return LlmBudgetResult(
             llm_params=bounded_params,
             decision=BudgetDecision(allowed=True),
+            injected_output_bound=None,
         )
 
     estimate = estimate_llm_call_cost(
@@ -449,7 +495,11 @@ async def reserve_llm_call_budget(
         spend_kind=spend_kind,
     )
     if decision.allowed:
-        return LlmBudgetResult(llm_params=bounded_params, decision=decision)
+        return LlmBudgetResult(
+            llm_params=bounded_params,
+            decision=decision,
+            injected_output_bound=injected_output_bound,
+        )
 
     assert session is not None
     await request_yolo_budget_approval(
@@ -461,6 +511,7 @@ async def reserve_llm_call_budget(
         llm_params=bounded_params,
         decision=decision,
         blocked=True,
+        injected_output_bound=injected_output_bound,
     )
 
 

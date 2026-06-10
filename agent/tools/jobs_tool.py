@@ -727,6 +727,7 @@ class HfJobsTool:
                         usage.get("estimated_cost_usd")
                         if isinstance(usage, dict)
                         else None,
+                        allow_zero_actual=True,
                     )
 
             # Untrack job ID (completed or failed, no longer needs cancellation)

@@ -1402,6 +1402,21 @@ class Handlers:
                 token_count = llm_result.token_count
                 finish_reason = llm_result.finish_reason
 
+                if finish_reason == "length" and budget.injected_output_bound:
+                    await session.send_event(
+                        Event(
+                            event_type="tool_log",
+                            data={
+                                "tool": "system",
+                                "log": (
+                                    "The response hit the YOLO output-token bound "
+                                    f"({budget.injected_output_bound} tokens) used "
+                                    "to keep session spend estimable."
+                                ),
+                            },
+                        )
+                    )
+
                 # If output was truncated, all tool call args are garbage.
                 # Inject a system hint so the LLM retries with smaller content.
                 if finish_reason == "length" and tool_calls_acc:
@@ -2145,26 +2160,6 @@ class Handlers:
                 },
             )
         )
-
-        if pending.get("continuation") == "complete_turn":
-            final_response = pending.get("final_response")
-            await session.send_event(
-                Event(
-                    event_type="turn_complete",
-                    data={
-                        "history_size": int(
-                            pending.get("history_size")
-                            or len(session.context_manager.items)
-                        ),
-                        "final_response": final_response
-                        if isinstance(final_response, str)
-                        else None,
-                    },
-                )
-            )
-            session.increment_turn()
-            await session.auto_save_if_needed()
-            return
 
         await Handlers.run_agent(session, "")
 

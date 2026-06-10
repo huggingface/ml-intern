@@ -112,6 +112,7 @@ def test_llm_estimate_treats_local_models_as_free(monkeypatch):
 def test_llm_estimate_fails_closed_when_price_is_unknown(monkeypatch):
     monkeypatch.setattr(yolo_budget, "_count_prompt_tokens", lambda **_: 10)
     monkeypatch.setattr("agent.core.hf_router_catalog.lookup", lambda _model: None)
+    monkeypatch.setattr("agent.core.hf_router_catalog.last_fetch_error", lambda: None)
 
     estimate = yolo_budget.estimate_llm_call_cost(
         model_name="org/unknown",
@@ -123,6 +124,25 @@ def test_llm_estimate_fails_closed_when_price_is_unknown(monkeypatch):
     assert estimate.estimated_cost_usd is None
     assert estimate.billable is True
     assert "No HF Router price" in estimate.block_reason
+
+
+def test_llm_estimate_reports_router_catalog_fetch_failure(monkeypatch):
+    monkeypatch.setattr(yolo_budget, "_count_prompt_tokens", lambda **_: 10)
+    monkeypatch.setattr("agent.core.hf_router_catalog.lookup", lambda _model: None)
+    monkeypatch.setattr(
+        "agent.core.hf_router_catalog.last_fetch_error",
+        lambda: "timed out",
+    )
+
+    estimate = yolo_budget.estimate_llm_call_cost(
+        model_name="org/model",
+        litellm_model="openai/org/model",
+        messages=[{"role": "user", "content": "hi"}],
+        max_output_tokens=100,
+    )
+
+    assert estimate.estimated_cost_usd is None
+    assert "Could not fetch HF Router price metadata" in estimate.block_reason
 
 
 def test_reservation_reconcile_replaces_estimate_with_actual_cost():
@@ -141,6 +161,57 @@ def test_reservation_reconcile_replaces_estimate_with_actual_cost():
     yolo_budget.reconcile_budget_reservation(session, "sandbox-1", 0.5)
 
     assert session.auto_approval_estimated_spend_usd == 1.5
+
+
+def test_zero_cost_reconcile_retains_reserved_estimate_by_default():
+    session = _session(cap=3.0, spent=1.0)
+
+    yolo_budget.reserve_session_budget(
+        session,
+        CostEstimate(estimated_cost_usd=1.25, billable=True),
+        spend_kind="llm_call",
+        reservation_id="llm-1",
+    )
+
+    yolo_budget.reconcile_budget_reservation(session, "llm-1", 0.0)
+
+    assert session.auto_approval_estimated_spend_usd == 2.25
+
+
+def test_zero_cost_reconcile_can_release_measured_zero_runtime_cost():
+    session = _session(cap=3.0, spent=1.0)
+
+    yolo_budget.reserve_session_budget(
+        session,
+        CostEstimate(estimated_cost_usd=1.25, billable=True),
+        spend_kind="sandbox",
+        reservation_id="sandbox-1",
+    )
+
+    yolo_budget.reconcile_budget_reservation(
+        session,
+        "sandbox-1",
+        0.0,
+        allow_zero_actual=True,
+    )
+
+    assert session.auto_approval_estimated_spend_usd == 1.0
+
+
+def test_yolo_output_bound_uses_remaining_router_context(monkeypatch):
+    session = _session()
+    monkeypatch.setattr(yolo_budget, "_count_prompt_tokens", lambda **_: 120_000)
+    monkeypatch.setattr(yolo_budget, "_router_context_length", lambda _model: 128_000)
+
+    params = yolo_budget.with_yolo_llm_output_bound(
+        {"model": "openai/org/model"},
+        session,
+        model_name="org/model",
+        litellm_model="openai/org/model",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+    assert params["max_completion_tokens"] == 8000
 
 
 @pytest.mark.asyncio

@@ -26,10 +26,12 @@ logger = logging.getLogger(__name__)
 
 _CATALOG_URL = "https://router.huggingface.co/v1/models"
 _CACHE_TTL_SECONDS = 300
+_CACHE_FAILURE_TTL_SECONDS = 15
 _HTTP_TIMEOUT_SECONDS = 5.0
 
 _cache: Optional[dict] = None
 _cache_time: float = 0.0
+_last_fetch_error: Optional[str] = None
 
 
 @dataclass
@@ -63,20 +65,23 @@ class ModelInfo:
 
 
 def _fetch_catalog(force: bool = False) -> dict:
-    global _cache, _cache_time
+    global _cache, _cache_time, _last_fetch_error
     now = time.time()
-    if not force and _cache is not None and now - _cache_time < _CACHE_TTL_SECONDS:
+    ttl = _CACHE_FAILURE_TTL_SECONDS if _last_fetch_error else _CACHE_TTL_SECONDS
+    if not force and _cache is not None and now - _cache_time < ttl:
         return _cache
     try:
         resp = httpx.get(_CATALOG_URL, timeout=_HTTP_TIMEOUT_SECONDS)
         resp.raise_for_status()
         _cache = resp.json()
         _cache_time = now
+        _last_fetch_error = None
     except Exception as e:
         logger.warning("Failed to fetch HF router catalog: %s", e)
+        _last_fetch_error = str(e)
         if _cache is None:
             _cache = {"data": []}
-            _cache_time = now
+        _cache_time = now
     return _cache
 
 
@@ -112,6 +117,10 @@ def lookup(model_id: str) -> Optional[ModelInfo]:
         if entry.get("id") == bare:
             return _parse_entry(entry)
     return None
+
+
+def last_fetch_error() -> Optional[str]:
+    return _last_fetch_error
 
 
 def fuzzy_suggest(model_id: str, limit: int = 3) -> list[str]:
