@@ -1,9 +1,12 @@
+import json
 from types import SimpleNamespace
 
+from litellm import ChatCompletionMessageToolCall as ToolCall
 import pytest
 
 from agent.config import Config
 from agent.core import agent_loop
+from agent.core.session import Event
 from agent.core.cost_estimation import CostEstimate
 
 
@@ -26,6 +29,19 @@ def _session(*, cap=5.0, spent=0.0, enabled=True):
         auto_approval_estimated_spend_usd=spent,
         sandbox=None,
     )
+
+
+class FakeApprovalSession:
+    def __init__(self, tool_call):
+        self.pending_approval = {"tool_calls": [tool_call]}
+        self.auto_approval_enabled = True
+        self.auto_approval_cost_cap_usd = 5.0
+        self.auto_approval_estimated_spend_usd = 4.5
+        self.config = _config()
+        self.events: list[Event] = []
+
+    async def send_event(self, event):
+        self.events.append(event)
 
 
 @pytest.mark.asyncio
@@ -187,3 +203,64 @@ async def test_manual_approval_records_spend_when_session_yolo_enabled(monkeypat
     )
 
     assert session.auto_approval_estimated_spend_usd == 1.75
+
+
+@pytest.mark.asyncio
+async def test_manual_approval_blocks_over_cap_without_recording_spend(monkeypatch):
+    async def fake_estimate(*args, **kwargs):
+        return CostEstimate(estimated_cost_usd=1.25, billable=True)
+
+    monkeypatch.setattr(agent_loop, "estimate_tool_cost", fake_estimate)
+    session = _session(enabled=True, cap=5.0, spent=4.5)
+
+    decision = await agent_loop._record_manual_approved_spend_if_needed(
+        session,
+        "sandbox_create",
+        {"hardware": "a10g-large"},
+    )
+
+    assert decision.allowed is False
+    assert "exceeds" in decision.block_reason
+    assert session.auto_approval_estimated_spend_usd == 4.5
+
+
+@pytest.mark.asyncio
+async def test_manual_approval_blocks_scheduled_jobs_while_yolo_enabled():
+    session = _session(enabled=True, cap=5.0, spent=0.0)
+
+    decision = await agent_loop._record_manual_approved_spend_if_needed(
+        session,
+        "hf_jobs",
+        {"operation": "scheduled run", "script": "print(1)", "schedule": "@hourly"},
+    )
+
+    assert decision.allowed is False
+    assert "Scheduled HF jobs" in decision.block_reason
+
+
+@pytest.mark.asyncio
+async def test_exec_approval_keeps_tool_pending_when_budget_blocks(monkeypatch):
+    async def fake_estimate(*args, **kwargs):
+        return CostEstimate(estimated_cost_usd=1.0, billable=True)
+
+    monkeypatch.setattr(agent_loop, "estimate_tool_cost", fake_estimate)
+    tool_call = ToolCall(
+        id="call_1",
+        type="function",
+        function={
+            "name": "sandbox_create",
+            "arguments": json.dumps({"hardware": "a10g-large"}),
+        },
+    )
+    session = FakeApprovalSession(tool_call)
+
+    await agent_loop.Handlers.exec_approval(
+        session,
+        [{"tool_call_id": "call_1", "approved": True}],
+    )
+
+    assert session.pending_approval == {"tool_calls": [tool_call]}
+    assert [event.event_type for event in session.events] == ["approval_required"]
+    event_data = session.events[0].data
+    assert event_data["auto_approval_blocked"] is True
+    assert event_data["tools"][0]["auto_approval_blocked"] is True

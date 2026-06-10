@@ -21,6 +21,7 @@ type DynamicToolPart = Extract<UIMessage['parts'][number], { type: 'dynamic-tool
 type ToolPartState = DynamicToolPart['state'];
 
 const USAGE_THRESHOLD_TOOL_NAME = 'usage_threshold';
+const YOLO_BUDGET_TOOL_NAME = 'yolo_budget';
 
 function formatApprovalUsd(value: unknown): string {
   const amount = typeof value === 'number' && Number.isFinite(value) ? value : Number(value || 0);
@@ -525,6 +526,7 @@ function InlineApproval({
   const { setRightPanelOpen, setLeftSidebarOpen } = useLayoutStore();
   const hasEditedScript = !!getEditedScript(toolCallId);
   const isUsageThreshold = toolName === USAGE_THRESHOLD_TOOL_NAME;
+  const isYoloBudget = toolName === YOLO_BUDGET_TOOL_NAME;
 
   const handleScriptClick = useCallback(() => {
     if (toolName === 'hf_jobs' && args?.script) {
@@ -584,6 +586,91 @@ function InlineApproval({
           <Button
             size="small"
             onClick={() => onResolve(toolCallId, false, 'Stopped at usage warning')}
+            sx={{
+              flex: 1,
+              textTransform: 'none',
+              border: '1px solid rgba(255,255,255,0.05)',
+              color: 'var(--accent-red)',
+              fontSize: '0.75rem',
+              py: 0.75,
+              borderRadius: '8px',
+              '&:hover': { bgcolor: 'rgba(224,90,79,0.05)', borderColor: 'var(--accent-red)' },
+            }}
+          >
+            Stop here
+          </Button>
+          <Button
+            size="small"
+            onClick={() => onResolve(toolCallId, true)}
+            sx={{
+              flex: 1,
+              textTransform: 'none',
+              border: '1px solid var(--accent-green)',
+              color: 'var(--accent-green)',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              py: 0.75,
+              borderRadius: '8px',
+              bgcolor: 'rgba(47,204,113,0.08)',
+              '&:hover': { bgcolor: 'rgba(47,204,113,0.1)' },
+            }}
+          >
+            Continue
+          </Button>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (isYoloBudget) {
+    return (
+      <Box sx={{ px: 1.5, py: 1.5, borderTop: '1px solid var(--tool-border)' }}>
+        <Alert
+          severity="warning"
+          sx={{
+            mb: 1.5,
+            py: 0.5,
+            bgcolor: 'rgba(245,158,11,0.08)',
+            border: '1px solid rgba(245,158,11,0.18)',
+            color: 'var(--text)',
+            '& .MuiAlert-icon': { color: 'var(--accent-yellow)' },
+          }}
+        >
+          <Typography variant="body2" sx={{ fontSize: '0.74rem' }}>
+            YOLO cap paused session usage: {String(args?.reason || 'cap reached')}
+          </Typography>
+        </Alert>
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: '1fr auto',
+            gap: 0.75,
+            mb: 1.5,
+          }}
+        >
+          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+            Current spend
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+            {formatApprovalUsd(args?.current_spend_usd)}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+            Remaining cap
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+            {formatApprovalUsd(args?.remaining_cap_usd)}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+            Next estimate
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+            {formatApprovalUsd(args?.estimated_next_usd)}
+          </Typography>
+        </Box>
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <Button
+            size="small"
+            onClick={() => onResolve(toolCallId, false, 'Stopped at YOLO cap')}
             sx={{
               flex: 1,
               textTransform: 'none',

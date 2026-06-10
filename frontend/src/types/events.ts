@@ -66,6 +66,11 @@ export interface PlanUpdateEventData {
 export interface ApprovalRequiredEventData {
   tools: ApprovalToolItem[];
   count: number;
+  yolo_budget?: boolean;
+  auto_approval_blocked?: boolean;
+  block_reason?: string | null;
+  estimated_cost_usd?: number | null;
+  remaining_cap_usd?: number | null;
 }
 
 export interface ApprovalToolItem {

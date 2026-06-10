@@ -23,6 +23,7 @@ import { useLayoutStore } from '@/store/layoutStore';
 import { logger } from '@/utils/logger';
 
 const USAGE_THRESHOLD_TOOL_NAME = 'usage_threshold';
+const YOLO_BUDGET_TOOL_NAME = 'yolo_budget';
 
 interface UseAgentChatOptions {
   sessionId: string;
@@ -65,7 +66,9 @@ function pendingApprovalIds(items: PendingApprovalItem[] | undefined): Set<strin
 function waitingApprovalStatus(items: PendingApprovalItem[] | undefined) {
   return {
     type: 'waiting-approval' as const,
-    approvalKind: items?.some((item) => item.tool === USAGE_THRESHOLD_TOOL_NAME)
+    approvalKind: items?.some((item) =>
+      item.tool === USAGE_THRESHOLD_TOOL_NAME || item.tool === YOLO_BUDGET_TOOL_NAME
+    )
       ? 'usage' as const
       : 'tool' as const,
   };

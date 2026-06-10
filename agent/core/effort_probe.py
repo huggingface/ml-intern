@@ -29,6 +29,11 @@ from typing import Any
 from litellm import acompletion
 
 from agent.core.llm_params import UnsupportedEffortError, _resolve_llm_params
+from agent.core.yolo_budget import (
+    reconcile_budget_reservation,
+    release_budget_reservation,
+    reserve_llm_call_budget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,24 +201,52 @@ async def probe_effort(
             continue
 
         attempts += 1
+        probe_messages = [{"role": "user", "content": "ping"}]
+        params = {**params, "max_tokens": _PROBE_MAX_TOKENS}
+        reservation_id = None
+        if session is not None:
+            budget = await reserve_llm_call_budget(
+                session,
+                model_name=model_name,
+                messages=probe_messages,
+                tools=None,
+                llm_params=params,
+                spend_kind="effort_probe",
+            )
+            if budget.blocked:
+                return ProbeOutcome(
+                    effective_effort=None,
+                    attempts=attempts,
+                    elapsed_ms=int((loop.time() - start) * 1000),
+                    note="YOLO budget paused effort probe",
+                )
+            params = budget.llm_params
+            reservation_id = (
+                budget.decision.reservation.reservation_id
+                if budget.decision.reservation
+                else None
+            )
         try:
             _t0 = time.monotonic()
-            response = await asyncio.wait_for(
-                acompletion(
-                    messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=_PROBE_MAX_TOKENS,
-                    stream=False,
-                    **params,
-                ),
-                timeout=_PROBE_TIMEOUT,
-            )
+            try:
+                response = await asyncio.wait_for(
+                    acompletion(
+                        messages=probe_messages,
+                        stream=False,
+                        **params,
+                    ),
+                    timeout=_PROBE_TIMEOUT,
+                )
+            except Exception:
+                release_budget_reservation(session, reservation_id)
+                raise
             if session is not None:
                 # Best-effort telemetry — never let a logging blip propagate
                 # out of the probe and break model switching.
                 try:
                     from agent.core import telemetry
 
-                    await telemetry.record_llm_call(
+                    usage = await telemetry.record_llm_call(
                         session,
                         model=model_name,
                         response=response,
@@ -222,6 +255,11 @@ async def probe_effort(
                         if response.choices
                         else None,
                         kind="effort_probe",
+                    )
+                    reconcile_budget_reservation(
+                        session,
+                        reservation_id,
+                        usage.get("cost_usd") if isinstance(usage, dict) else None,
                     )
                 except Exception as _telem_err:
                     logger.debug("effort_probe telemetry failed: %s", _telem_err)

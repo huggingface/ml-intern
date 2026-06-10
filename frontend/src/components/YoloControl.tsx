@@ -93,7 +93,7 @@ export default function YoloControl() {
 
   return (
     <>
-      <Tooltip title={enabled ? 'Disable session YOLO auto-approval' : 'Enable session YOLO auto-approval'}>
+      <Tooltip title={enabled ? 'Disable session YOLO usage cap' : 'Enable session YOLO usage cap'}>
         <span>
           <Button
             size="small"
@@ -127,7 +127,7 @@ export default function YoloControl() {
         <DialogTitle sx={{ pb: 1 }}>YOLO Budget</DialogTitle>
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, pt: 1 }}>
           <Typography variant="body2" color="text.secondary">
-            Auto-approval is active for this session. Scheduled HF jobs still require approval.
+            Auto-approval is active for this session. Inference, HF Jobs, and sandboxes count toward this cap. Scheduled HF jobs still require approval.
           </Typography>
           <TextField
             autoFocus

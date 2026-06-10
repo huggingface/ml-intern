@@ -931,6 +931,38 @@ async def test_lazy_restore_preserves_auto_approval_policy():
 
 
 @pytest.mark.asyncio
+async def test_update_session_auto_approval_seeds_existing_session_usage(monkeypatch):
+    store = RestoreStore()
+    manager = _manager_with_store(store)
+    agent_session = _runtime_agent_session("seed-yolo")
+    manager.sessions["seed-yolo"] = agent_session
+
+    async def fake_current_spend(*args, **kwargs):
+        assert kwargs["use_cache"] is False
+        return 2.75, "app_telemetry_session"
+
+    async def fake_persist(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "_current_session_usage_spend", fake_current_spend)
+    monkeypatch.setattr(manager, "persist_session_snapshot", fake_persist)
+
+    summary = await manager.update_session_auto_approval(
+        "seed-yolo",
+        enabled=True,
+        cost_cap_usd=None,
+        cap_provided=False,
+    )
+
+    assert summary == {
+        "enabled": True,
+        "cost_cap_usd": 5.0,
+        "estimated_spend_usd": 2.75,
+        "remaining_usd": 2.25,
+    }
+
+
+@pytest.mark.asyncio
 async def test_lazy_restore_injects_sandbox_reset_note_when_session_had_sandbox():
     store = RestoreStore(
         metadata={

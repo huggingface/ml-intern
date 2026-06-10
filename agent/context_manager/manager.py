@@ -149,20 +149,50 @@ async def summarize_messages(
     llm_params = with_prompt_cache_params(
         llm_params, session_id=getattr(session, "session_id", None)
     )
+    llm_params = {**llm_params, "max_completion_tokens": max_tokens}
     prompt_messages, tool_specs = with_prompt_caching(
         prompt_messages, tool_specs, llm_params
     )
+    reservation_id = None
+    if session is not None:
+        from agent.core.yolo_budget import (
+            YoloBudgetPaused,
+            reconcile_budget_reservation,
+            release_budget_reservation,
+            reserve_llm_call_budget,
+        )
+
+        budget = await reserve_llm_call_budget(
+            session,
+            model_name=model_name,
+            messages=prompt_messages,
+            tools=tool_specs,
+            llm_params=llm_params,
+            spend_kind=kind,
+        )
+        if budget.blocked:
+            raise YoloBudgetPaused("YOLO budget paused before LLM summarization")
+        llm_params = budget.llm_params
+        reservation_id = (
+            budget.decision.reservation.reservation_id
+            if budget.decision.reservation
+            else None
+        )
     _t0 = time.monotonic()
-    response = await acompletion(
-        messages=prompt_messages,
-        max_completion_tokens=max_tokens,
-        tools=tool_specs,
-        **llm_params,
-    )
+    try:
+        response = await acompletion(
+            messages=prompt_messages,
+            tools=tool_specs,
+            **llm_params,
+        )
+    except Exception:
+        if session is not None:
+            release_budget_reservation(session, reservation_id)
+        raise
     if session is not None:
         from agent.core import telemetry
 
-        await telemetry.record_llm_call(
+        usage = await telemetry.record_llm_call(
             session,
             model=model_name,
             response=response,
@@ -171,6 +201,11 @@ async def summarize_messages(
             if response.choices
             else None,
             kind=kind,
+        )
+        reconcile_budget_reservation(
+            session,
+            reservation_id,
+            usage.get("cost_usd") if isinstance(usage, dict) else None,
         )
     summary = response.choices[0].message.content or ""
     completion_tokens = response.usage.completion_tokens if response.usage else 0

@@ -40,6 +40,17 @@ from agent.core.usage_thresholds import (
     is_usage_threshold_pending,
     next_usage_warning_threshold,
 )
+from agent.core.yolo_budget import (
+    BudgetDecision,
+    check_session_budget,
+    is_yolo_budget_pending,
+    reconcile_budget_reservation,
+    reserve_llm_call_budget,
+    release_budget_reservation,
+    reserve_session_budget,
+    yolo_budget_can_resume,
+    yolo_budget_pending_to_tool,
+)
 from agent.tools.jobs_tool import CPU_FLAVORS
 from agent.tools.sandbox_tool import (
     DEFAULT_CPU_SANDBOX_HARDWARE,
@@ -331,34 +342,6 @@ def _effective_yolo_enabled(session: Session | None, config: Config | None) -> b
     )
 
 
-def _remaining_budget_after_reservations(
-    session: Session | None, reserved_spend_usd: float
-) -> float | None:
-    if not session or getattr(session, "auto_approval_cost_cap_usd", None) is None:
-        return None
-    cap = float(getattr(session, "auto_approval_cost_cap_usd") or 0.0)
-    spent = float(getattr(session, "auto_approval_estimated_spend_usd", 0.0) or 0.0)
-    return round(max(0.0, cap - spent - reserved_spend_usd), 4)
-
-
-def _budget_block_reason(
-    estimate: CostEstimate,
-    *,
-    remaining_cap_usd: float | None,
-) -> str | None:
-    if estimate.estimated_cost_usd is None:
-        return estimate.block_reason or "Could not estimate the cost safely."
-    if (
-        remaining_cap_usd is not None
-        and estimate.estimated_cost_usd > remaining_cap_usd
-    ):
-        return (
-            f"Estimated cost ${estimate.estimated_cost_usd:.2f} exceeds "
-            f"remaining YOLO cap ${remaining_cap_usd:.2f}."
-        )
-    return None
-
-
 async def _approval_decision(
     tool_name: str,
     tool_args: dict,
@@ -373,10 +356,13 @@ async def _approval_decision(
     # Scheduled jobs are recurring/unbounded enough that YOLO never bypasses
     # the human confirmation, including legacy config.yolo_mode.
     if _is_scheduled_hf_job_run(tool_name, tool_args):
+        reason = "Scheduled HF jobs always require manual approval."
+        if _session_auto_approval_enabled(session):
+            reason = "Scheduled HF jobs require disabling YOLO because their recurring cost is unbounded."
         return ApprovalDecision(
             requires_approval=True,
             auto_approval_blocked=_effective_yolo_enabled(session, config),
-            block_reason="Scheduled HF jobs always require manual approval.",
+            block_reason=reason,
         )
 
     yolo_enabled = _effective_yolo_enabled(session, config)
@@ -387,29 +373,32 @@ async def _approval_decision(
     session_yolo_enabled = _session_auto_approval_enabled(session)
     if yolo_enabled and budgeted_target and session_yolo_enabled:
         estimate = await estimate_tool_cost(tool_name, tool_args, session=session)
-        remaining = _remaining_budget_after_reservations(session, reserved_spend_usd)
-        reason = _budget_block_reason(estimate, remaining_cap_usd=remaining)
-        if reason:
+        budget = check_session_budget(
+            session,
+            estimate,
+            reserved_spend_usd=reserved_spend_usd,
+        )
+        if not budget.allowed:
             return ApprovalDecision(
                 requires_approval=True,
                 auto_approval_blocked=True,
-                block_reason=reason,
-                estimated_cost_usd=estimate.estimated_cost_usd,
-                remaining_cap_usd=remaining,
+                block_reason=budget.block_reason,
+                estimated_cost_usd=budget.estimated_cost_usd,
+                remaining_cap_usd=budget.remaining_cap_usd,
                 billable=estimate.billable,
             )
         if base_requires_approval:
             return ApprovalDecision(
                 requires_approval=False,
                 auto_approved=True,
-                estimated_cost_usd=estimate.estimated_cost_usd,
-                remaining_cap_usd=remaining,
+                estimated_cost_usd=budget.estimated_cost_usd,
+                remaining_cap_usd=budget.remaining_cap_usd,
                 billable=estimate.billable,
             )
         return ApprovalDecision(
             requires_approval=False,
-            estimated_cost_usd=estimate.estimated_cost_usd,
-            remaining_cap_usd=remaining,
+            estimated_cost_usd=budget.estimated_cost_usd,
+            remaining_cap_usd=budget.remaining_cap_usd,
             billable=estimate.billable,
         )
 
@@ -419,36 +408,79 @@ async def _approval_decision(
     return ApprovalDecision(requires_approval=base_requires_approval)
 
 
-def _record_estimated_spend(session: Session, decision: ApprovalDecision) -> None:
+def _record_estimated_spend(
+    session: Session,
+    decision: ApprovalDecision,
+    *,
+    reservation_id: str | None = None,
+) -> BudgetDecision:
     if not decision.billable or decision.estimated_cost_usd is None:
-        return
-    if hasattr(session, "add_auto_approval_estimated_spend"):
-        session.add_auto_approval_estimated_spend(decision.estimated_cost_usd)
-    else:
-        session.auto_approval_estimated_spend_usd = round(
-            float(getattr(session, "auto_approval_estimated_spend_usd", 0.0) or 0.0)
-            + float(decision.estimated_cost_usd),
-            4,
-        )
+        return BudgetDecision(allowed=True, billable=False)
+    return reserve_session_budget(
+        session,
+        CostEstimate(
+            estimated_cost_usd=decision.estimated_cost_usd,
+            billable=True,
+        ),
+        spend_kind="tool",
+        reservation_id=reservation_id,
+    )
 
 
 async def _record_manual_approved_spend_if_needed(
     session: Session,
     tool_name: str,
     tool_args: dict,
-) -> None:
+    *,
+    tool_call_id: str | None = None,
+) -> BudgetDecision:
     if not _session_auto_approval_enabled(session):
-        return
+        return BudgetDecision(allowed=True)
+    if _is_scheduled_hf_job_run(tool_name, tool_args):
+        return BudgetDecision(
+            allowed=False,
+            billable=True,
+            block_reason=(
+                "Scheduled HF jobs require disabling YOLO because their recurring "
+                "cost is unbounded."
+            ),
+        )
     if not _is_budgeted_auto_approval_target(tool_name, tool_args):
-        return
+        return BudgetDecision(allowed=True)
     estimate = await estimate_tool_cost(tool_name, tool_args, session=session)
-    _record_estimated_spend(
+    return reserve_session_budget(
         session,
-        ApprovalDecision(
-            requires_approval=False,
-            billable=estimate.billable,
-            estimated_cost_usd=estimate.estimated_cost_usd,
-        ),
+        estimate,
+        spend_kind=tool_name,
+        reservation_id=tool_call_id,
+    )
+
+
+async def _check_manual_approved_budget(
+    session: Session,
+    tool_name: str,
+    tool_args: dict,
+    *,
+    reserved_spend_usd: float = 0.0,
+) -> BudgetDecision:
+    if not _session_auto_approval_enabled(session):
+        return BudgetDecision(allowed=True)
+    if _is_scheduled_hf_job_run(tool_name, tool_args):
+        return BudgetDecision(
+            allowed=False,
+            billable=True,
+            block_reason=(
+                "Scheduled HF jobs require disabling YOLO because their recurring "
+                "cost is unbounded."
+            ),
+        )
+    if not _is_budgeted_auto_approval_target(tool_name, tool_args):
+        return BudgetDecision(allowed=True)
+    estimate = await estimate_tool_cost(tool_name, tool_args, session=session)
+    return check_session_budget(
+        session,
+        estimate,
+        reserved_spend_usd=reserved_spend_usd,
     )
 
 
@@ -668,6 +700,7 @@ async def _compact_and_notify(session: Session) -> None:
     inference budget while the session never reached the upload path.
     """
     from agent.context_manager.manager import CompactionFailedError
+    from agent.core.yolo_budget import YoloBudgetPaused
 
     cm = session.context_manager
     old_usage = cm.running_context_usage
@@ -685,6 +718,8 @@ async def _compact_and_notify(session: Session) -> None:
             hf_token=session.hf_token,
             session=session,
         )
+    except YoloBudgetPaused:
+        return
     except CompactionFailedError as e:
         logger.error(
             "Compaction failed for session %s: %s — terminating session",
@@ -1156,9 +1191,12 @@ class Handlers:
         history stays valid) and notifies the frontend that those tools were
         abandoned.
         """
-        if is_usage_threshold_pending(session.pending_approval):
+        if is_usage_threshold_pending(
+            session.pending_approval
+        ) or is_yolo_budget_pending(session.pending_approval):
             pending = session.pending_approval
             tool_call_id = str(pending.get("tool_call_id") or "")
+            tool_name = str(pending.get("kind") or USAGE_THRESHOLD_TOOL_NAME)
             session.pending_approval = None
             if tool_call_id:
                 await session.send_event(
@@ -1166,7 +1204,7 @@ class Handlers:
                         event_type="tool_state_change",
                         data={
                             "tool_call_id": tool_call_id,
-                            "tool": USAGE_THRESHOLD_TOOL_NAME,
+                            "tool": tool_name,
                             "state": "abandoned",
                         },
                     )
@@ -1259,6 +1297,8 @@ class Handlers:
             # ── Cancellation check: before LLM call ──
             if session.is_cancelled:
                 break
+            if session.pending_approval:
+                return final_response
 
             # Compact before calling the LLM if context is near the limit.
             # When _compact_and_notify catches CompactionFailedError it sets
@@ -1269,6 +1309,8 @@ class Handlers:
             await _compact_and_notify(session)
             if not session.is_running:
                 break
+            if session.pending_approval:
+                return final_response
 
             if await _maybe_pause_for_usage_threshold(
                 session,
@@ -1322,14 +1364,38 @@ class Handlers:
                         session.config.model_name
                     ),
                 )
-                if session.stream:
-                    llm_result = await _call_llm_streaming(
-                        session, messages, tools, llm_params
-                    )
-                else:
-                    llm_result = await _call_llm_non_streaming(
-                        session, messages, tools, llm_params
-                    )
+                budget = await reserve_llm_call_budget(
+                    session,
+                    model_name=session.config.model_name,
+                    messages=messages,
+                    tools=tools,
+                    llm_params=llm_params,
+                    spend_kind="llm_call",
+                )
+                if budget.blocked:
+                    return final_response
+                reservation_id = (
+                    budget.decision.reservation.reservation_id
+                    if budget.decision.reservation
+                    else None
+                )
+                try:
+                    if session.stream:
+                        llm_result = await _call_llm_streaming(
+                            session, messages, tools, budget.llm_params
+                        )
+                    else:
+                        llm_result = await _call_llm_non_streaming(
+                            session, messages, tools, budget.llm_params
+                        )
+                except Exception:
+                    release_budget_reservation(session, reservation_id)
+                    raise
+                reconcile_budget_reservation(
+                    session,
+                    reservation_id,
+                    llm_result.usage.get("cost_usd"),
+                )
 
                 content = llm_result.content
                 tool_calls_acc = llm_result.tool_calls_acc
@@ -1611,10 +1677,25 @@ class Handlers:
                         if not valid:
                             return (tc, name, args, err, False)
                         if decision.billable:
-                            _record_estimated_spend(session, decision)
+                            budget = _record_estimated_spend(
+                                session,
+                                decision,
+                                reservation_id=tc.id,
+                            )
+                            if not budget.allowed:
+                                return (
+                                    tc,
+                                    name,
+                                    args,
+                                    budget.block_reason
+                                    or "YOLO budget blocked this tool call.",
+                                    False,
+                                )
                         out, ok = await session.tool_router.call_tool(
                             name, args, session=session, tool_call_id=tc.id
                         )
+                        if not ok and decision.billable:
+                            release_budget_reservation(session, tc.id)
                         return (tc, name, args, out, ok)
 
                     gather_task = asyncio.ensure_future(
@@ -1957,6 +2038,137 @@ class Handlers:
         await Handlers.run_agent(session, "")
 
     @staticmethod
+    async def _exec_yolo_budget_approval(
+        session: Session, approvals: list[dict]
+    ) -> None:
+        pending = (
+            session.pending_approval
+            if isinstance(session.pending_approval, dict)
+            else {}
+        )
+        tool_call_id = str(pending.get("tool_call_id") or "")
+        approval = next(
+            (item for item in approvals if item.get("tool_call_id") == tool_call_id),
+            {"approved": False},
+        )
+        approved = bool(approval.get("approved"))
+
+        if not tool_call_id:
+            session.pending_approval = None
+            await session.send_event(
+                Event(
+                    event_type="error",
+                    data={"error": "YOLO budget approval is missing its approval id"},
+                )
+            )
+            return
+
+        if not approved:
+            session.pending_approval = None
+            feedback = str(approval.get("feedback") or "Stopped by user").strip()
+            await session.send_event(
+                Event(
+                    event_type="tool_state_change",
+                    data={
+                        "tool_call_id": tool_call_id,
+                        "tool": "yolo_budget",
+                        "state": "rejected",
+                    },
+                )
+            )
+            await session.send_event(
+                Event(
+                    event_type="tool_output",
+                    data={
+                        "tool": "yolo_budget",
+                        "tool_call_id": tool_call_id,
+                        "output": feedback,
+                        "success": False,
+                    },
+                )
+            )
+            await session.send_event(Event(event_type="interrupted"))
+            session.increment_turn()
+            await session.auto_save_if_needed()
+            return
+
+        can_resume, reason = yolo_budget_can_resume(session, pending)
+        if not can_resume:
+            pending["reason"] = reason
+            pending["current_spend_usd"] = round(
+                float(
+                    getattr(session, "auto_approval_estimated_spend_usd", 0.0) or 0.0
+                ),
+                6,
+            )
+            pending["remaining_cap_usd"] = (
+                None
+                if getattr(session, "auto_approval_cost_cap_usd", None) is None
+                else session.auto_approval_remaining_usd
+            )
+            tool = yolo_budget_pending_to_tool(pending)
+            await session.send_event(
+                Event(
+                    event_type="approval_required",
+                    data={
+                        "tools": [tool],
+                        "count": 1,
+                        "yolo_budget": True,
+                        "auto_approval_blocked": True,
+                        "block_reason": reason,
+                        "estimated_cost_usd": pending.get("estimated_next_usd"),
+                        "remaining_cap_usd": pending.get("remaining_cap_usd"),
+                    },
+                )
+            )
+            return
+
+        session.pending_approval = None
+        await session.send_event(
+            Event(
+                event_type="tool_state_change",
+                data={
+                    "tool_call_id": tool_call_id,
+                    "tool": "yolo_budget",
+                    "state": "approved",
+                },
+            )
+        )
+        await session.send_event(
+            Event(
+                event_type="tool_output",
+                data={
+                    "tool": "yolo_budget",
+                    "tool_call_id": tool_call_id,
+                    "output": "YOLO budget check acknowledged.",
+                    "success": True,
+                },
+            )
+        )
+
+        if pending.get("continuation") == "complete_turn":
+            final_response = pending.get("final_response")
+            await session.send_event(
+                Event(
+                    event_type="turn_complete",
+                    data={
+                        "history_size": int(
+                            pending.get("history_size")
+                            or len(session.context_manager.items)
+                        ),
+                        "final_response": final_response
+                        if isinstance(final_response, str)
+                        else None,
+                    },
+                )
+            )
+            session.increment_turn()
+            await session.auto_save_if_needed()
+            return
+
+        await Handlers.run_agent(session, "")
+
+    @staticmethod
     async def exec_approval(session: Session, approvals: list[dict]) -> None:
         """Handle batch job execution approval"""
         if not session.pending_approval:
@@ -1970,6 +2182,9 @@ class Handlers:
 
         if is_usage_threshold_pending(session.pending_approval):
             await Handlers._exec_usage_threshold_approval(session, approvals)
+            return
+        if is_yolo_budget_pending(session.pending_approval):
+            await Handlers._exec_yolo_budget_approval(session, approvals)
             return
 
         tool_calls = session.pending_approval.get("tool_calls", [])
@@ -2037,6 +2252,59 @@ class Handlers:
             else:
                 rejected_tasks.append((tc, tool_name, approval_decision))
 
+        reserved_manual_spend_usd = 0.0
+        blocked_manual_budget: tuple[ToolCall, str, BudgetDecision] | None = None
+        for tc, tool_name, tool_args, _was_edited in approved_tasks:
+            budget = await _check_manual_approved_budget(
+                session,
+                tool_name,
+                tool_args,
+                reserved_spend_usd=reserved_manual_spend_usd,
+            )
+            if not budget.allowed:
+                blocked_manual_budget = (tc, tool_name, budget)
+                break
+            if budget.billable and budget.estimated_cost_usd is not None:
+                reserved_manual_spend_usd += budget.estimated_cost_usd
+
+        if blocked_manual_budget is not None:
+            blocked_tc, _blocked_tool, blocked_budget = blocked_manual_budget
+            tools_data = []
+            for tc in tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    args = {}
+                payload = {
+                    "tool": getattr(tc.function, "name", None),
+                    "arguments": args,
+                    "tool_call_id": tc.id,
+                }
+                if tc.id == blocked_tc.id:
+                    payload.update(
+                        {
+                            "auto_approval_blocked": True,
+                            "block_reason": blocked_budget.block_reason,
+                            "estimated_cost_usd": blocked_budget.estimated_cost_usd,
+                            "remaining_cap_usd": blocked_budget.remaining_cap_usd,
+                        }
+                    )
+                tools_data.append(payload)
+            await session.send_event(
+                Event(
+                    event_type="approval_required",
+                    data={
+                        "tools": tools_data,
+                        "count": len(tools_data),
+                        "auto_approval_blocked": True,
+                        "block_reason": blocked_budget.block_reason,
+                        "estimated_cost_usd": blocked_budget.estimated_cost_usd,
+                        "remaining_cap_usd": blocked_budget.remaining_cap_usd,
+                    },
+                )
+            )
+            return
+
         # Clear pending approval immediately so a page refresh during
         # execution won't re-show the approval dialog.
         session.pending_approval = None
@@ -2084,11 +2352,26 @@ class Handlers:
                 )
             )
 
-            await _record_manual_approved_spend_if_needed(session, tool_name, tool_args)
+            budget = await _record_manual_approved_spend_if_needed(
+                session,
+                tool_name,
+                tool_args,
+                tool_call_id=tc.id,
+            )
+            if not budget.allowed:
+                return (
+                    tc,
+                    tool_name,
+                    budget.block_reason or "YOLO budget blocked this tool call.",
+                    False,
+                    was_edited,
+                )
 
             output, success = await session.tool_router.call_tool(
                 tool_name, tool_args, session=session, tool_call_id=tc.id
             )
+            if not success and budget.reservation:
+                release_budget_reservation(session, budget.reservation.reservation_id)
 
             return (tc, tool_name, output, success, was_edited)
 

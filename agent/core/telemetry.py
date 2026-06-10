@@ -118,22 +118,23 @@ async def record_llm_call(
     from agent.core.session import Event  # local import to avoid cycle
 
     try:
+        payload = {
+            "model": model,
+            "latency_ms": latency_ms,
+            "finish_reason": finish_reason,
+            "cost_usd": cost_usd,
+            "kind": kind,
+            **usage,
+        }
         await session.send_event(
             Event(
                 event_type="llm_call",
-                data={
-                    "model": model,
-                    "latency_ms": latency_ms,
-                    "finish_reason": finish_reason,
-                    "cost_usd": cost_usd,
-                    "kind": kind,
-                    **usage,
-                },
+                data=payload,
             )
         )
     except Exception as e:
         logger.debug("record_llm_call failed (non-fatal): %s", e)
-    return usage
+    return {"cost_usd": cost_usd, **usage}
 
 
 # ── hf_jobs ────────────────────────────────────────────────────────────────
@@ -191,7 +192,7 @@ async def record_hf_job_complete(
     flavor: str,
     final_status: str,
     submit_ts: float,
-) -> None:
+) -> dict:
     from agent.core.session import Event
 
     try:
@@ -208,23 +209,26 @@ async def record_hf_job_complete(
                 4,
             )
             cost_estimate_source = "runtime_price_catalog"
+        payload = {
+            "job_id": getattr(job, "id", None),
+            "flavor": flavor,
+            "final_status": final_status,
+            "wall_time_s": wall_time_s,
+            "billable_seconds_estimate": billable_seconds,
+            "price_usd_per_hour": price_usd_per_hour,
+            "estimated_cost_usd": estimated_cost_usd,
+            "cost_estimate_source": cost_estimate_source,
+        }
         await session.send_event(
             Event(
                 event_type="hf_job_complete",
-                data={
-                    "job_id": getattr(job, "id", None),
-                    "flavor": flavor,
-                    "final_status": final_status,
-                    "wall_time_s": wall_time_s,
-                    "billable_seconds_estimate": billable_seconds,
-                    "price_usd_per_hour": price_usd_per_hour,
-                    "estimated_cost_usd": estimated_cost_usd,
-                    "cost_estimate_source": cost_estimate_source,
-                },
+                data=payload,
             )
         )
+        return payload
     except Exception as e:
         logger.debug("record_hf_job_complete failed (non-fatal): %s", e)
+    return {}
 
 
 # ── sandbox ─────────────────────────────────────────────────────────────────
@@ -256,23 +260,41 @@ async def record_sandbox_create(
         logger.debug("record_sandbox_create failed (non-fatal): %s", e)
 
 
-async def record_sandbox_destroy(session: Any, sandbox: Any) -> None:
+async def record_sandbox_destroy(session: Any, sandbox: Any) -> dict:
     from agent.core.session import Event
 
     try:
         created = getattr(session, "_sandbox_created_at", None)
         lifetime_s = int(time.monotonic() - created) if created else None
+        hardware = getattr(session, "sandbox_hardware", None) or "cpu-basic"
+        estimated_cost_usd = None
+        try:
+            from agent.core.cost_estimation import SPACE_PRICE_USD_PER_HOUR
+
+            price_usd_per_hour = SPACE_PRICE_USD_PER_HOUR.get(str(hardware))
+            if price_usd_per_hour is not None and lifetime_s is not None:
+                estimated_cost_usd = round(
+                    float(price_usd_per_hour) * (max(0, lifetime_s) / 3600),
+                    4,
+                )
+        except Exception:
+            estimated_cost_usd = None
+        payload = {
+            "sandbox_id": getattr(sandbox, "space_id", None),
+            "hardware": hardware,
+            "lifetime_s": lifetime_s,
+            "estimated_cost_usd": estimated_cost_usd,
+        }
         await session.send_event(
             Event(
                 event_type="sandbox_destroy",
-                data={
-                    "sandbox_id": getattr(sandbox, "space_id", None),
-                    "lifetime_s": lifetime_s,
-                },
+                data=payload,
             )
         )
+        return payload
     except Exception as e:
         logger.debug("record_sandbox_destroy failed (non-fatal): %s", e)
+    return {}
 
 
 # ── feedback ───────────────────────────────────────────────────────────────

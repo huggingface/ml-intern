@@ -711,13 +711,23 @@ class HfJobsTool:
             if self.session and submit_ts is not None:
                 from agent.core import telemetry
 
-                await telemetry.record_hf_job_complete(
+                usage = await telemetry.record_hf_job_complete(
                     self.session,
                     job,
                     flavor=flavor,
                     final_status=final_status,
                     submit_ts=submit_ts,
                 )
+                if self.tool_call_id:
+                    from agent.core.yolo_budget import reconcile_budget_reservation
+
+                    reconcile_budget_reservation(
+                        self.session,
+                        self.tool_call_id,
+                        usage.get("estimated_cost_usd")
+                        if isinstance(usage, dict)
+                        else None,
+                    )
 
             # Untrack job ID (completed or failed, no longer needs cancellation)
             if self.session:

@@ -28,6 +28,12 @@ from agent.core.usage_thresholds import (
     normalize_usage_threshold,
     usage_threshold_pending_to_tool,
 )
+from agent.core.yolo_budget import (
+    YOLO_BUDGET_TOOL_NAME,
+    is_yolo_budget_pending,
+    seed_session_spend,
+    yolo_budget_pending_to_tool,
+)
 from agent.messaging.gateway import NotificationGateway
 
 # Get project root (parent of backend directory)
@@ -284,7 +290,7 @@ class SessionManager:
 
     def _serialize_pending_approval(self, session: Session) -> list[dict[str, Any]]:
         pending = session.pending_approval or {}
-        if is_usage_threshold_pending(pending):
+        if is_usage_threshold_pending(pending) or is_yolo_budget_pending(pending):
             return [dict(pending)]
         tool_calls = pending.get("tool_calls") or []
         serialized: list[dict[str, Any]] = []
@@ -300,6 +306,8 @@ class SessionManager:
         pending = session.pending_approval or {}
         if is_usage_threshold_pending(pending):
             return [usage_threshold_pending_to_tool(pending)]
+        if is_yolo_budget_pending(pending):
+            return [yolo_budget_pending_to_tool(pending)]
         tool_calls = pending.get("tool_calls") or []
         if not tool_calls:
             return None
@@ -325,7 +333,10 @@ class SessionManager:
             session.pending_approval = None
             return
         first = pending_approval[0]
-        if isinstance(first, dict) and first.get("kind") == USAGE_THRESHOLD_TOOL_NAME:
+        if isinstance(first, dict) and first.get("kind") in {
+            USAGE_THRESHOLD_TOOL_NAME,
+            YOLO_BUDGET_TOOL_NAME,
+        }:
             session.pending_approval = dict(first)
             return
         from litellm import ChatCompletionMessageToolCall as ToolCall
@@ -359,6 +370,8 @@ class SessionManager:
         first = pending_approval[0]
         if isinstance(first, dict) and first.get("kind") == USAGE_THRESHOLD_TOOL_NAME:
             return [usage_threshold_pending_to_tool(first)]
+        if isinstance(first, dict) and first.get("kind") == YOLO_BUDGET_TOOL_NAME:
+            return [yolo_budget_pending_to_tool(first)]
         result: list[dict[str, Any]] = []
         for raw in pending_approval:
             if "function" in raw:
@@ -440,14 +453,19 @@ class SessionManager:
                 return None
 
         hf_account = response.get("hf_account")
+        session_bucket = response.get("session")
+        sandbox_spend = 0.0
+        if isinstance(session_bucket, dict):
+            sandbox_spend = (
+                coerce_spend(session_bucket.get("sandbox_estimated_usd")) or 0.0
+            )
         if isinstance(hf_account, dict):
             current_session = hf_account.get("current_session")
             if isinstance(current_session, dict):
                 spend = coerce_spend(current_session.get("total_usd"))
                 if spend is not None:
-                    return spend, "hf_billing_current_session"
+                    return spend + sandbox_spend, "hf_billing_current_session"
 
-        session_bucket = response.get("session")
         if isinstance(session_bucket, dict):
             spend = coerce_spend(session_bucket.get("total_usd"))
             if spend is not None:
@@ -503,7 +521,12 @@ class SessionManager:
                 window_start = window_start.astimezone(UTC)
         events = []
         for raw_event in getattr(agent_session.session, "logged_events", []) or []:
-            if raw_event.get("event_type") not in {"llm_call", "hf_job_complete"}:
+            if raw_event.get("event_type") not in {
+                "llm_call",
+                "hf_job_complete",
+                "sandbox_create",
+                "sandbox_destroy",
+            }:
                 continue
             if isinstance(window_start, datetime):
                 created_at = event_created_at(raw_event, timezone_name="UTC")
@@ -1666,6 +1689,15 @@ class SessionManager:
             raise ValueError("Session not found or inactive")
 
         session = agent_session.session
+        seed_spend: float | None = None
+        if enabled:
+            try:
+                seed_spend, _ = await self._current_session_usage_spend(
+                    agent_session,
+                    use_cache=False,
+                )
+            except Exception as e:
+                logger.debug("Could not seed YOLO spend for %s: %s", session_id, e)
         if enabled:
             if not cap_provided and cost_cap_usd is None:
                 cost_cap_usd = getattr(session, "auto_approval_cost_cap_usd", None)
@@ -1685,6 +1717,8 @@ class SessionManager:
         else:
             session.auto_approval_enabled = bool(enabled)
             session.auto_approval_cost_cap_usd = cost_cap_usd
+        if enabled and seed_spend is not None:
+            seed_session_spend(session, seed_spend)
         self._touch(agent_session)
         await self.persist_session_snapshot(agent_session)
         return self._auto_approval_summary(session)

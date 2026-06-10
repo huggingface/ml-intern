@@ -20,6 +20,11 @@ from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import strip_huggingface_model_prefix
 from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
 from agent.core.session import Event
+from agent.core.yolo_budget import (
+    reconcile_budget_reservation,
+    release_budget_reservation,
+    reserve_llm_call_budget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,49 @@ RESEARCH_TOOL_NAMES = {
     "hf_inspect_dataset",
     "hf_repo_files",
 }
+
+
+async def _research_acompletion(
+    *,
+    session: Any,
+    research_model: str,
+    messages: list[Any],
+    tools: Any,
+    llm_params: dict[str, Any],
+    timeout: int,
+    tool_choice: str | None = None,
+):
+    budget = await reserve_llm_call_budget(
+        session,
+        model_name=research_model,
+        messages=messages,
+        tools=tools,
+        llm_params=llm_params,
+        spend_kind="research",
+    )
+    if budget.blocked:
+        raise RuntimeError("YOLO budget paused before research LLM call")
+    reservation_id = (
+        budget.decision.reservation.reservation_id
+        if budget.decision.reservation
+        else None
+    )
+    kwargs: dict[str, Any] = {
+        "messages": messages,
+        "tools": tools,
+        "stream": False,
+        "timeout": timeout,
+        **budget.llm_params,
+    }
+    if tool_choice is not None:
+        kwargs["tool_choice"] = tool_choice
+    try:
+        response = await acompletion(**kwargs)
+    except Exception:
+        release_budget_reservation(session, reservation_id)
+        raise
+    return response, reservation_id
+
 
 RESEARCH_SYSTEM_PROMPT = """\
 You are a research sub-agent for an ML engineering assistant.
@@ -340,18 +388,19 @@ async def research_handler(
             try:
                 _t0 = time.monotonic()
                 cached_messages, _ = with_prompt_caching(messages, None, llm_params)
-                response = await acompletion(
+                response, reservation_id = await _research_acompletion(
+                    session=session,
+                    research_model=research_model,
                     messages=cached_messages,
                     tools=None,  # no tools — force text response
-                    stream=False,
+                    llm_params=llm_params,
                     timeout=120,
-                    **llm_params,
                 )
                 # Telemetry is best-effort; a logging blip must never mask a
                 # valid LLM response (the surrounding except would convert it
                 # to "summary call failed").
                 try:
-                    await telemetry.record_llm_call(
+                    usage = await telemetry.record_llm_call(
                         session,
                         model=research_model,
                         response=response,
@@ -360,6 +409,11 @@ async def research_handler(
                         if response.choices
                         else None,
                         kind="research",
+                    )
+                    reconcile_budget_reservation(
+                        session,
+                        reservation_id,
+                        usage.get("cost_usd") if isinstance(usage, dict) else None,
                     )
                 except Exception as _telem_err:
                     logger.debug("research telemetry failed: %s", _telem_err)
@@ -390,16 +444,17 @@ async def research_handler(
             cached_messages, cached_tools = with_prompt_caching(
                 messages, tool_specs if tool_specs else None, llm_params
             )
-            response = await acompletion(
+            response, reservation_id = await _research_acompletion(
+                session=session,
+                research_model=research_model,
                 messages=cached_messages,
                 tools=cached_tools,
                 tool_choice="auto",
-                stream=False,
+                llm_params=llm_params,
                 timeout=120,
-                **llm_params,
             )
             try:
-                await telemetry.record_llm_call(
+                usage = await telemetry.record_llm_call(
                     session,
                     model=research_model,
                     response=response,
@@ -408,6 +463,11 @@ async def research_handler(
                     if response.choices
                     else None,
                     kind="research",
+                )
+                reconcile_budget_reservation(
+                    session,
+                    reservation_id,
+                    usage.get("cost_usd") if isinstance(usage, dict) else None,
                 )
             except Exception as _telem_err:
                 logger.debug("research telemetry failed: %s", _telem_err)
@@ -507,15 +567,16 @@ async def research_handler(
     try:
         _t0 = time.monotonic()
         cached_messages, _ = with_prompt_caching(messages, None, llm_params)
-        response = await acompletion(
+        response, reservation_id = await _research_acompletion(
+            session=session,
+            research_model=research_model,
             messages=cached_messages,
             tools=None,
-            stream=False,
+            llm_params=llm_params,
             timeout=120,
-            **llm_params,
         )
         try:
-            await telemetry.record_llm_call(
+            usage = await telemetry.record_llm_call(
                 session,
                 model=research_model,
                 response=response,
@@ -524,6 +585,11 @@ async def research_handler(
                 if response.choices
                 else None,
                 kind="research",
+            )
+            reconcile_budget_reservation(
+                session,
+                reservation_id,
+                usage.get("cost_usd") if isinstance(usage, dict) else None,
             )
         except Exception as _telem_err:
             logger.debug("research telemetry failed: %s", _telem_err)

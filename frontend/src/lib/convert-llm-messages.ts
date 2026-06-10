@@ -4,6 +4,7 @@
 import type { UIMessage } from 'ai';
 
 const USAGE_THRESHOLD_TOOL_NAME = 'usage_threshold';
+const YOLO_BUDGET_TOOL_NAME = 'yolo_budget';
 
 interface LLMToolCall {
   id: string;
@@ -166,7 +167,7 @@ export function llmMessagesToUIMessages(
 
   for (const pending of pendingApprovalItems || []) {
     if (
-      pending.tool !== USAGE_THRESHOLD_TOOL_NAME ||
+      ![USAGE_THRESHOLD_TOOL_NAME, YOLO_BUDGET_TOOL_NAME].includes(pending.tool) ||
       restoredPendingIds.has(pending.tool_call_id)
     ) {
       continue;
