@@ -5,31 +5,8 @@ from litellm import Message
 
 from agent.context_manager import manager as context_manager
 from agent.core.cost_estimation import CostEstimate
-from agent.core.hf_router_catalog import ModelInfo, ProviderInfo
 from agent.core.session import Event
 from agent.core import yolo_budget
-
-
-def _provider(name: str, input_price: float, output_price: float) -> ProviderInfo:
-    return ProviderInfo(
-        provider=name,
-        status="live",
-        context_length=128_000,
-        input_price=input_price,
-        output_price=output_price,
-        supports_tools=True,
-        supports_structured_output=False,
-    )
-
-
-def _model_info() -> ModelInfo:
-    return ModelInfo(
-        id="org/model",
-        providers=[
-            _provider("provider-a", 1.0, 10.0),
-            _provider("provider-b", 2.0, 3.0),
-        ],
-    )
 
 
 def _session(*, enabled: bool = True, cap: float = 5.0, spent: float = 0.0):
@@ -47,102 +24,6 @@ def _session(*, enabled: bool = True, cap: float = 5.0, spent: float = 0.0):
             self.events.append(event)
 
     return FakeSession()
-
-
-@pytest.fixture
-def priced_router(monkeypatch):
-    monkeypatch.setattr(yolo_budget, "_count_prompt_tokens", lambda **_: 1_000_000)
-    monkeypatch.setattr(
-        "agent.core.hf_router_catalog.lookup",
-        lambda _model: _model_info(),
-    )
-
-
-def test_llm_estimate_uses_provider_pinned_price(priced_router):
-    estimate = yolo_budget.estimate_llm_call_cost(
-        model_name="org/model:provider-b",
-        litellm_model="openai/org/model:provider-b",
-        messages=[{"role": "user", "content": "hi"}],
-        max_output_tokens=1_000_000,
-    )
-
-    assert estimate.estimated_cost_usd == 5.0
-    assert estimate.billable is True
-
-
-def test_llm_estimate_uses_cheapest_route_price(priced_router):
-    estimate = yolo_budget.estimate_llm_call_cost(
-        model_name="org/model:cheapest",
-        litellm_model="openai/org/model:cheapest",
-        messages=[{"role": "user", "content": "hi"}],
-        max_output_tokens=1_000_000,
-    )
-
-    assert estimate.estimated_cost_usd == 5.0
-
-
-def test_llm_estimate_uses_highest_live_price_for_auto_route(priced_router):
-    estimate = yolo_budget.estimate_llm_call_cost(
-        model_name="org/model",
-        litellm_model="openai/org/model",
-        messages=[{"role": "user", "content": "hi"}],
-        max_output_tokens=1_000_000,
-    )
-
-    assert estimate.estimated_cost_usd == 12.0
-
-
-def test_llm_estimate_treats_local_models_as_free(monkeypatch):
-    monkeypatch.setattr(
-        "agent.core.hf_router_catalog.lookup",
-        lambda _model: pytest.fail("local models must not hit the router catalog"),
-    )
-
-    estimate = yolo_budget.estimate_llm_call_cost(
-        model_name="ollama/llama3",
-        litellm_model="openai/llama3",
-        messages=[{"role": "user", "content": "hi"}],
-        max_output_tokens=1_000_000,
-    )
-
-    assert estimate.estimated_cost_usd == 0.0
-    assert estimate.billable is False
-
-
-def test_llm_estimate_fails_closed_when_price_is_unknown(monkeypatch):
-    monkeypatch.setattr(yolo_budget, "_count_prompt_tokens", lambda **_: 10)
-    monkeypatch.setattr("agent.core.hf_router_catalog.lookup", lambda _model: None)
-    monkeypatch.setattr("agent.core.hf_router_catalog.last_fetch_error", lambda: None)
-
-    estimate = yolo_budget.estimate_llm_call_cost(
-        model_name="org/unknown",
-        litellm_model="openai/org/unknown",
-        messages=[{"role": "user", "content": "hi"}],
-        max_output_tokens=100,
-    )
-
-    assert estimate.estimated_cost_usd is None
-    assert estimate.billable is True
-    assert "No HF Router price" in estimate.block_reason
-
-
-def test_llm_estimate_reports_router_catalog_fetch_failure(monkeypatch):
-    monkeypatch.setattr(yolo_budget, "_count_prompt_tokens", lambda **_: 10)
-    monkeypatch.setattr("agent.core.hf_router_catalog.lookup", lambda _model: None)
-    monkeypatch.setattr(
-        "agent.core.hf_router_catalog.last_fetch_error",
-        lambda: "timed out",
-    )
-
-    estimate = yolo_budget.estimate_llm_call_cost(
-        model_name="org/model",
-        litellm_model="openai/org/model",
-        messages=[{"role": "user", "content": "hi"}],
-        max_output_tokens=100,
-    )
-
-    assert estimate.estimated_cost_usd is None
-    assert "Could not fetch HF Router price metadata" in estimate.block_reason
 
 
 def test_reservation_reconcile_replaces_estimate_with_actual_cost():
@@ -198,41 +79,60 @@ def test_zero_cost_reconcile_can_release_measured_zero_runtime_cost():
     assert session.auto_approval_estimated_spend_usd == 1.0
 
 
-def test_yolo_output_bound_uses_remaining_router_context(monkeypatch):
-    session = _session()
-    monkeypatch.setattr(yolo_budget, "_count_prompt_tokens", lambda **_: 120_000)
-    monkeypatch.setattr(yolo_budget, "_router_context_length", lambda _model: 128_000)
+@pytest.mark.asyncio
+async def test_summarization_call_runs_before_yolo_cap_check(monkeypatch):
+    session = _session(cap=0.5, spent=0.0)
+    calls: list[str] = []
 
-    params = yolo_budget.with_yolo_llm_output_bound(
-        {"model": "openai/org/model"},
-        session,
-        model_name="org/model",
-        litellm_model="openai/org/model",
-        messages=[{"role": "user", "content": "hi"}],
+    class FakeUsage:
+        completion_tokens = 1
+
+    class FakeChoice:
+        finish_reason = "stop"
+        message = SimpleNamespace(content="summary")
+
+    class FakeResponse:
+        choices = [FakeChoice()]
+        usage = FakeUsage()
+
+    async def fake_acompletion(*args, **kwargs):
+        calls.append("acompletion")
+        return FakeResponse()
+
+    async def fake_checker(payload):
+        calls.append(str(payload["spend_kind"]))
+        return False
+
+    async def fake_record_llm_call(*args, **kwargs):
+        return {}
+
+    session.yolo_budget_checker = fake_checker
+    monkeypatch.setattr(context_manager, "acompletion", fake_acompletion)
+    monkeypatch.setattr("agent.core.telemetry.record_llm_call", fake_record_llm_call)
+
+    summary, tokens = await context_manager.summarize_messages(
+        [Message(role="user", content="summarize me")],
+        model_name="org/unknown",
+        max_tokens=100,
+        session=session,
     )
 
-    assert params["max_completion_tokens"] == 8000
+    assert summary == "summary"
+    assert tokens == 1
+    assert calls == ["acompletion", "compaction"]
 
 
 @pytest.mark.asyncio
-async def test_llm_budget_pause_happens_before_summarization_call(monkeypatch):
-    session = _session(cap=0.5, spent=0.0)
-    monkeypatch.setattr(yolo_budget, "_count_prompt_tokens", lambda **_: 1_000_000)
-    monkeypatch.setattr(yolo_budget, "_router_prices", lambda _model: (1.0, 1.0))
+async def test_post_call_yolo_pause_created_when_observed_spend_reaches_cap():
+    session = _session(cap=1.0, spent=0.95)
 
-    async def fail_acompletion(*args, **kwargs):
-        raise AssertionError("acompletion must not be called when YOLO blocks")
+    paused = await yolo_budget.maybe_pause_yolo_after_spend(
+        session,
+        spend_kind="llm_call",
+        observed_cost_usd=0.05,
+    )
 
-    monkeypatch.setattr(context_manager, "acompletion", fail_acompletion)
-
-    with pytest.raises(yolo_budget.YoloBudgetPaused):
-        await context_manager.summarize_messages(
-            [Message(role="user", content="summarize me")],
-            model_name="org/model",
-            max_tokens=100,
-            session=session,
-        )
-
+    assert paused is True
     assert session.pending_approval["kind"] == yolo_budget.YOLO_BUDGET_TOOL_NAME
+    assert session.pending_approval["estimated_next_usd"] is None
     assert session.events[0].event_type == "approval_required"
-    assert session.events[0].data["yolo_budget"] is True

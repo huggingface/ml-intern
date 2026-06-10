@@ -160,6 +160,7 @@ class Session:
         self._yolo_budget_reservations: dict[str, Any] = {}
         self.usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
         self.usage_threshold_checker: Any | None = None
+        self.yolo_budget_checker: Any | None = None
 
         # Session trajectory logging
         self.logged_events: list[dict] = []

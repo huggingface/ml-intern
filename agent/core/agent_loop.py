@@ -44,8 +44,7 @@ from agent.core.yolo_budget import (
     BudgetDecision,
     check_session_budget,
     is_yolo_budget_pending,
-    reconcile_budget_reservation,
-    reserve_llm_call_budget,
+    maybe_pause_yolo_after_spend,
     release_budget_reservation,
     reserve_session_budget,
     yolo_budget_can_resume,
@@ -700,7 +699,6 @@ async def _compact_and_notify(session: Session) -> None:
     inference budget while the session never reached the upload path.
     """
     from agent.context_manager.manager import CompactionFailedError
-    from agent.core.yolo_budget import YoloBudgetPaused
 
     cm = session.context_manager
     old_usage = cm.running_context_usage
@@ -718,8 +716,6 @@ async def _compact_and_notify(session: Session) -> None:
             hf_token=session.hf_token,
             session=session,
         )
-    except YoloBudgetPaused:
-        return
     except CompactionFailedError as e:
         logger.error(
             "Compaction failed for session %s: %s — terminating session",
@@ -1364,58 +1360,20 @@ class Handlers:
                         session.config.model_name
                     ),
                 )
-                budget = await reserve_llm_call_budget(
-                    session,
-                    model_name=session.config.model_name,
-                    messages=messages,
-                    tools=tools,
-                    llm_params=llm_params,
-                    spend_kind="llm_call",
-                )
-                if budget.blocked:
-                    return final_response
-                reservation_id = (
-                    budget.decision.reservation.reservation_id
-                    if budget.decision.reservation
-                    else None
-                )
-                try:
-                    if session.stream:
-                        llm_result = await _call_llm_streaming(
-                            session, messages, tools, budget.llm_params
-                        )
-                    else:
-                        llm_result = await _call_llm_non_streaming(
-                            session, messages, tools, budget.llm_params
-                        )
-                except Exception:
-                    release_budget_reservation(session, reservation_id)
-                    raise
-                reconcile_budget_reservation(
-                    session,
-                    reservation_id,
-                    llm_result.usage.get("cost_usd"),
-                )
+                if session.stream:
+                    llm_result = await _call_llm_streaming(
+                        session, messages, tools, llm_params
+                    )
+                else:
+                    llm_result = await _call_llm_non_streaming(
+                        session, messages, tools, llm_params
+                    )
+                llm_observed_cost_usd = llm_result.usage.get("cost_usd")
 
                 content = llm_result.content
                 tool_calls_acc = llm_result.tool_calls_acc
                 token_count = llm_result.token_count
                 finish_reason = llm_result.finish_reason
-
-                if finish_reason == "length" and budget.injected_output_bound:
-                    await session.send_event(
-                        Event(
-                            event_type="tool_log",
-                            data={
-                                "tool": "system",
-                                "log": (
-                                    "The response hit the YOLO output-token bound "
-                                    f"({budget.injected_output_bound} tokens) used "
-                                    "to keep session spend estimable."
-                                ),
-                            },
-                        )
-                    )
 
                 # If output was truncated, all tool call args are garbage.
                 # Inject a system hint so the LLM retries with smaller content.
@@ -1492,6 +1450,12 @@ class Handlers:
                         and no_tool_incomplete_plan_retries
                         < _NO_TOOL_INCOMPLETE_PLAN_RETRY_LIMIT
                     ):
+                        if await maybe_pause_yolo_after_spend(
+                            session,
+                            spend_kind="llm_call",
+                            observed_cost_usd=llm_observed_cost_usd,
+                        ):
+                            return final_response
                         logger.info(
                             "No tool calls with unfinished plan; retrying agent turn "
                             "(attempt %d/%d)",
@@ -1546,9 +1510,26 @@ class Handlers:
                         assistant_msg = _assistant_message_from_result(llm_result)
                         session.context_manager.add_message(assistant_msg, token_count)
                         final_response = content
+                    if await maybe_pause_yolo_after_spend(
+                        session,
+                        spend_kind="llm_call",
+                        observed_cost_usd=llm_observed_cost_usd,
+                        continuation="complete_turn",
+                        final_response=final_response
+                        if isinstance(final_response, str)
+                        else None,
+                    ):
+                        return final_response
                     break
 
                 no_tool_incomplete_plan_retries = 0
+
+                if await maybe_pause_yolo_after_spend(
+                    session,
+                    spend_kind="llm_call",
+                    observed_cost_usd=llm_observed_cost_usd,
+                ):
+                    return final_response
 
                 # Validate tool call args (one json.loads per call, once)
                 # and split into good vs bad
@@ -2160,6 +2141,26 @@ class Handlers:
                 },
             )
         )
+
+        if pending.get("continuation") == "complete_turn":
+            final_response = pending.get("final_response")
+            await session.send_event(
+                Event(
+                    event_type="turn_complete",
+                    data={
+                        "history_size": int(
+                            pending.get("history_size")
+                            or len(session.context_manager.items)
+                        ),
+                        "final_response": final_response
+                        if isinstance(final_response, str)
+                        else None,
+                    },
+                )
+            )
+            session.increment_turn()
+            await session.auto_save_if_needed()
+            return
 
         await Handlers.run_agent(session, "")
 

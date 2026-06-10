@@ -23,14 +23,20 @@ type ToolPartState = DynamicToolPart['state'];
 const USAGE_THRESHOLD_TOOL_NAME = 'usage_threshold';
 const YOLO_BUDGET_TOOL_NAME = 'yolo_budget';
 
-function formatApprovalUsd(value: unknown): string {
-  const amount = typeof value === 'number' && Number.isFinite(value) ? value : Number(value || 0);
+function formatApprovalUsd(value: unknown, fallback = 'Unknown'): string {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+  const amount = typeof value === 'number' && Number.isFinite(value) ? value : Number(value);
+  if (!Number.isFinite(amount)) {
+    return fallback;
+  }
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(Number.isFinite(amount) ? amount : 0);
+  }).format(amount);
 }
 
 function usageSourceLabel(source: unknown): string {

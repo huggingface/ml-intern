@@ -153,44 +153,15 @@ async def summarize_messages(
     prompt_messages, tool_specs = with_prompt_caching(
         prompt_messages, tool_specs, llm_params
     )
-    reservation_id = None
-    if session is not None:
-        from agent.core.yolo_budget import (
-            YoloBudgetPaused,
-            reconcile_budget_reservation,
-            release_budget_reservation,
-            reserve_llm_call_budget,
-        )
-
-        budget = await reserve_llm_call_budget(
-            session,
-            model_name=model_name,
-            messages=prompt_messages,
-            tools=tool_specs,
-            llm_params=llm_params,
-            spend_kind=kind,
-        )
-        if budget.blocked:
-            raise YoloBudgetPaused("YOLO budget paused before LLM summarization")
-        llm_params = budget.llm_params
-        reservation_id = (
-            budget.decision.reservation.reservation_id
-            if budget.decision.reservation
-            else None
-        )
     _t0 = time.monotonic()
-    try:
-        response = await acompletion(
-            messages=prompt_messages,
-            tools=tool_specs,
-            **llm_params,
-        )
-    except Exception:
-        if session is not None:
-            release_budget_reservation(session, reservation_id)
-        raise
+    response = await acompletion(
+        messages=prompt_messages,
+        tools=tool_specs,
+        **llm_params,
+    )
     if session is not None:
         from agent.core import telemetry
+        from agent.core.yolo_budget import maybe_pause_yolo_after_spend
 
         usage = await telemetry.record_llm_call(
             session,
@@ -202,10 +173,12 @@ async def summarize_messages(
             else None,
             kind=kind,
         )
-        reconcile_budget_reservation(
+        await maybe_pause_yolo_after_spend(
             session,
-            reservation_id,
-            usage.get("cost_usd") if isinstance(usage, dict) else None,
+            spend_kind=kind,
+            observed_cost_usd=usage.get("cost_usd")
+            if isinstance(usage, dict)
+            else None,
         )
     summary = response.choices[0].message.content or ""
     completion_tokens = response.usage.completion_tokens if response.usage else 0

@@ -1,23 +1,12 @@
 """Session-scoped YOLO budget guardrails."""
 
-import os
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from agent.core.cost_estimation import CostEstimate
-from agent.core.local_models import local_model_provider
-from agent.core.model_ids import strip_huggingface_model_prefix
 
 YOLO_BUDGET_TOOL_NAME = "yolo_budget"
-DEFAULT_LLM_OUTPUT_TOKEN_RESERVE = int(
-    os.environ.get("ML_INTERN_YOLO_LLM_OUTPUT_TOKEN_RESERVE", "32768")
-)
-_ROUTING_POLICIES = {"fastest", "cheapest", "preferred"}
-
-
-class YoloBudgetPaused(Exception):
-    """Raised when a session LLM call is paused by the YOLO budget."""
 
 
 @dataclass(frozen=True)
@@ -35,14 +24,6 @@ class BudgetDecision:
     block_reason: str | None = None
     billable: bool = False
     reservation: BudgetReservation | None = None
-
-
-@dataclass(frozen=True)
-class LlmBudgetResult:
-    llm_params: dict[str, Any]
-    decision: BudgetDecision
-    blocked: bool = False
-    injected_output_bound: int | None = None
 
 
 def session_yolo_enabled(session: Any | None) -> bool:
@@ -90,6 +71,12 @@ def seed_session_spend(session: Any, amount_usd: float | None) -> None:
     if amount_usd is None:
         return
     _set_session_spend(session, max(session_spend_usd(session), float(amount_usd)))
+
+
+def _cap_usd(session: Any | None) -> float | None:
+    if not session or getattr(session, "auto_approval_cost_cap_usd", None) is None:
+        return None
+    return max(0.0, float(getattr(session, "auto_approval_cost_cap_usd") or 0.0))
 
 
 def _reservation_store(session: Any) -> dict[str, BudgetReservation]:
@@ -212,179 +199,6 @@ def reconcile_budget_reservation(
     adjust_session_spend(session, actual - reservation.amount_usd)
 
 
-def llm_output_token_bound(llm_params: dict[str, Any]) -> int | None:
-    for key in ("max_completion_tokens", "max_tokens"):
-        value = llm_params.get(key)
-        if isinstance(value, bool) or value is None:
-            continue
-        try:
-            tokens = int(value)
-        except (TypeError, ValueError):
-            continue
-        if tokens > 0:
-            return tokens
-    return None
-
-
-def with_yolo_llm_output_bound(
-    llm_params: dict[str, Any],
-    session: Any | None,
-    *,
-    model_name: str | None = None,
-    litellm_model: str | None = None,
-    messages: list[Any] | None = None,
-    tools: Any = None,
-) -> dict[str, Any]:
-    if (
-        not session_yolo_enabled(session)
-        or llm_output_token_bound(llm_params) is not None
-    ):
-        return llm_params
-    bound = DEFAULT_LLM_OUTPUT_TOKEN_RESERVE
-    if model_name and litellm_model and messages is not None:
-        prompt_tokens = _count_prompt_tokens(
-            litellm_model=litellm_model,
-            messages=messages,
-            tools=tools,
-        )
-        context_length = _router_context_length(model_name)
-        if prompt_tokens is not None and context_length is not None:
-            bound = max(1, min(bound, max(1, context_length - prompt_tokens)))
-    return {**llm_params, "max_completion_tokens": bound}
-
-
-def _message_payload(message: Any) -> Any:
-    if hasattr(message, "model_dump"):
-        return message.model_dump(mode="json")
-    return message
-
-
-def _count_prompt_tokens(
-    *,
-    litellm_model: str,
-    messages: list[Any],
-    tools: Any = None,
-) -> int | None:
-    try:
-        from litellm import token_counter
-
-        payload = [_message_payload(message) for message in messages]
-        try:
-            return int(
-                token_counter(model=litellm_model, messages=payload, tools=tools)
-            )
-        except TypeError:
-            return int(token_counter(model=litellm_model, messages=payload))
-    except Exception:
-        return None
-
-
-def _router_prices(model_name: str) -> tuple[float, float] | None:
-    from agent.core import hf_router_catalog
-
-    normalized = strip_huggingface_model_prefix(model_name) or model_name
-    _, _, tag = normalized.partition(":")
-    info = hf_router_catalog.lookup(normalized)
-    if info is None:
-        return None
-    live = [
-        p
-        for p in info.live_providers
-        if p.input_price is not None and p.output_price is not None
-    ]
-    if not live:
-        return None
-
-    if tag and tag not in _ROUTING_POLICIES:
-        pinned = [p for p in live if p.provider == tag]
-        if not pinned:
-            return None
-        p = pinned[0]
-        return float(p.input_price), float(p.output_price)
-
-    if tag == "cheapest":
-        p = min(
-            live, key=lambda item: float(item.input_price) + float(item.output_price)
-        )
-        return float(p.input_price), float(p.output_price)
-
-    # Auto/fastest/preferred routing can choose any live provider. Use the
-    # highest advertised price per side so the reservation is a safe upper bound.
-    return (
-        max(float(p.input_price) for p in live),
-        max(float(p.output_price) for p in live),
-    )
-
-
-def _router_context_length(model_name: str) -> int | None:
-    from agent.core import hf_router_catalog
-
-    normalized = strip_huggingface_model_prefix(model_name) or model_name
-    info = hf_router_catalog.lookup(normalized)
-    return info.max_context_length if info is not None else None
-
-
-def _router_price_unavailable_reason(model_name: str) -> str:
-    from agent.core import hf_router_catalog
-
-    fetch_error = hf_router_catalog.last_fetch_error()
-    if fetch_error:
-        return (
-            "Could not fetch HF Router price metadata safely "
-            f"for model '{model_name}': {fetch_error}."
-        )
-    return f"No HF Router price is available for model '{model_name}'."
-
-
-def estimate_llm_call_cost(
-    *,
-    model_name: str,
-    litellm_model: str,
-    messages: list[Any],
-    tools: Any = None,
-    max_output_tokens: int | None,
-) -> CostEstimate:
-    normalized = strip_huggingface_model_prefix(model_name) or model_name
-    if local_model_provider(normalized) is not None:
-        return CostEstimate(estimated_cost_usd=0.0, billable=False, label=normalized)
-    if max_output_tokens is None or max_output_tokens <= 0:
-        return CostEstimate(
-            estimated_cost_usd=None,
-            billable=True,
-            block_reason="No safe output-token bound is available for this LLM call.",
-            label=normalized,
-        )
-    prompt_tokens = _count_prompt_tokens(
-        litellm_model=litellm_model,
-        messages=messages,
-        tools=tools,
-    )
-    if prompt_tokens is None:
-        return CostEstimate(
-            estimated_cost_usd=None,
-            billable=True,
-            block_reason="Could not count prompt tokens for this LLM call.",
-            label=normalized,
-        )
-    prices = _router_prices(normalized)
-    if prices is None:
-        return CostEstimate(
-            estimated_cost_usd=None,
-            billable=True,
-            block_reason=_router_price_unavailable_reason(normalized),
-            label=normalized,
-        )
-    input_price, output_price = prices
-    estimated = (
-        (prompt_tokens * input_price) + (max_output_tokens * output_price)
-    ) / 1_000_000
-    return CostEstimate(
-        estimated_cost_usd=round(estimated, 4),
-        billable=estimated > 0,
-        label=normalized,
-    )
-
-
 def is_yolo_budget_pending(pending_approval: Any) -> bool:
     return (
         isinstance(pending_approval, dict)
@@ -418,22 +232,44 @@ async def request_yolo_budget_approval(
     decision: BudgetDecision,
     *,
     spend_kind: str,
+    current_spend_usd: float | None = None,
+    cap_usd: float | None = None,
+    billing_source: str | None = None,
+    continuation: str | None = None,
+    final_response: str | None = None,
+    history_size: int | None = None,
 ) -> bool:
     if session.pending_approval:
         return False
     from agent.core.session import Event
 
+    current_spend = (
+        session_spend_usd(session)
+        if current_spend_usd is None
+        else max(0.0, float(current_spend_usd))
+    )
+    cap = getattr(session, "auto_approval_cost_cap_usd", None)
+    if cap_usd is not None:
+        cap = max(0.0, float(cap_usd))
     pending = {
         "kind": YOLO_BUDGET_TOOL_NAME,
         "tool_call_id": f"yolo-budget-{uuid.uuid4().hex[:10]}",
-        "cap_usd": getattr(session, "auto_approval_cost_cap_usd", None),
-        "current_spend_usd": round(session_spend_usd(session), 6),
+        "cap_usd": cap,
+        "current_spend_usd": round(current_spend, 6),
         "remaining_cap_usd": decision.remaining_cap_usd,
         "estimated_next_usd": decision.estimated_cost_usd,
         "spend_kind": spend_kind,
         "reason": decision.block_reason or "YOLO budget requires confirmation.",
-        "history_size": len(session.context_manager.items),
+        "history_size": history_size
+        if history_size is not None
+        else len(session.context_manager.items),
     }
+    if billing_source:
+        pending["billing_source"] = billing_source
+    if continuation:
+        pending["continuation"] = continuation
+    if isinstance(final_response, str):
+        pending["final_response"] = final_response
     session.pending_approval = pending
     tool = yolo_budget_pending_to_tool(pending)
     await session.send_event(
@@ -453,65 +289,92 @@ async def request_yolo_budget_approval(
     return True
 
 
-async def reserve_llm_call_budget(
-    session: Any | None,
+async def request_yolo_budget_exceeded_approval(
+    session: Any,
     *,
-    model_name: str,
-    messages: list[Any],
-    tools: Any,
-    llm_params: dict[str, Any],
     spend_kind: str,
-) -> LlmBudgetResult:
-    litellm_model = str(llm_params.get("model") or model_name)
-    had_output_bound = llm_output_token_bound(llm_params) is not None
-    bounded_params = with_yolo_llm_output_bound(
-        llm_params,
-        session,
-        model_name=model_name,
-        litellm_model=litellm_model,
-        messages=messages,
-        tools=tools,
+    current_spend_usd: float,
+    cap_usd: float,
+    billing_source: str | None = None,
+    reason: str | None = None,
+    continuation: str | None = None,
+    final_response: str | None = None,
+    history_size: int | None = None,
+) -> bool:
+    current_spend = max(0.0, float(current_spend_usd))
+    cap = max(0.0, float(cap_usd))
+    seed_session_spend(session, current_spend)
+    if not session_yolo_enabled(session) or current_spend < cap:
+        return False
+    decision = BudgetDecision(
+        allowed=False,
+        estimated_cost_usd=None,
+        remaining_cap_usd=round(max(0.0, cap - current_spend), 4),
+        block_reason=reason
+        or (
+            "YOLO cap paused session usage after "
+            f"{spend_kind}: current session spend ${current_spend:.2f} "
+            f"has reached the ${cap:.2f} cap."
+        ),
+        billable=True,
     )
-    injected_output_bound = (
-        None if had_output_bound else llm_output_token_bound(bounded_params)
-    )
-    if not session_yolo_enabled(session):
-        return LlmBudgetResult(
-            llm_params=bounded_params,
-            decision=BudgetDecision(allowed=True),
-            injected_output_bound=None,
-        )
-
-    estimate = estimate_llm_call_cost(
-        model_name=model_name,
-        litellm_model=str(bounded_params.get("model") or model_name),
-        messages=messages,
-        tools=tools,
-        max_output_tokens=llm_output_token_bound(bounded_params),
-    )
-    decision = reserve_session_budget(
-        session,
-        estimate,
-        spend_kind=spend_kind,
-    )
-    if decision.allowed:
-        return LlmBudgetResult(
-            llm_params=bounded_params,
-            decision=decision,
-            injected_output_bound=injected_output_bound,
-        )
-
-    assert session is not None
-    await request_yolo_budget_approval(
+    return await request_yolo_budget_approval(
         session,
         decision,
         spend_kind=spend_kind,
+        current_spend_usd=current_spend,
+        cap_usd=cap,
+        billing_source=billing_source,
+        continuation=continuation,
+        final_response=final_response,
+        history_size=history_size,
     )
-    return LlmBudgetResult(
-        llm_params=bounded_params,
-        decision=decision,
-        blocked=True,
-        injected_output_bound=injected_output_bound,
+
+
+async def maybe_pause_yolo_after_spend(
+    session: Any | None,
+    *,
+    spend_kind: str,
+    observed_cost_usd: Any = None,
+    continuation: str | None = None,
+    final_response: str | None = None,
+) -> bool:
+    if not session or not session_yolo_enabled(session) or session.pending_approval:
+        return False
+
+    observed = _coerce_cost(observed_cost_usd)
+    if observed is not None and observed > 0:
+        add_session_spend(session, observed)
+
+    checker = getattr(session, "yolo_budget_checker", None)
+    if checker is not None:
+        try:
+            return bool(
+                await checker(
+                    {
+                        "spend_kind": spend_kind,
+                        "observed_cost_usd": observed,
+                        "continuation": continuation,
+                        "final_response": final_response,
+                        "history_size": len(session.context_manager.items),
+                    }
+                )
+            )
+        except Exception:
+            pass
+
+    cap = _cap_usd(session)
+    current_spend = session_spend_usd(session)
+    if cap is None or current_spend < cap:
+        return False
+    return await request_yolo_budget_exceeded_approval(
+        session,
+        spend_kind=spend_kind,
+        current_spend_usd=current_spend,
+        cap_usd=cap,
+        continuation=continuation,
+        final_response=final_response,
+        history_size=len(session.context_manager.items),
     )
 
 
@@ -521,11 +384,17 @@ def yolo_budget_can_resume(
     if not session_yolo_enabled(session):
         return True, None
     estimated_next = _coerce_cost(pending.get("estimated_next_usd"))
-    if estimated_next is None:
-        return False, str(
-            pending.get("reason") or "Unknown-cost spend requires disabling YOLO."
-        )
     remaining = session_remaining_usd(session)
+    if estimated_next is None:
+        if remaining is None or remaining > 0:
+            return True, None
+        return (
+            False,
+            str(
+                pending.get("reason")
+                or "YOLO cap is reached. Raise or disable the cap to continue."
+            ),
+        )
     if remaining is not None and estimated_next > remaining:
         return (
             False,

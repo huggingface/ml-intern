@@ -20,11 +20,7 @@ from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import strip_huggingface_model_prefix
 from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
 from agent.core.session import Event
-from agent.core.yolo_budget import (
-    reconcile_budget_reservation,
-    release_budget_reservation,
-    reserve_llm_call_budget,
-)
+from agent.core.yolo_budget import maybe_pause_yolo_after_spend
 
 logger = logging.getLogger(__name__)
 
@@ -61,36 +57,38 @@ async def _research_acompletion(
     timeout: int,
     tool_choice: str | None = None,
 ):
-    budget = await reserve_llm_call_budget(
-        session,
-        model_name=research_model,
-        messages=messages,
-        tools=tools,
-        llm_params=llm_params,
-        spend_kind="research",
-    )
-    if budget.blocked:
-        raise RuntimeError("YOLO budget paused before research LLM call")
-    reservation_id = (
-        budget.decision.reservation.reservation_id
-        if budget.decision.reservation
-        else None
-    )
     kwargs: dict[str, Any] = {
         "messages": messages,
         "tools": tools,
         "stream": False,
         "timeout": timeout,
-        **budget.llm_params,
+        **llm_params,
     }
     if tool_choice is not None:
         kwargs["tool_choice"] = tool_choice
-    try:
-        response = await acompletion(**kwargs)
-    except Exception:
-        release_budget_reservation(session, reservation_id)
-        raise
-    return response, reservation_id
+    return await acompletion(**kwargs)
+
+
+async def _record_research_llm_call(
+    session: Any,
+    *,
+    research_model: str,
+    response: Any,
+    started_at: float,
+) -> bool:
+    usage = await telemetry.record_llm_call(
+        session,
+        model=research_model,
+        response=response,
+        latency_ms=int((time.monotonic() - started_at) * 1000),
+        finish_reason=response.choices[0].finish_reason if response.choices else None,
+        kind="research",
+    )
+    return await maybe_pause_yolo_after_spend(
+        session,
+        spend_kind="research",
+        observed_cost_usd=usage.get("cost_usd") if isinstance(usage, dict) else None,
+    )
 
 
 RESEARCH_SYSTEM_PROMPT = """\
@@ -388,7 +386,7 @@ async def research_handler(
             try:
                 _t0 = time.monotonic()
                 cached_messages, _ = with_prompt_caching(messages, None, llm_params)
-                response, reservation_id = await _research_acompletion(
+                response = await _research_acompletion(
                     session=session,
                     research_model=research_model,
                     messages=cached_messages,
@@ -400,21 +398,16 @@ async def research_handler(
                 # valid LLM response (the surrounding except would convert it
                 # to "summary call failed").
                 try:
-                    usage = await telemetry.record_llm_call(
+                    if await _record_research_llm_call(
                         session,
-                        model=research_model,
+                        research_model=research_model,
                         response=response,
-                        latency_ms=int((time.monotonic() - _t0) * 1000),
-                        finish_reason=response.choices[0].finish_reason
-                        if response.choices
-                        else None,
-                        kind="research",
-                    )
-                    reconcile_budget_reservation(
-                        session,
-                        reservation_id,
-                        usage.get("cost_usd") if isinstance(usage, dict) else None,
-                    )
+                        started_at=_t0,
+                    ):
+                        return (
+                            "Research paused because the YOLO cap was reached.",
+                            False,
+                        )
                 except Exception as _telem_err:
                     logger.debug("research telemetry failed: %s", _telem_err)
                 content = response.choices[0].message.content or ""
@@ -444,7 +437,7 @@ async def research_handler(
             cached_messages, cached_tools = with_prompt_caching(
                 messages, tool_specs if tool_specs else None, llm_params
             )
-            response, reservation_id = await _research_acompletion(
+            response = await _research_acompletion(
                 session=session,
                 research_model=research_model,
                 messages=cached_messages,
@@ -454,21 +447,13 @@ async def research_handler(
                 timeout=120,
             )
             try:
-                usage = await telemetry.record_llm_call(
+                if await _record_research_llm_call(
                     session,
-                    model=research_model,
+                    research_model=research_model,
                     response=response,
-                    latency_ms=int((time.monotonic() - _t0) * 1000),
-                    finish_reason=response.choices[0].finish_reason
-                    if response.choices
-                    else None,
-                    kind="research",
-                )
-                reconcile_budget_reservation(
-                    session,
-                    reservation_id,
-                    usage.get("cost_usd") if isinstance(usage, dict) else None,
-                )
+                    started_at=_t0,
+                ):
+                    return "Research paused because the YOLO cap was reached.", False
             except Exception as _telem_err:
                 logger.debug("research telemetry failed: %s", _telem_err)
         except Exception as e:
@@ -567,7 +552,7 @@ async def research_handler(
     try:
         _t0 = time.monotonic()
         cached_messages, _ = with_prompt_caching(messages, None, llm_params)
-        response, reservation_id = await _research_acompletion(
+        response = await _research_acompletion(
             session=session,
             research_model=research_model,
             messages=cached_messages,
@@ -576,21 +561,13 @@ async def research_handler(
             timeout=120,
         )
         try:
-            usage = await telemetry.record_llm_call(
+            if await _record_research_llm_call(
                 session,
-                model=research_model,
+                research_model=research_model,
                 response=response,
-                latency_ms=int((time.monotonic() - _t0) * 1000),
-                finish_reason=response.choices[0].finish_reason
-                if response.choices
-                else None,
-                kind="research",
-            )
-            reconcile_budget_reservation(
-                session,
-                reservation_id,
-                usage.get("cost_usd") if isinstance(usage, dict) else None,
-            )
+                started_at=_t0,
+            ):
+                return "Research paused because the YOLO cap was reached.", False
         except Exception as _telem_err:
             logger.debug("research telemetry failed: %s", _telem_err)
         content = response.choices[0].message.content or ""

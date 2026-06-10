@@ -31,6 +31,7 @@ from agent.core.usage_thresholds import (
 from agent.core.yolo_budget import (
     YOLO_BUDGET_TOOL_NAME,
     is_yolo_budget_pending,
+    request_yolo_budget_exceeded_approval,
     seed_session_spend,
     yolo_budget_pending_to_tool,
 )
@@ -442,6 +443,15 @@ class SessionManager:
 
         agent_session.session.usage_threshold_checker = _checker
 
+    def _install_yolo_budget_checker(self, agent_session: AgentSession) -> None:
+        async def _checker(payload: dict[str, Any]) -> bool:
+            return await self._maybe_request_yolo_budget_approval(
+                agent_session.session_id,
+                payload,
+            )
+
+        agent_session.session.yolo_budget_checker = _checker
+
     @staticmethod
     def _usage_spend_from_response(response: dict[str, Any]) -> tuple[float, str]:
         def coerce_spend(value: Any) -> float | None:
@@ -604,6 +614,57 @@ class SessionManager:
             )
         )
         return True
+
+    async def _maybe_request_yolo_budget_approval(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        agent_session = self.sessions.get(session_id)
+        if not agent_session or not agent_session.is_active:
+            return False
+
+        session = agent_session.session
+        if session.pending_approval:
+            return False
+        if not bool(getattr(session, "auto_approval_enabled", False)):
+            return False
+        cap = getattr(session, "auto_approval_cost_cap_usd", None)
+        if cap is None:
+            return False
+        try:
+            cap_usd = max(0.0, float(cap))
+        except (TypeError, ValueError):
+            return False
+
+        current_spend, billing_source = await self._current_session_usage_spend(
+            agent_session,
+            use_cache=False,
+        )
+        seed_session_spend(session, current_spend)
+        if current_spend < cap_usd:
+            return False
+
+        spend_kind = str(payload.get("spend_kind") or "session usage")
+        final_response = payload.get("final_response")
+        created = await request_yolo_budget_exceeded_approval(
+            session,
+            spend_kind=spend_kind,
+            current_spend_usd=current_spend,
+            cap_usd=cap_usd,
+            billing_source=billing_source,
+            continuation=payload.get("continuation"),
+            final_response=final_response if isinstance(final_response, str) else None,
+            history_size=payload.get("history_size"),
+            reason=(
+                "YOLO cap paused session usage after "
+                f"{spend_kind}: current session spend ${current_spend:.2f} "
+                f"has reached the ${cap_usd:.2f} cap."
+            ),
+        )
+        if created:
+            self._touch(agent_session)
+        return created
 
     async def _start_agent_session(
         self,
@@ -879,6 +940,7 @@ class SessionManager:
                     user_plan=user_plan,
                 )
                 self._install_usage_threshold_checker(existing)
+                self._install_yolo_budget_checker(existing)
                 self._restart_cpu_preload_if_token_recovered(
                     existing,
                     preload_sandbox=preload_sandbox,
@@ -902,6 +964,7 @@ class SessionManager:
                     user_plan=user_plan,
                 )
                 self._install_usage_threshold_checker(existing)
+                self._install_yolo_budget_checker(existing)
                 self._restart_cpu_preload_if_token_recovered(
                     existing,
                     preload_sandbox=preload_sandbox,
@@ -1023,6 +1086,7 @@ class SessionManager:
             title=meta.get("title"),
         )
         self._install_usage_threshold_checker(agent_session)
+        self._install_yolo_budget_checker(agent_session)
         started = await self._start_agent_session(
             agent_session=agent_session,
             event_queue=event_queue,
@@ -1128,6 +1192,7 @@ class SessionManager:
                 user_plan=user_plan,
             )
             self._install_usage_threshold_checker(agent_session)
+            self._install_yolo_budget_checker(agent_session)
 
             await self._start_agent_session(
                 agent_session=agent_session,

@@ -19,6 +19,7 @@ if str(_BACKEND_DIR) not in sys.path:
 from agent.core.model_ids import KIMI_K26_MODEL_ID  # noqa: E402
 from agent.core.session_persistence import NoopSessionStore  # noqa: E402
 from agent.core.usage_thresholds import USAGE_THRESHOLD_TOOL_NAME  # noqa: E402
+from agent.core.yolo_budget import YOLO_BUDGET_TOOL_NAME  # noqa: E402
 from session_manager import AgentSession, SessionManager  # noqa: E402
 
 
@@ -42,6 +43,7 @@ class FakeRuntimeSession:
         self.auto_approval_estimated_spend_usd = 0.0
         self.usage_warning_next_threshold_usd = 5.0
         self.usage_threshold_checker = None
+        self.yolo_budget_checker = None
         self.logged_events = []
         self.sandbox = None
         self.sandbox_hardware = None
@@ -397,6 +399,47 @@ async def test_usage_threshold_checker_uses_cached_spend_after_local_crossing(
     assert first is False
     assert second is False
     assert agent_session.session.pending_approval is None
+
+
+@pytest.mark.asyncio
+async def test_yolo_budget_checker_pauses_after_fresh_session_spend_crosses_cap(
+    monkeypatch,
+):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.auto_approval_enabled = True
+    agent_session.session.auto_approval_cost_cap_usd = 1.0
+    agent_session.session.auto_approval_estimated_spend_usd = 0.5
+    manager.sessions["s1"] = agent_session
+    calls = 0
+
+    async def fake_current_session_usage_spend(_agent_session, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["use_cache"] is False
+        return 1.25, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_yolo_budget_checker(agent_session)
+
+    paused = await agent_session.session.yolo_budget_checker(
+        {"spend_kind": "llm_call", "history_size": 4}
+    )
+
+    assert paused is True
+    assert calls == 1
+    assert agent_session.session.auto_approval_estimated_spend_usd == 1.25
+    pending = agent_session.session.pending_approval
+    assert pending["kind"] == YOLO_BUDGET_TOOL_NAME
+    assert pending["current_spend_usd"] == 1.25
+    assert pending["cap_usd"] == 1.0
+    assert pending["estimated_next_usd"] is None
+    assert pending["billing_source"] == "hf_billing_current_session"
+    assert agent_session.session.events[-1].event_type == "approval_required"
 
 
 def test_unknown_saved_model_defaults_to_kimi():
