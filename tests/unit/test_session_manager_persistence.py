@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +21,6 @@ from agent.core.model_ids import KIMI_K26_MODEL_ID  # noqa: E402
 from agent.core.session_persistence import NoopSessionStore  # noqa: E402
 from agent.core.usage_thresholds import USAGE_THRESHOLD_TOOL_NAME  # noqa: E402
 from session_manager import (  # noqa: E402
-    INFERENCE_BILLING_SESSION_ID_MAX_LENGTH,
     AgentSession,
     SessionManager,
     new_inference_billing_session_id,
@@ -151,14 +151,31 @@ def _runtime_agent_session(
     )
 
 
-def test_inference_billing_session_id_is_router_safe_for_long_agent_session_ids():
+def test_inference_billing_session_id_is_uuid_for_long_agent_session_ids():
     billing_session_id = new_inference_billing_session_id(
         "s" * 300,
         datetime(2026, 6, 5, 12, 30, tzinfo=UTC),
     )
 
-    assert len(billing_session_id) <= INFERENCE_BILLING_SESSION_ID_MAX_LENGTH
-    assert ":usage:20260605T123000000000Z:" in billing_session_id
+    assert str(uuid.UUID(billing_session_id)) == billing_session_id
+
+
+def test_agent_session_replaces_non_uuid_inference_billing_session_id():
+    runtime_session = FakeRuntimeSession()
+    agent_session = AgentSession(
+        session_id="s1",
+        session=runtime_session,  # type: ignore[arg-type]
+        tool_router=object(),  # type: ignore[arg-type]
+        submission_queue=asyncio.Queue(),
+        inference_billing_session_id="not-a-uuid",
+    )
+
+    assert str(uuid.UUID(agent_session.inference_billing_session_id)) == (
+        agent_session.inference_billing_session_id
+    )
+    assert runtime_session.inference_billing_session_id == (
+        agent_session.inference_billing_session_id
+    )
 
 
 @pytest.mark.asyncio
@@ -179,7 +196,9 @@ async def test_reset_session_usage_window_updates_runtime_and_store():
     assert agent_session.usage_window_started_at == started_at
     assert agent_session.inference_billing_session_id is not None
     assert agent_session.inference_billing_session_id != original_billing_session_id
-    assert agent_session.inference_billing_session_id.startswith("s1:usage:")
+    assert str(uuid.UUID(agent_session.inference_billing_session_id)) == (
+        agent_session.inference_billing_session_id
+    )
     assert (
         agent_session.session.inference_billing_session_id
         == agent_session.inference_billing_session_id

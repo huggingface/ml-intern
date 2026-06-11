@@ -3,10 +3,13 @@ from types import SimpleNamespace
 
 from agent.core.model_ids import HF_ROUTER_BASE_URL
 from agent.core.prompt_caching import (
+    HF_ROUTER_SESSION_ID_HEADER,
     router_session_id_for,
     with_prompt_cache_params,
     with_prompt_caching,
 )
+
+BILLING_SESSION_ID = "00000000-0000-4000-8000-000000000001"
 
 
 def _anthropic_fal_params() -> dict:
@@ -195,37 +198,61 @@ def test_prompt_caching_is_noop_for_non_router_fal_model():
     assert cached_messages is messages
 
 
-def test_prompt_cache_params_add_session_id_for_fal_router_model():
+def test_prompt_cache_params_add_session_id_header_for_fal_router_model():
     llm_params = _anthropic_fal_params()
 
-    cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
+    cached_params = with_prompt_cache_params(llm_params, session_id=BILLING_SESSION_ID)
 
     assert cached_params is not llm_params
-    assert cached_params["extra_body"] == {
-        "session_id": "session-1",
-        "cache_control": {"type": "ephemeral"},
+    assert cached_params["extra_headers"] == {
+        HF_ROUTER_SESSION_ID_HEADER: BILLING_SESSION_ID
     }
+    assert cached_params["extra_body"] == {"cache_control": {"type": "ephemeral"}}
+    assert "extra_headers" not in llm_params
     assert "extra_body" not in llm_params
 
 
-def test_prompt_cache_params_adds_session_id_for_novita_router_model():
+def test_prompt_cache_params_adds_session_id_header_for_novita_router_model():
     llm_params = _kimi_novita_params()
 
-    cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
+    cached_params = with_prompt_cache_params(llm_params, session_id=BILLING_SESSION_ID)
 
     assert cached_params is not llm_params
-    assert cached_params["extra_body"] == {"session_id": "session-1"}
+    assert cached_params["extra_headers"] == {
+        HF_ROUTER_SESSION_ID_HEADER: BILLING_SESSION_ID
+    }
+    assert "extra_body" not in cached_params
+    assert "extra_headers" not in llm_params
     assert "extra_body" not in llm_params
 
 
-def test_prompt_cache_params_adds_session_id_for_cerebras_router_model():
+def test_prompt_cache_params_adds_session_id_header_for_cerebras_router_model():
     llm_params = _gpt_oss_cerebras_params()
 
-    cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
+    cached_params = with_prompt_cache_params(llm_params, session_id=BILLING_SESSION_ID)
 
     assert cached_params is not llm_params
-    assert cached_params["extra_body"] == {"session_id": "session-1"}
+    assert cached_params["extra_headers"] == {
+        HF_ROUTER_SESSION_ID_HEADER: BILLING_SESSION_ID
+    }
+    assert "extra_body" not in cached_params
+    assert "extra_headers" not in llm_params
     assert "extra_body" not in llm_params
+
+
+def test_prompt_cache_params_merges_existing_headers():
+    llm_params = {
+        **_kimi_novita_params(),
+        "extra_headers": {"X-Existing": "1"},
+    }
+
+    cached_params = with_prompt_cache_params(llm_params, session_id=BILLING_SESSION_ID)
+
+    assert cached_params["extra_headers"] == {
+        "X-Existing": "1",
+        HF_ROUTER_SESSION_ID_HEADER: BILLING_SESSION_ID,
+    }
+    assert llm_params["extra_headers"] == {"X-Existing": "1"}
 
 
 def test_router_session_id_prefers_billing_window_id():
@@ -233,10 +260,10 @@ def test_router_session_id_prefers_billing_window_id():
         router_session_id_for(
             SimpleNamespace(
                 session_id="session-1",
-                inference_billing_session_id="session-1:usage:window-1",
+                inference_billing_session_id=BILLING_SESSION_ID,
             )
         )
-        == "session-1:usage:window-1"
+        == BILLING_SESSION_ID
     )
     assert router_session_id_for(SimpleNamespace(session_id="session-1")) == "session-1"
 
@@ -253,12 +280,14 @@ def test_prompt_cache_params_merges_gpt55_cache_hints():
         "extra_body": {"reasoning_effort": "high"},
     }
 
-    cached_params = with_prompt_cache_params(llm_params, session_id="session-1")
+    cached_params = with_prompt_cache_params(llm_params, session_id=BILLING_SESSION_ID)
 
+    assert cached_params["extra_headers"] == {
+        HF_ROUTER_SESSION_ID_HEADER: BILLING_SESSION_ID
+    }
     assert cached_params["extra_body"] == {
         "reasoning_effort": "high",
-        "session_id": "session-1",
-        "prompt_cache_key": "session-1",
+        "prompt_cache_key": BILLING_SESSION_ID,
         "prompt_cache_retention": "24h",
     }
     assert llm_params["extra_body"] == {"reasoning_effort": "high"}

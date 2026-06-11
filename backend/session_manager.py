@@ -1,7 +1,6 @@
 """Session manager for handling multiple concurrent agent sessions."""
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -35,7 +34,6 @@ from agent.messaging.gateway import NotificationGateway
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_CONFIG_PATH = str(PROJECT_ROOT / "configs" / "frontend_agent_config.json")
 USAGE_WARNING_SPEND_CACHE_TTL_SECONDS = 30.0
-INFERENCE_BILLING_SESSION_ID_MAX_LENGTH = 256
 
 
 # These dataclasses match agent/main.py structure
@@ -132,7 +130,9 @@ class AgentSession:
     def __post_init__(self) -> None:
         if self.usage_window_started_at is None:
             self.usage_window_started_at = self.created_at
-        if not self.inference_billing_session_id:
+        if not self.inference_billing_session_id or not _is_uuid(
+            self.inference_billing_session_id
+        ):
             self.inference_billing_session_id = new_inference_billing_session_id(
                 self.session_id,
                 self.usage_window_started_at,
@@ -145,31 +145,20 @@ class AgentSession:
             pass
 
 
-def _billing_window_stamp(started_at: datetime | None) -> str:
-    window_start = started_at or datetime.utcnow()
-    if window_start.tzinfo is None:
-        window_start = window_start.replace(tzinfo=UTC)
-    else:
-        window_start = window_start.astimezone(UTC)
-    return window_start.strftime("%Y%m%dT%H%M%S%fZ")
-
-
 def new_inference_billing_session_id(
-    session_id: str,
-    started_at: datetime | None = None,
+    session_id: str,  # noqa: ARG001 - kept for a stable call signature.
+    started_at: datetime | None = None,  # noqa: ARG001 - kept for a stable call signature.
 ) -> str:
-    """Return a Router session ID scoped to one visible usage window."""
-    stamp = _billing_window_stamp(started_at)
-    nonce = uuid.uuid4().hex[:12]
-    suffix = f":usage:{stamp}:{nonce}"
-    candidate = f"{session_id}{suffix}"
-    if len(candidate) <= INFERENCE_BILLING_SESSION_ID_MAX_LENGTH:
-        return candidate
+    """Return a Router billing session ID scoped to one visible usage window."""
+    return str(uuid.uuid4())
 
-    digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
-    suffix = f":{digest}{suffix}"
-    prefix_length = max(0, INFERENCE_BILLING_SESSION_ID_MAX_LENGTH - len(suffix))
-    return f"{session_id[:prefix_length]}{suffix}"
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 class SessionCapacityError(Exception):
@@ -1044,7 +1033,9 @@ class SessionManager:
         if not isinstance(usage_window_started_at, datetime):
             usage_window_started_at = created_at
         inference_billing_session_id = meta.get("inference_billing_session_id")
-        if not isinstance(inference_billing_session_id, str):
+        if not isinstance(inference_billing_session_id, str) or not _is_uuid(
+            inference_billing_session_id
+        ):
             inference_billing_session_id = new_inference_billing_session_id(
                 session_id,
                 usage_window_started_at,

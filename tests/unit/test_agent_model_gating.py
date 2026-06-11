@@ -11,8 +11,11 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent / "backend"
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+from agent.core.prompt_caching import HF_ROUTER_SESSION_ID_HEADER  # noqa: E402
 from routes import agent  # noqa: E402
 from dependencies import INTERNAL_HF_TOKEN_KEY  # noqa: E402
+
+BILLING_SESSION_ID = "00000000-0000-4000-8000-000000000001"
 
 
 def test_available_models_exclude_sonnet_and_have_no_pro_gate():
@@ -136,7 +139,7 @@ async def test_generate_title_sends_session_id_to_hf_router(monkeypatch):
         return SimpleNamespace(
             session=SimpleNamespace(
                 session_id="session-1",
-                inference_billing_session_id="session-1:usage:window-1",
+                inference_billing_session_id=BILLING_SESSION_ID,
             )
         )
 
@@ -158,9 +161,9 @@ async def test_generate_title_sends_session_id_to_hf_router(monkeypatch):
     )
 
     assert response == {"title": "Clean title"}
-    assert completions[0]["extra_body"] == {
-        "reasoning_effort": "low",
-        "session_id": "session-1:usage:window-1",
+    assert completions[0]["extra_body"] == {"reasoning_effort": "low"}
+    assert completions[0]["extra_headers"] == {
+        HF_ROUTER_SESSION_ID_HEADER: BILLING_SESSION_ID
     }
     assert titles == [("session-1", "Clean title")]
 

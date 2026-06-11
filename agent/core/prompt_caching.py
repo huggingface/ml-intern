@@ -16,7 +16,8 @@ from agent.core.model_ids import HF_ROUTER_BASE_URL
 
 _CACHE_CONTROL = {"type": "ephemeral"}
 _CACHEABLE_ROLES = {"system", "user"}
-_OPENROUTER_SESSION_ID_MAX_LENGTH = 256
+_HF_ROUTER_SESSION_ID_MAX_LENGTH = 256
+HF_ROUTER_SESSION_ID_HEADER = "X-HF-Session-id"
 
 
 def router_session_id_for(session: Any) -> str | None:
@@ -69,6 +70,19 @@ def _merge_extra_body(
     return cached_params
 
 
+def _merge_extra_headers(
+    llm_params: dict[str, Any], updates: dict[str, str]
+) -> dict[str, Any]:
+    if not updates:
+        return llm_params
+
+    cached_params = dict(llm_params)
+    extra_headers = dict(cached_params.get("extra_headers") or {})
+    extra_headers.update(updates)
+    cached_params["extra_headers"] = extra_headers
+    return cached_params
+
+
 def with_prompt_cache_params(
     llm_params: dict[str, Any],
     *,
@@ -76,9 +90,10 @@ def with_prompt_cache_params(
 ) -> dict[str, Any]:
     """Return LiteLLM params with provider-native prompt-cache body hints."""
     updates: dict[str, Any] = {}
+    headers: dict[str, str] = {}
     if session_id and _is_hf_router_request(llm_params):
-        stable_session_id = session_id[:_OPENROUTER_SESSION_ID_MAX_LENGTH]
-        updates["session_id"] = stable_session_id
+        stable_session_id = session_id[:_HF_ROUTER_SESSION_ID_MAX_LENGTH]
+        headers[HF_ROUTER_SESSION_ID_HEADER] = stable_session_id
         if _is_openai_gpt55(llm_params):
             updates["prompt_cache_key"] = stable_session_id
 
@@ -88,7 +103,7 @@ def with_prompt_cache_params(
     if _is_openai_gpt55(llm_params):
         updates["prompt_cache_retention"] = "24h"
 
-    return _merge_extra_body(llm_params, updates)
+    return _merge_extra_headers(_merge_extra_body(llm_params, updates), headers)
 
 
 def _message_role(message: Any) -> str | None:

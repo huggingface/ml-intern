@@ -19,6 +19,8 @@ from usage import (  # noqa: E402
 )
 from agent.core import session_persistence  # noqa: E402
 
+BILLING_SESSION_ID = "00000000-0000-4000-8000-000000000001"
+
 
 def _event(event_type, data=None, created_at="2026-06-01T12:00:00+00:00"):
     return {
@@ -310,7 +312,7 @@ def _agent_session(session_id, user_id, events):
     return SimpleNamespace(
         session_id=session_id,
         user_id=user_id,
-        inference_billing_session_id=f"{session_id}:usage:window-1",
+        inference_billing_session_id=BILLING_SESSION_ID,
         session=SimpleNamespace(logged_events=events),
     )
 
@@ -452,7 +454,7 @@ async def test_hf_account_usage_uses_session_endpoint_for_current_session(
                 user_id="owner",
                 created_at=session_created_at,
                 usage_window_started_at=usage_window_started_at,
-                inference_billing_session_id="s1:usage:window-1",
+                inference_billing_session_id=BILLING_SESSION_ID,
                 session=SimpleNamespace(logged_events=[]),
             )
         }
@@ -483,7 +485,7 @@ async def test_hf_account_usage_uses_session_endpoint_for_current_session(
                     "period": "2026-06-01T00:00:00.000Z",
                     "sessions": [
                         {
-                            "id": "s1:usage:window-1",
+                            "id": BILLING_SESSION_ID,
                             "requestCount": 3,
                             "costCents": 125,
                         },
@@ -543,7 +545,7 @@ async def test_hf_account_usage_keeps_account_available_when_session_endpoint_fa
                 user_id="owner",
                 created_at=datetime(2026, 6, 5, 12, 0, tzinfo=UTC),
                 usage_window_started_at=usage_window_started_at,
-                inference_billing_session_id="s1:usage:window-1",
+                inference_billing_session_id=BILLING_SESSION_ID,
                 session=SimpleNamespace(logged_events=[]),
             )
         }
@@ -587,7 +589,7 @@ async def test_hf_account_usage_falls_back_to_persisted_created_at(monkeypatch):
     store = _MetadataStore(
         {
             "created_at": session_created_at,
-            "inference_billing_session_id": "s1:usage:window-1",
+            "inference_billing_session_id": BILLING_SESSION_ID,
         }
     )
     manager = _Manager({}, store=store)
@@ -647,7 +649,7 @@ async def test_usage_response_loads_only_session_events(monkeypatch):
                 session_id="s1",
                 user_id="owner",
                 created_at=session_created_at,
-                inference_billing_session_id="s1:usage:window-1",
+                inference_billing_session_id=BILLING_SESSION_ID,
                 session=SimpleNamespace(logged_events=[]),
             )
         },

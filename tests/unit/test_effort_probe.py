@@ -3,6 +3,9 @@ from types import SimpleNamespace
 import pytest
 
 from agent.core import effort_probe
+from agent.core.prompt_caching import HF_ROUTER_SESSION_ID_HEADER
+
+BILLING_SESSION_ID = "00000000-0000-4000-8000-000000000001"
 
 
 @pytest.mark.asyncio
@@ -24,12 +27,12 @@ async def test_probe_effort_sends_session_id_to_hf_router(monkeypatch):
         "hf_fake",
         session=SimpleNamespace(
             session_id="session-1",
-            inference_billing_session_id="session-1:usage:window-1",
+            inference_billing_session_id=BILLING_SESSION_ID,
         ),
     )
 
     assert outcome.effective_effort == "high"
-    assert completions[0]["extra_body"] == {
-        "reasoning_effort": "high",
-        "session_id": "session-1:usage:window-1",
+    assert completions[0]["extra_body"] == {"reasoning_effort": "high"}
+    assert completions[0]["extra_headers"] == {
+        HF_ROUTER_SESSION_ID_HEADER: BILLING_SESSION_ID
     }
