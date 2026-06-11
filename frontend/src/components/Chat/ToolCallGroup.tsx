@@ -11,6 +11,8 @@ import { useAgentStore, type ResearchAgentState } from '@/store/agentStore';
 import { useLayoutStore } from '@/store/layoutStore';
 import { logger } from '@/utils/logger';
 import { RESEARCH_MAX_STEPS } from '@/lib/research-store';
+import { useSessionStore } from '@/store/sessionStore';
+import { apiFetch } from '@/utils/api';
 import type { UIMessage } from 'ai';
 
 // ---------------------------------------------------------------------------
@@ -43,6 +45,21 @@ function usageSourceLabel(source: unknown): string {
   return source === 'hf_billing_current_session'
     ? 'HF billing'
     : 'app telemetry';
+}
+
+function numberOrNull(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function defaultExtendedYoloCap(args: Record<string, unknown> | undefined): number {
+  const current = numberOrNull(args?.current_spend_usd) ?? 0;
+  const cap = numberOrNull(args?.cap_usd) ?? current;
+  return Math.ceil(Math.max(cap, current) + 5);
 }
 
 /** Check if a tool part was cancelled (output-error with cancellation message). */
@@ -530,9 +547,19 @@ function InlineApproval({
   const autoApproval = useAgentStore((state) => state.budgetBlocks[toolCallId]);
   const { setPanel, getEditedScript } = useAgentStore();
   const { setRightPanelOpen, setLeftSidebarOpen } = useLayoutStore();
+  const { activeSessionId, updateSessionYolo } = useSessionStore();
   const hasEditedScript = !!getEditedScript(toolCallId);
   const isUsageThreshold = toolName === USAGE_THRESHOLD_TOOL_NAME;
   const isYoloBudget = toolName === YOLO_BUDGET_TOOL_NAME;
+  const [yoloCapInput, setYoloCapInput] = useState('');
+  const [yoloCapBusy, setYoloCapBusy] = useState(false);
+  const [yoloCapError, setYoloCapError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isYoloBudget) return;
+    setYoloCapInput(String(defaultExtendedYoloCap(args)));
+    setYoloCapError(null);
+  }, [isYoloBudget, args?.cap_usd, args?.current_spend_usd]);
 
   const handleScriptClick = useCallback(() => {
     if (toolName === 'hf_jobs' && args?.script) {
@@ -546,6 +573,41 @@ function InlineApproval({
       setLeftSidebarOpen(false);
     }
   }, [toolCallId, toolName, args, scriptLabel, setPanel, getEditedScript, setRightPanelOpen, setLeftSidebarOpen]);
+
+  const handleExtendYoloCap = useCallback(async () => {
+    if (!activeSessionId) {
+      setYoloCapError('No active session.');
+      return;
+    }
+    const nextCap = Number(yoloCapInput);
+    const currentSpend = numberOrNull(args?.current_spend_usd) ?? 0;
+    if (!Number.isFinite(nextCap) || nextCap < 0) {
+      setYoloCapError('Enter a valid dollar amount.');
+      return;
+    }
+    if (nextCap <= currentSpend) {
+      setYoloCapError('Set the cap above current spend.');
+      return;
+    }
+    setYoloCapBusy(true);
+    setYoloCapError(null);
+    try {
+      const response = await apiFetch(`/api/session/${activeSessionId}/yolo`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: true, cost_cap_usd: nextCap }),
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const policy = await response.json();
+      updateSessionYolo(activeSessionId, policy);
+      onResolve(toolCallId, true);
+    } catch {
+      setYoloCapError('Could not extend the YOLO cap.');
+    } finally {
+      setYoloCapBusy(false);
+    }
+  }, [activeSessionId, args?.current_spend_usd, onResolve, toolCallId, updateSessionYolo, yoloCapInput]);
 
   if (isUsageThreshold) {
     return (
@@ -643,7 +705,7 @@ function InlineApproval({
           }}
         >
           <Typography variant="body2" sx={{ fontSize: '0.74rem' }}>
-            YOLO cap paused session usage: {String(args?.reason || 'cap reached')}
+            YOLO cap reached. Extend the YOLO cap to continue.
           </Typography>
         </Alert>
         <Box
@@ -666,13 +728,30 @@ function InlineApproval({
           <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
             {formatApprovalUsd(args?.remaining_cap_usd)}
           </Typography>
-          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
-            Next estimate
-          </Typography>
-          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
-            {formatApprovalUsd(args?.estimated_next_usd)}
-          </Typography>
         </Box>
+        <TextField
+          label="New YOLO cap (USD)"
+          type="number"
+          size="small"
+          value={yoloCapInput}
+          onChange={(event) => setYoloCapInput(event.target.value)}
+          inputProps={{ min: 0, step: 0.5 }}
+          error={Boolean(yoloCapError)}
+          helperText={yoloCapError || 'Set a cap above current spend.'}
+          sx={{
+            mb: 1.5,
+            width: '100%',
+            '& .MuiInputBase-input': {
+              color: 'var(--text)',
+              fontSize: '0.78rem',
+              fontVariantNumeric: 'tabular-nums',
+            },
+            '& .MuiInputLabel-root, & .MuiFormHelperText-root': {
+              color: 'var(--muted-text)',
+              fontSize: '0.72rem',
+            },
+          }}
+        />
         <Box sx={{ display: 'flex', gap: 1 }}>
           <Button
             size="small"
@@ -692,7 +771,8 @@ function InlineApproval({
           </Button>
           <Button
             size="small"
-            onClick={() => onResolve(toolCallId, true)}
+            onClick={handleExtendYoloCap}
+            disabled={yoloCapBusy}
             sx={{
               flex: 1,
               textTransform: 'none',
@@ -706,7 +786,7 @@ function InlineApproval({
               '&:hover': { bgcolor: 'rgba(47,204,113,0.1)' },
             }}
           >
-            Continue
+            Extend cap and continue
           </Button>
         </Box>
       </Box>
