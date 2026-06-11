@@ -166,6 +166,11 @@ To override the destination repo, set:
 The shared `smolagents/ml-intern-sessions` dataset is unrelated and only
 receives anonymized telemetry rows used by the backend KPI scheduler.
 
+`--notify-on-block` adds an attention ping when the interactive CLI is blocked
+waiting for approval. `--notify-method auto` prefers desktop notifications when
+supported (`osascript` on macOS, `notify-send` on Linux) and falls back to the
+terminal bell.
+
 ## Supported Gateways
 
 ML Intern currently supports one-way notification gateways from CLI sessions.

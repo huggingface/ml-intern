@@ -233,6 +233,14 @@ def _create_rich_console():
     return get_console()
 
 
+def _clear_terminal() -> None:
+    command = ["cmd", "/c", "cls"] if os.name == "nt" else ["clear"]
+    try:
+        subprocess.run(command, check=False)
+    except OSError:
+        pass
+
+
 def _ring_terminal_bell() -> None:
     """Emit a terminal bell without depending on stderr visibility."""
     try:
@@ -294,14 +302,6 @@ def _notify_attention_needed(
             return
 
     _ring_terminal_bell()
-
-
-def _clear_terminal() -> None:
-    command = ["cmd", "/c", "cls"] if os.name == "nt" else ["clear"]
-    try:
-        subprocess.run(command, check=False)
-    except OSError:
-        pass
 
 
 class _ThinkingShimmer:
@@ -1252,8 +1252,8 @@ async def _handle_share_traces_command(arg: str, config, session) -> None:
 
 async def main(
     model: str | None = None,
-    *,
     sandbox_tools: bool = False,
+    *,
     notify_on_block: bool = False,
     notification_method: str = "auto",
 ):
