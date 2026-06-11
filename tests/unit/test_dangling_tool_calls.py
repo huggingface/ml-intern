@@ -2,9 +2,8 @@
 
 Reproduces the failure mode behind observatory sessions 8dd2ce30 and
 59c9e678 (2026-04-25): a tool call cancelled mid-execution leaves an
-orphan ``tool_use`` in history; the user types a follow-up; Bedrock
-rejects the next request with HTTP 400 ``messages.N: tool_use ids were
-found without tool_result blocks immediately after``.
+orphan tool call in history; the user types a follow-up; providers reject the
+next request with HTTP 400 because tool calls are missing matching tool results.
 """
 
 from litellm import ChatCompletionMessageToolCall, Message
@@ -105,7 +104,7 @@ def test_orphan_in_earlier_turn_still_gets_patched():
     """Two-turn history where the FIRST turn was interrupted.
 
     Old patcher stopped at the first user msg encountered while scanning
-    backwards, so this case never got fixed and Bedrock rejected.
+    backwards, so this case never got fixed and providers rejected the request.
     """
     cm = _make_cm()
     cm.items.extend(

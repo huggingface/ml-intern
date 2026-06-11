@@ -5,13 +5,14 @@
  * runs — processing events — but only the active session renders visible
  * UI (MessageList + ChatInput).
  */
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useAgentChat } from '@/hooks/useAgentChat';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import MessageList from '@/components/Chat/MessageList';
 import ChatInput from '@/components/Chat/ChatInput';
 import ExpiredBanner from '@/components/Chat/ExpiredBanner';
+import ChatErrorBanner from '@/components/Chat/ChatErrorBanner';
 import { apiFetch } from '@/utils/api';
 import { logger } from '@/utils/logger';
 
@@ -23,9 +24,10 @@ interface SessionChatProps {
 
 export default function SessionChat({ sessionId, isActive, onSessionDead }: SessionChatProps) {
   const { isConnected, isProcessing, activityStatus, updateSession } = useAgentStore();
-  const { updateSessionTitle, sessions } = useSessionStore();
+  const { updateSessionTitle, sessions, setSessionProcessing } = useSessionStore();
   const sessionMeta = sessions.find((s) => s.id === sessionId);
   const isExpired = sessionMeta?.expired === true;
+  const [chatError, setChatError] = useState<string | null>(null);
 
   const {
     messages,
@@ -39,8 +41,15 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
   } = useAgentChat({
     sessionId,
     isActive,
+    // A backgrounded session that the backend reports mid-turn still needs to
+    // mount its live subscription; idle backgrounded sessions do not (that's
+    // what stops app load from reactivating every historical runtime).
+    isProcessing: sessionMeta?.isProcessing ?? false,
     onReady: () => logger.log(`Session ${sessionId} ready`),
-    onError: (error) => logger.error(`Session ${sessionId} error:`, error),
+    onError: (error) => {
+      logger.error(`Session ${sessionId} error:`, error);
+      setChatError(error);
+    },
     onSessionDead,
   });
 
@@ -81,7 +90,9 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
     async (text: string) => {
       if (!text.trim() || busy) return;
 
+      setChatError(null);
       updateSession(sessionId, { isProcessing: true, activityStatus: { type: 'thinking' } });
+      setSessionProcessing(sessionId, true);
       sendMessage({ text: text.trim(), metadata: { createdAt: new Date().toISOString() } });
 
       // Auto-title the session from the first user message
@@ -101,7 +112,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
           });
       }
     },
-    [sessionId, sendMessage, messages, updateSessionTitle, busy, updateSession],
+    [sessionId, sendMessage, messages, updateSessionTitle, busy, updateSession, setSessionProcessing],
   );
 
   // Don't render UI for background sessions — hooks still run
@@ -120,20 +131,32 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
       {isExpired ? (
         <ExpiredBanner sessionId={sessionId} />
       ) : (
-        <ChatInput
-          sessionId={sessionId}
-          initialModelPath={sessionMeta?.model}
-          onSend={handleSendMessage}
-          onStop={handleStop}
-          onDatasetUploaded={refreshMessages}
-          isProcessing={busy}
-          disabled={!isConnected || activityStatus.type === 'waiting-approval'}
-          placeholder={
-            activityStatus.type === 'waiting-approval'
-              ? 'Approve or reject pending tools first...'
-              : undefined
-          }
-        />
+        <>
+          {chatError && (
+            <ChatErrorBanner
+              error={chatError}
+              sessionId={sessionId}
+              model={sessionMeta?.model}
+              onDismiss={() => setChatError(null)}
+            />
+          )}
+          <ChatInput
+            sessionId={sessionId}
+            initialModelPath={sessionMeta?.model}
+            onSend={handleSendMessage}
+            onStop={handleStop}
+            onDatasetUploaded={refreshMessages}
+            isProcessing={busy}
+            disabled={!isConnected || activityStatus.type === 'waiting-approval'}
+            placeholder={
+              activityStatus.type === 'waiting-approval'
+                ? activityStatus.approvalKind === 'usage'
+                  ? 'Review the usage warning to continue...'
+                  : 'Approve or reject pending tools first...'
+                : undefined
+            }
+          />
+        </>
       )}
     </>
   );

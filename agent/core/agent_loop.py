@@ -14,7 +14,6 @@ from litellm import (
     ChatCompletionMessageToolCall,
     Message,
     acompletion,
-    stream_chunk_builder,
 )
 from litellm.exceptions import ContextWindowExceededError
 
@@ -27,10 +26,20 @@ from agent.core.cost_estimation import CostEstimate, estimate_tool_cost
 from agent.messaging.gateway import NotificationGateway
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
+from agent.core.hf_access import (
+    HF_BILLING_URL,
+    HF_PRO_SUBSCRIBE_URL,
+    is_inference_billing_error,
+)
 from agent.core.llm_params import _resolve_llm_params
-from agent.core.prompt_caching import with_prompt_caching
+from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
 from agent.core.session import DEFAULT_SESSION_LOG_DIR, Event, OpType, Session
 from agent.core.tools import ToolRouter
+from agent.core.usage_thresholds import (
+    USAGE_THRESHOLD_TOOL_NAME,
+    is_usage_threshold_pending,
+    next_usage_warning_threshold,
+)
 from agent.tools.jobs_tool import CPU_FLAVORS
 from agent.tools.sandbox_tool import (
     DEFAULT_CPU_SANDBOX_HARDWARE,
@@ -134,6 +143,47 @@ def _detect_repeated_malformed(
             return streak_tool
 
     return None
+
+
+def _coerce_float(value: Any) -> float:
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _usage_output_message(pending: dict[str, Any]) -> str:
+    current = _coerce_float(pending.get("current_spend_usd"))
+    next_threshold = _coerce_float(pending.get("next_threshold_usd"))
+    return (
+        f"Current-session usage warning acknowledged at ${current:.2f}. "
+        f"The next warning is at ${next_threshold:.2f}."
+    )
+
+
+async def _maybe_pause_for_usage_threshold(
+    session: Session,
+    *,
+    continuation: str,
+    final_response: str | None = None,
+) -> bool:
+    checker = getattr(session, "usage_threshold_checker", None)
+    if checker is None or session.pending_approval:
+        return False
+    payload: dict[str, Any] = {
+        "continuation": continuation,
+        "force_check": continuation == "complete_turn",
+        "history_size": len(session.context_manager.items),
+    }
+    if final_response is not None:
+        payload["final_response"] = final_response
+    try:
+        return bool(await checker(payload))
+    except Exception as e:
+        logger.debug("Usage threshold check failed: %s", e)
+        return False
 
 
 def _validate_tool_args(tool_args: dict) -> tuple[bool, str | None]:
@@ -405,7 +455,7 @@ async def _record_manual_approved_spend_if_needed(
 # -- LLM retry constants --------------------------------------------------
 _MAX_LLM_RETRIES = 3
 _LLM_RETRY_DELAYS = [5, 15, 30]  # seconds between retries
-_LLM_RATE_LIMIT_RETRY_DELAYS = [30, 60]  # exceed Bedrock's ~60s TPM bucket window
+_LLM_RATE_LIMIT_RETRY_DELAYS = [30, 60]
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
@@ -544,7 +594,33 @@ async def _heal_effort_and_rebuild_params(
     )
 
 
-def _friendly_error_message(error: Exception) -> str | None:
+def _inference_credit_error_message(user_plan: str | None = None) -> str:
+    plan = (user_plan or "unknown").lower()
+    if plan == "pro":
+        return (
+            "Hugging Face Inference Providers credits are exhausted for this "
+            "account.\n\n"
+            f"Add credits to continue: {HF_BILLING_URL}"
+        )
+    if plan == "free":
+        return (
+            "Your monthly Hugging Face Inference Providers credits are exhausted.\n\n"
+            f"Subscribe to HF PRO for more monthly usage: {HF_PRO_SUBSCRIBE_URL}\n"
+            f"Or add pay-as-you-go credits: {HF_BILLING_URL}"
+        )
+    return (
+        "Hugging Face Inference Providers credits appear to be exhausted for "
+        "this account.\n\n"
+        f"Add pay-as-you-go credits: {HF_BILLING_URL}\n"
+        f"If this is a free account, HF PRO adds more monthly usage: {HF_PRO_SUBSCRIBE_URL}"
+    )
+
+
+def _friendly_error_message(
+    error: Exception,
+    *,
+    user_plan: str | None = None,
+) -> str | None:
     """Return a user-friendly message for known error types, or None to fall back to traceback."""
     err_str = str(error).lower()
 
@@ -554,20 +630,14 @@ def _friendly_error_message(error: Exception) -> str | None:
         or "invalid x-api-key" in err_str
     ):
         return (
-            "Authentication failed — your API key is missing or invalid.\n\n"
-            "To fix this, set the API key for your model provider:\n"
-            "  • Anthropic:   export ANTHROPIC_API_KEY=sk-...\n"
-            "  • OpenAI:      export OPENAI_API_KEY=sk-...\n"
-            "  • HF Router:   export HF_TOKEN=hf_...\n\n"
+            "Authentication failed - your Hugging Face token is missing or invalid.\n\n"
+            "To fix this, set HF_TOKEN=hf_... or run `hf auth login`.\n\n"
             "You can also add it to a .env file in the project root.\n"
             "To switch models, use the /model command."
         )
 
-    if "insufficient" in err_str and "credit" in err_str:
-        return (
-            "Insufficient API credits. Please check your account balance "
-            "at your model provider's dashboard."
-        )
+    if is_inference_billing_error(error):
+        return _inference_credit_error_message(user_plan)
 
     if "not supported by provider" in err_str or "no provider supports" in err_str:
         return (
@@ -594,9 +664,8 @@ async def _compact_and_notify(session: Session) -> None:
 
     Catches ``CompactionFailedError`` and ends the session cleanly instead
     of letting the caller retry. Pre-2026-05-04 the caller looped on
-    ContextWindowExceededError → compact → re-trigger, burning Bedrock
-    budget at ~$3/Opus retry while the session never reached the upload
-    path (so the cost was invisible in the dataset).
+    ContextWindowExceededError → compact → re-trigger, burning hosted
+    inference budget while the session never reached the upload path.
     """
     from agent.context_manager.manager import CompactionFailedError
 
@@ -698,38 +767,10 @@ class LLMResult:
     token_count: int
     finish_reason: str | None
     usage: dict = field(default_factory=dict)
-    thinking_blocks: list[dict[str, Any]] | None = None
-    reasoning_content: str | None = None
-
-
-def _extract_thinking_state(
-    message: Any,
-) -> tuple[list[dict[str, Any]] | None, str | None]:
-    """Return provider reasoning fields that must be replayed after tool calls."""
-    provider_fields = getattr(message, "provider_specific_fields", None)
-    if not isinstance(provider_fields, dict):
-        provider_fields = {}
-
-    thinking_blocks = (
-        getattr(message, "thinking_blocks", None)
-        or provider_fields.get("thinking_blocks")
-        or None
-    )
-    reasoning_content = (
-        getattr(message, "reasoning_content", None)
-        or provider_fields.get("reasoning_content")
-        or None
-    )
-    return thinking_blocks, reasoning_content
-
-
-def _should_replay_thinking_state(model_name: str | None) -> bool:
-    """Only Anthropic's native adapter accepts replayed thinking metadata."""
-    return bool(model_name and model_name.startswith("anthropic/"))
 
 
 def _is_invalid_thinking_signature_error(exc: Exception) -> bool:
-    """Return True when Anthropic rejected replayed extended-thinking state."""
+    """Return True when a provider rejected replayed thinking metadata."""
     text = str(exc)
     return (
         "Invalid `signature` in `thinking` block" in text
@@ -818,7 +859,7 @@ async def _maybe_heal_invalid_thinking_signature(
             data={
                 "tool": "system",
                 "log": (
-                    "Anthropic rejected stale thinking signatures; retrying "
+                    "The inference provider rejected stale thinking signatures; retrying "
                     "without replayed thinking metadata."
                 ),
             },
@@ -830,21 +871,15 @@ async def _maybe_heal_invalid_thinking_signature(
 def _assistant_message_from_result(
     llm_result: LLMResult,
     *,
-    model_name: str | None,
     tool_calls: list[ToolCall] | None = None,
 ) -> Message:
-    """Build an assistant history message without dropping reasoning state."""
+    """Build an assistant history message for HF Router-compatible replay."""
     kwargs: dict[str, Any] = {
         "role": "assistant",
         "content": llm_result.content,
     }
     if tool_calls is not None:
         kwargs["tool_calls"] = tool_calls
-    if _should_replay_thinking_state(model_name):
-        if llm_result.thinking_blocks:
-            kwargs["thinking_blocks"] = llm_result.thinking_blocks
-        if llm_result.reasoning_content:
-            kwargs["reasoning_content"] = llm_result.reasoning_content
     return Message(**kwargs)
 
 
@@ -855,18 +890,23 @@ async def _call_llm_streaming(
     response = None
     _healed_effort = False  # one-shot safety net per call
     _healed_thinking_signature = False
-    messages, tools = with_prompt_caching(messages, tools, llm_params.get("model"))
     t_start = time.monotonic()
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
+            request_llm_params = with_prompt_cache_params(
+                llm_params, session_id=getattr(session, "session_id", None)
+            )
+            cached_messages, cached_tools = with_prompt_caching(
+                messages, tools, request_llm_params
+            )
             response = await acompletion(
-                messages=messages,
-                tools=tools,
+                messages=cached_messages,
+                tools=cached_tools,
                 tool_choice="auto",
                 stream=True,
                 stream_options={"include_usage": True},
                 timeout=600,
-                **llm_params,
+                **request_llm_params,
             )
             break
         except ContextWindowExceededError:
@@ -924,11 +964,8 @@ async def _call_llm_streaming(
     token_count = 0
     finish_reason = None
     final_usage_chunk = None
-    chunks = []
-    should_replay_thinking = _should_replay_thinking_state(llm_params.get("model"))
 
     async for chunk in response:
-        chunks.append(chunk)
         if session.is_cancelled:
             tool_calls_acc.clear()
             break
@@ -982,27 +1019,12 @@ async def _call_llm_streaming(
         latency_ms=int((time.monotonic() - t_start) * 1000),
         finish_reason=finish_reason,
     )
-    thinking_blocks = None
-    reasoning_content = None
-    if chunks and should_replay_thinking:
-        try:
-            rebuilt = stream_chunk_builder(chunks, messages=messages)
-            if rebuilt and getattr(rebuilt, "choices", None):
-                rebuilt_msg = rebuilt.choices[0].message
-                thinking_blocks, reasoning_content = _extract_thinking_state(
-                    rebuilt_msg
-                )
-        except Exception:
-            logger.debug("Failed to rebuild streaming thinking state", exc_info=True)
-
     return LLMResult(
         content=full_content or None,
         tool_calls_acc=tool_calls_acc,
         token_count=token_count,
         finish_reason=finish_reason,
         usage=usage,
-        thinking_blocks=thinking_blocks,
-        reasoning_content=reasoning_content,
     )
 
 
@@ -1013,17 +1035,22 @@ async def _call_llm_non_streaming(
     response = None
     _healed_effort = False
     _healed_thinking_signature = False
-    messages, tools = with_prompt_caching(messages, tools, llm_params.get("model"))
     t_start = time.monotonic()
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
+            request_llm_params = with_prompt_cache_params(
+                llm_params, session_id=getattr(session, "session_id", None)
+            )
+            cached_messages, cached_tools = with_prompt_caching(
+                messages, tools, request_llm_params
+            )
             response = await acompletion(
-                messages=messages,
-                tools=tools,
+                messages=cached_messages,
+                tools=cached_tools,
                 tool_choice="auto",
                 stream=False,
                 timeout=600,
-                **llm_params,
+                **request_llm_params,
             )
             break
         except ContextWindowExceededError:
@@ -1081,7 +1108,6 @@ async def _call_llm_non_streaming(
     content = message.content or None
     finish_reason = choice.finish_reason
     token_count = response.usage.total_tokens if response.usage else 0
-    thinking_blocks, reasoning_content = _extract_thinking_state(message)
 
     # Build tool_calls_acc in the same format as streaming
     tool_calls_acc: dict[int, dict] = {}
@@ -1116,8 +1142,6 @@ async def _call_llm_non_streaming(
         token_count=token_count,
         finish_reason=finish_reason,
         usage=usage,
-        thinking_blocks=thinking_blocks,
-        reasoning_content=reasoning_content,
     )
 
 
@@ -1132,6 +1156,41 @@ class Handlers:
         history stays valid) and notifies the frontend that those tools were
         abandoned.
         """
+        if is_usage_threshold_pending(session.pending_approval):
+            pending = session.pending_approval
+            tool_call_id = str(pending.get("tool_call_id") or "")
+            session.pending_approval = None
+            if tool_call_id:
+                await session.send_event(
+                    Event(
+                        event_type="tool_state_change",
+                        data={
+                            "tool_call_id": tool_call_id,
+                            "tool": USAGE_THRESHOLD_TOOL_NAME,
+                            "state": "abandoned",
+                        },
+                    )
+                )
+            if pending.get("continuation") == "complete_turn":
+                final_response = pending.get("final_response")
+                await session.send_event(
+                    Event(
+                        event_type="turn_complete",
+                        data={
+                            "history_size": int(
+                                pending.get("history_size")
+                                or len(session.context_manager.items)
+                            ),
+                            "final_response": final_response
+                            if isinstance(final_response, str)
+                            else None,
+                        },
+                    )
+                )
+                session.increment_turn()
+                await session.auto_save_if_needed()
+            return
+
         tool_calls = session.pending_approval.get("tool_calls", [])
         for tc in tool_calls:
             tool_name = tc.function.name
@@ -1210,6 +1269,12 @@ class Handlers:
             await _compact_and_notify(session)
             if not session.is_running:
                 break
+
+            if await _maybe_pause_for_usage_threshold(
+                session,
+                continuation="continue_agent",
+            ):
+                return final_response
 
             # Doom-loop detection: break out of repeated tool call patterns
             doom_prompt = check_for_doom_loop(session.context_manager.items)
@@ -1296,10 +1361,7 @@ class Handlers:
                         "  • For other tools: reduce the size of your arguments or use bash."
                     )
                     if content:
-                        assistant_msg = _assistant_message_from_result(
-                            llm_result,
-                            model_name=llm_params.get("model"),
-                        )
+                        assistant_msg = _assistant_message_from_result(llm_result)
                         session.context_manager.add_message(assistant_msg, token_count)
                     session.context_manager.add_message(
                         Message(role="user", content=f"[SYSTEM: {truncation_hint}]")
@@ -1356,10 +1418,7 @@ class Handlers:
                             _NO_TOOL_INCOMPLETE_PLAN_RETRY_LIMIT,
                         )
                         if content:
-                            assistant_msg = _assistant_message_from_result(
-                                llm_result,
-                                model_name=llm_params.get("model"),
-                            )
+                            assistant_msg = _assistant_message_from_result(llm_result)
                             session.context_manager.add_message(
                                 assistant_msg, token_count
                             )
@@ -1403,10 +1462,7 @@ class Handlers:
                         (content or "")[:500],
                     )
                     if content:
-                        assistant_msg = _assistant_message_from_result(
-                            llm_result,
-                            model_name=llm_params.get("model"),
-                        )
+                        assistant_msg = _assistant_message_from_result(llm_result)
                         session.context_manager.add_message(assistant_msg, token_count)
                         final_response = content
                     break
@@ -1433,7 +1489,6 @@ class Handlers:
                 # Add assistant message with all tool calls to context
                 assistant_msg = _assistant_message_from_result(
                     llm_result,
-                    model_name=llm_params.get("model"),
                     tool_calls=tool_calls,
                 )
                 session.context_manager.add_message(assistant_msg, token_count)
@@ -1713,7 +1768,10 @@ class Handlers:
             except Exception as e:
                 import traceback
 
-                error_msg = _friendly_error_message(e)
+                error_msg = _friendly_error_message(
+                    e,
+                    user_plan=getattr(session, "user_plan", None),
+                )
                 if error_msg is None:
                     error_msg = str(e) + "\n" + traceback.format_exc()
 
@@ -1730,6 +1788,14 @@ class Handlers:
             await _cleanup_on_cancel(session)
             await session.send_event(Event(event_type="interrupted"))
         elif not errored:
+            if await _maybe_pause_for_usage_threshold(
+                session,
+                continuation="complete_turn",
+                final_response=final_response
+                if isinstance(final_response, str)
+                else None,
+            ):
+                return final_response
             await session.send_event(
                 Event(
                     event_type="turn_complete",
@@ -1757,6 +1823,19 @@ class Handlers:
         await session.send_event(Event(event_type="undo_complete"))
 
     @staticmethod
+    async def new_conversation(session: Session, *, clear_screen: bool = False) -> None:
+        """Start a fresh conversation inside the active runtime."""
+        try:
+            result = session.start_new_conversation()
+        except Exception as e:
+            await session.send_event(
+                Event(event_type="error", data={"error": f"New chat failed: {e}"})
+            )
+            return
+        result["clear_screen"] = clear_screen
+        await session.send_event(Event(event_type="new_complete", data=result))
+
+    @staticmethod
     async def resume(session: Session, path: str) -> None:
         """Reload context from a saved session log into the active session."""
         from agent.core.session_resume import restore_session_from_log
@@ -1771,6 +1850,113 @@ class Handlers:
         await session.send_event(Event(event_type="resume_complete", data=result))
 
     @staticmethod
+    async def _exec_usage_threshold_approval(
+        session: Session, approvals: list[dict]
+    ) -> None:
+        pending = (
+            session.pending_approval
+            if isinstance(session.pending_approval, dict)
+            else {}
+        )
+        tool_call_id = str(pending.get("tool_call_id") or "")
+        approval = next(
+            (item for item in approvals if item.get("tool_call_id") == tool_call_id),
+            {"approved": False},
+        )
+        approved = bool(approval.get("approved"))
+
+        session.pending_approval = None
+        if not tool_call_id:
+            await session.send_event(
+                Event(
+                    event_type="error",
+                    data={"error": "Usage approval is missing its approval id"},
+                )
+            )
+            return
+
+        if not approved:
+            feedback = str(approval.get("feedback") or "Stopped by user").strip()
+            await session.send_event(
+                Event(
+                    event_type="tool_state_change",
+                    data={
+                        "tool_call_id": tool_call_id,
+                        "tool": USAGE_THRESHOLD_TOOL_NAME,
+                        "state": "rejected",
+                    },
+                )
+            )
+            await session.send_event(
+                Event(
+                    event_type="tool_output",
+                    data={
+                        "tool": USAGE_THRESHOLD_TOOL_NAME,
+                        "tool_call_id": tool_call_id,
+                        "output": feedback,
+                        "success": False,
+                    },
+                )
+            )
+            await session.send_event(Event(event_type="interrupted"))
+            session.increment_turn()
+            await session.auto_save_if_needed()
+            return
+
+        current_spend = _coerce_float(pending.get("current_spend_usd"))
+        acknowledged_threshold = _coerce_float(pending.get("threshold_usd"))
+        next_threshold = next_usage_warning_threshold(
+            current_spend,
+            acknowledged_threshold,
+        )
+        session.usage_warning_next_threshold_usd = next_threshold
+        pending["next_threshold_usd"] = next_threshold
+
+        await session.send_event(
+            Event(
+                event_type="tool_state_change",
+                data={
+                    "tool_call_id": tool_call_id,
+                    "tool": USAGE_THRESHOLD_TOOL_NAME,
+                    "state": "approved",
+                },
+            )
+        )
+        await session.send_event(
+            Event(
+                event_type="tool_output",
+                data={
+                    "tool": USAGE_THRESHOLD_TOOL_NAME,
+                    "tool_call_id": tool_call_id,
+                    "output": _usage_output_message(pending),
+                    "success": True,
+                },
+            )
+        )
+
+        if pending.get("continuation") == "complete_turn":
+            final_response = pending.get("final_response")
+            await session.send_event(
+                Event(
+                    event_type="turn_complete",
+                    data={
+                        "history_size": int(
+                            pending.get("history_size")
+                            or len(session.context_manager.items)
+                        ),
+                        "final_response": final_response
+                        if isinstance(final_response, str)
+                        else None,
+                    },
+                )
+            )
+            session.increment_turn()
+            await session.auto_save_if_needed()
+            return
+
+        await Handlers.run_agent(session, "")
+
+    @staticmethod
     async def exec_approval(session: Session, approvals: list[dict]) -> None:
         """Handle batch job execution approval"""
         if not session.pending_approval:
@@ -1780,6 +1966,10 @@ class Handlers:
                     data={"error": "No pending approval to process"},
                 )
             )
+            return
+
+        if is_usage_threshold_pending(session.pending_approval):
+            await Handlers._exec_usage_threshold_approval(session, approvals)
             return
 
         tool_calls = session.pending_approval.get("tool_calls", [])
@@ -2058,6 +2248,11 @@ async def process_submission(session: Session, submission) -> bool:
         await Handlers.undo(session)
         return True
 
+    if op.op_type == OpType.NEW:
+        clear_screen = bool((op.data or {}).get("clear_screen"))
+        await Handlers.new_conversation(session, clear_screen=clear_screen)
+        return True
+
     if op.op_type == OpType.RESUME:
         path = op.data.get("path") if op.data else None
         if path:
@@ -2093,6 +2288,7 @@ async def submission_loop(
     notification_gateway: NotificationGateway | None = None,
     notification_destinations: list[str] | None = None,
     defer_turn_complete_notification: bool = False,
+    user_plan: str | None = None,
 ) -> None:
     """
     Main agent loop - processes submissions and dispatches to handlers.
@@ -2106,6 +2302,7 @@ async def submission_loop(
         tool_router=tool_router,
         hf_token=hf_token,
         user_id=user_id,
+        user_plan=user_plan,
         local_mode=local_mode,
         stream=stream,
         notification_gateway=notification_gateway,

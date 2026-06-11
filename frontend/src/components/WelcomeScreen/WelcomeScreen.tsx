@@ -12,6 +12,7 @@ import LoginIcon from '@mui/icons-material/Login';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import { useSessionStore } from '@/store/sessionStore';
 import { useAgentStore } from '@/store/agentStore';
+import { useUsageStore } from '@/store/usageStore';
 import { apiFetch } from '@/utils/api';
 import { isInIframe, triggerLogin } from '@/hooks/useAuth';
 
@@ -210,6 +211,7 @@ export default function WelcomeScreen() {
       }
       const data = await response.json();
       createSession(data.session_id, data.model);
+      void useUsageStore.getState().fetchUsage(data.session_id);
       setPlan([]);
       clearPanel();
     } catch {
@@ -387,7 +389,7 @@ export default function WelcomeScreen() {
           variant="caption"
           sx={{ mt: 4, color: 'var(--muted-text)', opacity: 0.5, fontSize: '0.7rem' }}
         >
-          Conversations are stored locally in your browser.
+          Conversations are stored locally in your browser. Usage is billed based on the compute time of your agent's actions.
         </Typography>
       </Box>
     </Box>

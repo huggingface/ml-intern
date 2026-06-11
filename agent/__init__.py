@@ -8,10 +8,8 @@ import litellm
 # backend entries share the same config.
 #   drop_params: quietly drop unsupported params rather than raising
 #   suppress_debug_info: hide the noisy "Give Feedback" banner on errors
-#   modify_params: let LiteLLM patch Anthropic's tool-call requirements
-#     (synthesize a dummy tool spec when we call completion on a history
-#     that contains tool_calls but aren't passing `tools=` — happens
-#     during summarization / session seeding).
+#   modify_params: let LiteLLM patch provider-specific schema requirements
+#     for router-compatible request bodies when possible.
 litellm.drop_params = True
 litellm.suppress_debug_info = True
 litellm.modify_params = True

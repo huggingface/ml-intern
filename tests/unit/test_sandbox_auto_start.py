@@ -112,7 +112,7 @@ async def test_cli_sandbox_runtime_preloads_and_tears_down_sandbox(monkeypatch):
     event_queue = asyncio.Queue()
     session_holder = [None]
     config = Config.model_validate(
-        {"model_name": "openai/gpt-5.5", "save_sessions": False}
+        {"model_name": "openai/gpt-5.5:fal-ai", "save_sessions": False}
     )
 
     task = asyncio.create_task(

@@ -1,6 +1,5 @@
-"""Tests for premium model handling in backend/routes/agent.py."""
+"""Tests for hosted model handling in backend/routes/agent.py."""
 
-import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,60 +14,117 @@ if str(_BACKEND_DIR) not in sys.path:
 from routes import agent  # noqa: E402
 
 
-@pytest.fixture(autouse=True)
-def _reset_quota_store():
-    agent.user_quotas._reset_for_tests()
-    yield
-    agent.user_quotas._reset_for_tests()
+def test_available_models_exclude_sonnet_and_have_no_pro_gate():
+    models = {model["id"]: model for model in agent.AVAILABLE_MODELS}
+
+    assert models[agent.DEFAULT_OPUS_MODEL_ID]["label"] == "Claude Opus 4.8"
+    assert models[agent.DEFAULT_OPUS_MODEL_ID]["recommended"] is True
+    assert "recommended" not in models[agent.DEFAULT_FREE_MODEL_ID]
+    assert all("minimum_plan" not in model for model in models.values())
+    assert all("tier" not in model for model in models.values())
 
 
-def test_premium_model_predicate_includes_bedrock_claude_and_gpt55_only():
-    assert agent._is_premium_model("bedrock/us.anthropic.claude-opus-4-6-v1")
-    assert agent._is_premium_model("openai/gpt-5.5")
-    assert not agent._is_premium_model("anthropic/claude-opus-4-6")
-    assert not agent._is_premium_model("moonshotai/Kimi-K2.6")
+def test_default_model_for_user_is_plan_aware():
+    assert agent._default_model_for_user({"plan": "pro"}) == agent.DEFAULT_OPUS_MODEL_ID
+    assert (
+        agent._default_model_for_user({"plan": "free"}) == agent.DEFAULT_FREE_MODEL_ID
+    )
+    assert agent._default_model_for_user({}) == agent.DEFAULT_FREE_MODEL_ID
 
 
 @pytest.mark.asyncio
-async def test_default_premium_session_falls_back_to_free_model(monkeypatch):
+async def test_llm_health_uses_request_hf_token(monkeypatch):
+    class Request:
+        headers = {"Authorization": "Bearer user-token"}
+        cookies = {}
+
+    resolved = []
+    completions = []
+
+    def fake_resolve_llm_params(
+        model_name,
+        session_hf_token=None,
+        reasoning_effort=None,
+        strict=False,
+    ):
+        resolved.append((model_name, session_hf_token, reasoning_effort, strict))
+        return {
+            "model": f"openai/{model_name}",
+            "api_base": "https://router.huggingface.co/v1",
+            "api_key": session_hf_token,
+        }
+
+    async def fake_acompletion(**kwargs):
+        completions.append(kwargs)
+
     monkeypatch.setattr(
-        agent.session_manager.config,
-        "model_name",
-        agent.DEFAULT_CLAUDE_MODEL_ID,
+        agent.session_manager,
+        "config",
+        SimpleNamespace(model_name=agent.DEFAULT_FREE_MODEL_ID),
+    )
+    monkeypatch.setattr(agent, "_resolve_llm_params", fake_resolve_llm_params)
+    monkeypatch.setattr(agent, "acompletion", fake_acompletion)
+
+    response = await agent.llm_health_check(Request())
+
+    assert response.status == "ok"
+    assert resolved == [(agent.DEFAULT_FREE_MODEL_ID, "user-token", "high", False)]
+    assert completions[0]["api_key"] == "user-token"
+
+
+@pytest.mark.asyncio
+async def test_llm_health_skips_router_probe_without_token(monkeypatch):
+    class Request:
+        headers = {}
+        cookies = {}
+
+    def fail_resolve_llm_params(*args, **kwargs):
+        raise AssertionError(
+            "health check should not resolve router params without token"
+        )
+
+    async def fail_acompletion(**kwargs):
+        raise AssertionError("health check should not call LiteLLM without token")
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(
+        agent.session_manager,
+        "config",
+        SimpleNamespace(model_name=agent.DEFAULT_FREE_MODEL_ID),
+    )
+    monkeypatch.setattr(agent, "_resolve_llm_params", fail_resolve_llm_params)
+    monkeypatch.setattr(agent, "acompletion", fail_acompletion)
+
+    response = await agent.llm_health_check(Request())
+
+    assert response.status == "skipped"
+    assert response.model == agent.DEFAULT_FREE_MODEL_ID
+
+
+@pytest.mark.asyncio
+async def test_empty_session_model_uses_plan_default():
+    assert (
+        await agent._model_override_for_new_session(None, {"plan": "pro"})
+        == agent.DEFAULT_OPUS_MODEL_ID
+    )
+    assert (
+        await agent._model_override_for_new_session(None, {"plan": "free"})
+        == agent.DEFAULT_FREE_MODEL_ID
     )
 
-    model = await agent._model_override_for_new_session(None, None)
-
-    assert model == agent.DEFAULT_FREE_MODEL_ID
-
 
 @pytest.mark.asyncio
-async def test_default_free_session_keeps_config_default(monkeypatch):
-    monkeypatch.setattr(
-        agent.session_manager.config,
-        "model_name",
-        agent.DEFAULT_FREE_MODEL_ID,
-    )
-
-    model = await agent._model_override_for_new_session(None, None)
-
-    assert model is None
-
-
-@pytest.mark.asyncio
-async def test_explicit_premium_session_allowed_for_authenticated_user():
+async def test_explicit_session_model_is_honored():
     model = await agent._model_override_for_new_session(
-        None,
-        agent.DEFAULT_CLAUDE_MODEL_ID,
+        agent.DEFAULT_GPT_MODEL_ID,
+        {"plan": "free"},
     )
 
-    assert model == agent.DEFAULT_CLAUDE_MODEL_ID
+    assert model == agent.DEFAULT_GPT_MODEL_ID
 
 
 @pytest.mark.asyncio
-async def test_switching_to_premium_model_is_allowed_for_authenticated_user(
-    monkeypatch,
-):
+async def test_switching_to_opus_is_allowed_for_free_user(monkeypatch):
     updated = []
 
     async def fake_check_session_access(session_id, user, request=None):
@@ -88,292 +144,136 @@ async def test_switching_to_premium_model_is_allowed_for_authenticated_user(
 
     response = await agent.set_session_model(
         "s1",
-        {"model": "openai/gpt-5.5"},
+        {"model": agent.DEFAULT_OPUS_MODEL_ID},
         request=None,
         user={"user_id": "u1", "plan": "free"},
     )
 
-    assert response == {"session_id": "s1", "model": "openai/gpt-5.5"}
-    assert updated == [("s1", "openai/gpt-5.5")]
+    assert response == {"session_id": "s1", "model": agent.DEFAULT_OPUS_MODEL_ID}
+    assert updated == [("s1", agent.DEFAULT_OPUS_MODEL_ID)]
 
 
 @pytest.mark.asyncio
-async def test_premium_quota_charges_gpt55(monkeypatch):
-    persisted = []
+async def test_switching_to_gpt_is_allowed_for_free_user(monkeypatch):
+    updated = []
 
-    async def fake_persist_session_snapshot(agent_session):
-        persisted.append(agent_session)
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "persist_session_snapshot",
-        fake_persist_session_snapshot,
-    )
-
-    agent_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
-        ),
-    )
-
-    await agent._enforce_premium_model_quota(
-        {"user_id": "u1", "plan": "free"},
-        agent_session,
-    )
-
-    assert agent_session.claude_counted is True
-    assert persisted == [agent_session]
-    assert await agent.user_quotas.get_claude_used_today("u1") == 1
-
-
-@pytest.mark.asyncio
-async def test_free_user_premium_quota_rejects_second_session(monkeypatch):
-    async def fake_persist_session_snapshot(_agent_session):
-        return None
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "persist_session_snapshot",
-        fake_persist_session_snapshot,
-    )
-
-    first_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
-        ),
-    )
-    second_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
-        ),
-    )
-
-    await agent._enforce_premium_model_quota(
-        {"user_id": "free-user", "plan": "free"},
-        first_session,
-    )
-    with pytest.raises(HTTPException) as exc_info:
-        await agent._enforce_premium_model_quota(
-            {"user_id": "free-user", "plan": "free"},
-            second_session,
-        )
-
-    assert exc_info.value.status_code == 429
-    assert exc_info.value.detail["error"] == "premium_model_daily_cap"
-    assert exc_info.value.detail["plan"] == "free"
-
-
-@pytest.mark.asyncio
-async def test_pro_user_uses_pro_premium_quota(monkeypatch):
-    async def fake_persist_session_snapshot(_agent_session):
-        return None
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "persist_session_snapshot",
-        fake_persist_session_snapshot,
-    )
-
-    for index in range(2):
-        agent_session = SimpleNamespace(
-            claude_counted=False,
-            session=SimpleNamespace(
-                config=SimpleNamespace(model_name="openai/gpt-5.5"),
-            ),
-        )
-        await agent._enforce_premium_model_quota(
-            {"user_id": "pro-user", "plan": "pro"},
-            agent_session,
-        )
-        assert agent_session.claude_counted is True
-        assert await agent.user_quotas.get_claude_used_today("pro-user") == index + 1
-
-
-@pytest.mark.asyncio
-async def test_org_plan_uses_free_premium_quota(monkeypatch):
-    async def fake_persist_session_snapshot(_agent_session):
-        return None
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "persist_session_snapshot",
-        fake_persist_session_snapshot,
-    )
-
-    first_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
-        ),
-    )
-    second_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="openai/gpt-5.5"),
-        ),
-    )
-
-    await agent._enforce_premium_model_quota(
-        {"user_id": "org-user", "plan": "org"},
-        first_session,
-    )
-    with pytest.raises(HTTPException) as exc_info:
-        await agent._enforce_premium_model_quota(
-            {"user_id": "org-user", "plan": "org"},
-            second_session,
-        )
-
-    assert exc_info.value.status_code == 429
-    assert exc_info.value.detail["plan"] == "org"
-    assert "Upgrade to HF Pro" in exc_info.value.detail["message"]
-
-
-@pytest.mark.asyncio
-async def test_premium_quota_skips_direct_anthropic(monkeypatch):
-    async def fail_if_persisted(_agent_session):
-        raise AssertionError("direct Anthropic should not consume premium quota")
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "persist_session_snapshot",
-        fail_if_persisted,
-    )
-
-    agent_session = SimpleNamespace(
-        claude_counted=False,
-        session=SimpleNamespace(
-            config=SimpleNamespace(model_name="anthropic/claude-opus-4-6"),
-        ),
-    )
-
-    await agent._enforce_premium_model_quota(
-        {"user_id": "u1", "plan": "free"},
-        agent_session,
-    )
-
-    assert agent_session.claude_counted is False
-    assert await agent.user_quotas.get_claude_used_today("u1") == 0
-
-
-@pytest.mark.asyncio
-async def test_user_quota_response_uses_premium_fields_only(monkeypatch):
-    async def fake_get_used_today(user_id):
-        assert user_id == "u1"
-        return 2
-
-    monkeypatch.setattr(agent.user_quotas, "get_claude_used_today", fake_get_used_today)
-    monkeypatch.setattr(agent.user_quotas, "daily_cap_for", lambda plan: 5)
-
-    response = await agent.get_user_quota({"user_id": "u1", "plan": "pro"})
-
-    assert response == {
-        "plan": "pro",
-        "premium_used_today": 2,
-        "premium_daily_cap": 5,
-        "premium_remaining": 3,
-    }
-
-
-@pytest.mark.asyncio
-async def test_set_session_yolo_calls_manager_with_cap_presence(monkeypatch):
     async def fake_check_session_access(session_id, user, request=None):
-        assert session_id == "s1"
-        assert user["user_id"] == "u1"
-        return object()
+        return SimpleNamespace(user_id=user["user_id"])
 
-    calls = []
-
-    async def fake_update_session_auto_approval(session_id, **kwargs):
-        calls.append((session_id, kwargs))
-        return {
-            "enabled": kwargs["enabled"],
-            "cost_cap_usd": 7.5,
-            "estimated_spend_usd": 0.0,
-            "remaining_usd": 7.5,
-        }
+    async def fake_update_session_model(session_id, model_id):
+        updated.append((session_id, model_id))
 
     monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
     monkeypatch.setattr(
         agent.session_manager,
-        "update_session_auto_approval",
-        fake_update_session_auto_approval,
+        "update_session_model",
+        fake_update_session_model,
     )
 
-    response = await agent.set_session_yolo(
+    response = await agent.set_session_model(
         "s1",
-        agent.SessionYoloRequest(enabled=True, cost_cap_usd=7.5),
-        {"user_id": "u1"},
+        {"model": agent.DEFAULT_GPT_MODEL_ID},
+        request=None,
+        user={"user_id": "u1", "plan": "free"},
     )
 
-    assert response["enabled"] is True
-    assert response["remaining_usd"] == 7.5
-    assert calls == [
-        (
+    assert response == {"session_id": "s1", "model": agent.DEFAULT_GPT_MODEL_ID}
+    assert updated == [("s1", agent.DEFAULT_GPT_MODEL_ID)]
+
+
+@pytest.mark.asyncio
+async def test_switching_to_unknown_model_id_is_rejected(monkeypatch):
+    async def fake_check_session_access(session_id, user, request=None):
+        return SimpleNamespace(user_id=user["user_id"])
+
+    monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent.set_session_model(
             "s1",
-            {
-                "enabled": True,
-                "cost_cap_usd": 7.5,
-                "cap_provided": True,
-            },
+            {"model": "unsupported/model"},
+            request=None,
+            user={"user_id": "u1", "plan": "free"},
         )
+
+    assert exc_info.value.status_code == 400
+    assert "Unknown model" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_restore_summary_uses_default_model_without_quota_gate(monkeypatch):
+    events = []
+
+    class Request:
+        headers = {}
+        cookies = {}
+
+    async def fake_create_session(**kwargs):
+        events.append(("create", kwargs["model"], kwargs.get("user_plan")))
+        return "s1"
+
+    async def fake_check_session_access(
+        session_id, user, request, preload_sandbox=True
+    ):
+        events.append(("check", session_id, preload_sandbox))
+        return SimpleNamespace(session=SimpleNamespace(config=SimpleNamespace()))
+
+    async def fake_seed(session_id, messages):
+        events.append(("seed", session_id))
+        return len(messages)
+
+    monkeypatch.setattr(agent.session_manager, "create_session", fake_create_session)
+    monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
+    monkeypatch.setattr(agent.session_manager, "seed_from_summary", fake_seed)
+
+    response = await agent.restore_session_summary(
+        Request(),
+        {"messages": [{"role": "user", "content": "resume this"}]},
+        {"user_id": "u1", "plan": "free"},
+    )
+
+    assert response.session_id == "s1"
+    assert response.model == agent.DEFAULT_FREE_MODEL_ID
+    assert events == [
+        ("create", agent.DEFAULT_FREE_MODEL_ID, "free"),
+        ("check", "s1", False),
+        ("seed", "s1"),
     ]
 
 
 @pytest.mark.asyncio
-async def test_delete_session_access_check_skips_sandbox_preload(monkeypatch):
-    ensure_calls = []
-    delete_calls = []
+async def test_check_session_access_passes_user_plan(monkeypatch):
+    seen = {}
+    expected_session = SimpleNamespace(user_id="u1")
+
+    class Request:
+        headers = {"Authorization": "Bearer user-token"}
+        cookies = {}
 
     async def fake_ensure_session_loaded(session_id, user_id, **kwargs):
-        ensure_calls.append((session_id, user_id, kwargs))
-        return SimpleNamespace(user_id=user_id)
-
-    async def fake_delete_session(session_id):
-        delete_calls.append(session_id)
-        return True
+        seen["session_id"] = session_id
+        seen["user_id"] = user_id
+        seen.update(kwargs)
+        return expected_session
 
     monkeypatch.setattr(
         agent.session_manager,
         "ensure_session_loaded",
         fake_ensure_session_loaded,
     )
-    monkeypatch.setattr(agent.session_manager, "delete_session", fake_delete_session)
 
-    response = await agent.delete_session("s1", {"user_id": "u1"})
-
-    assert response == {"status": "deleted", "session_id": "s1"}
-    assert delete_calls == ["s1"]
-    assert ensure_calls[0][2]["preload_sandbox"] is False
-
-
-@pytest.mark.asyncio
-async def test_teardown_session_access_check_skips_sandbox_preload(monkeypatch):
-    ensure_calls = []
-    teardown_calls = []
-
-    async def fake_ensure_session_loaded(session_id, user_id, **kwargs):
-        ensure_calls.append((session_id, user_id, kwargs))
-        return SimpleNamespace(user_id=user_id)
-
-    async def fake_teardown_sandbox(session_id):
-        teardown_calls.append(session_id)
-        return True
-
-    monkeypatch.setattr(
-        agent.session_manager,
-        "ensure_session_loaded",
-        fake_ensure_session_loaded,
-    )
-    monkeypatch.setattr(
-        agent.session_manager, "teardown_sandbox", fake_teardown_sandbox
+    result = await agent._check_session_access(
+        "s1",
+        {"user_id": "u1", "username": "tester", "plan": "pro"},
+        Request(),
     )
 
-    response = await agent.teardown_session_sandbox("s1", {"user_id": "u1"})
-    await asyncio.sleep(0)
-
-    assert response == {"status": "teardown_requested", "session_id": "s1"}
-    assert teardown_calls == ["s1"]
-    assert ensure_calls[0][2]["preload_sandbox"] is False
+    assert result is expected_session
+    assert seen == {
+        "session_id": "s1",
+        "user_id": "u1",
+        "hf_token": "user-token",
+        "hf_username": "tester",
+        "user_plan": "pro",
+        "preload_sandbox": True,
+    }

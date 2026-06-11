@@ -39,7 +39,27 @@ export interface SideChannelCallbacks {
   onToolOutputPanel: (tool: string, toolCallId: string, output: string, success: boolean) => void;
   onStreaming: () => void;
   onToolRunning: (toolName: string, description?: string) => void;
+  onUsageEvent: (eventType: 'llm_call' | 'hf_job_complete' | 'sandbox_destroy', data: Record<string, unknown>) => void;
   onInterrupted: () => void;
+  onRecoverMessages: (context: MessageRecoveryContext) => Promise<boolean>;
+}
+
+export interface MessageRecoveryContext {
+  submittedText?: string;
+  currentMessageCount: number;
+  currentUserMessageCount: number;
+  sessionInfo?: RecoverySessionInfo;
+}
+
+export interface RecoverySessionInfo {
+  is_processing?: boolean;
+  pending_approval?: Array<{ tool_call_id: string }> | null;
+  auto_approval?: {
+    enabled: boolean;
+    cost_cap_usd?: number | null;
+    estimated_spend_usd?: number;
+    remaining_usd?: number | null;
+  } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +72,49 @@ function nextPartId(prefix: string): string {
 
 function lastEventKey(sessionId: string): string {
   return `hf-agent-last-event:${sessionId}`;
+}
+
+async function readErrorResponse(response: Response): Promise<string> {
+  const raw = await response.text().catch(() => '');
+  if (!raw) return response.statusText || 'Request failed';
+  try {
+    const data = JSON.parse(raw);
+    const detail = data?.detail;
+    if (typeof detail === 'string') return detail;
+    if (detail?.message && typeof detail.message === 'string') return detail.message;
+    if (detail?.error && typeof detail.error === 'string') return detail.error;
+    return JSON.stringify(detail ?? data);
+  } catch {
+    return raw;
+  }
+}
+
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  if (!(error instanceof Error)) return false;
+  return error.name === 'AbortError';
+}
+
+function isRecoverableFetchError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+
+  const name = error.name.toLowerCase();
+  const message = error.message.toLowerCase();
+  const networkFailureMessages = [
+    'load failed',
+    'failed to fetch',
+    'fetch failed',
+    'networkerror',
+    'network error',
+    'network request failed',
+    'network connection was lost',
+    'internet connection appears to be offline',
+  ];
+
+  return (
+    name === 'networkerror' ||
+    (name === 'typeerror' && networkFailureMessages.some((pattern) => message.includes(pattern)))
+  );
 }
 
 /** Parse an SSE text stream into AgentEvent objects. */
@@ -110,6 +173,15 @@ function createSSEParserStream(sessionId: string): TransformStream<string, Agent
         data += line.slice(5).trimStart() + '\n';
       }
       dispatch(controller);
+    },
+  });
+}
+
+function createRecoveredFinishedStream(): ReadableStream<UIMessageChunk> {
+  return new ReadableStream<UIMessageChunk>({
+    start(controller) {
+      controller.enqueue({ type: 'finish', finishReason: 'stop' });
+      controller.close();
     },
   });
 }
@@ -301,6 +373,12 @@ function createEventToChunkStream(sideChannel: SideChannelCallbacks): TransformS
           break;
         }
 
+        case 'llm_call':
+        case 'hf_job_complete':
+        case 'sandbox_destroy':
+          sideChannel.onUsageEvent(event.event_type, event.data || {});
+          break;
+
         case 'turn_complete':
           endTextPart(controller);
           controller.enqueue({ type: 'finish-step' });
@@ -348,6 +426,69 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
     // Nothing to clean up — no persistent connections
   }
 
+  private async connectToEventStream(): Promise<ReadableStream<UIMessageChunk> | null> {
+    const lastSeq = localStorage.getItem(lastEventKey(this.sessionId));
+    const qs = lastSeq ? `?after=${encodeURIComponent(lastSeq)}` : '';
+    const response = await apiFetch(`/api/events/${this.sessionId}${qs}`, {
+      headers: { 'Accept': 'text/event-stream' },
+    });
+    if (!response.ok || !response.body) return null;
+
+    this.sideChannel.onProcessing();
+
+    return response.body
+      .pipeThrough(new TextDecoderStream())
+      .pipeThrough(createSSEParserStream(this.sessionId))
+      .pipeThrough(createEventToChunkStream(this.sideChannel));
+  }
+
+  private async recoverFailedSend(
+    context: MessageRecoveryContext,
+  ): Promise<ReadableStream<UIMessageChunk>> {
+    let infoRes: Response;
+    try {
+      infoRes = await apiFetch(`/api/session/${this.sessionId}`);
+    } catch {
+      throw new Error(
+        'Connection to the Space was interrupted before the message was accepted. Please retry.',
+      );
+    }
+
+    if (infoRes.status === 404) {
+      this.sideChannel.onSessionDead(this.sessionId);
+      throw new Error('Session not found or inactive');
+    }
+    if (!infoRes.ok) {
+      throw new Error(
+        'Connection to the Space was interrupted before the message was accepted. Please retry.',
+      );
+    }
+
+    const info = await infoRes.json() as RecoverySessionInfo;
+    if (info.is_processing) {
+      try {
+        const stream = await this.connectToEventStream();
+        if (stream) return stream;
+      } catch {
+        // Fall through to message hydration; the turn may have completed
+        // between the status probe and the event-stream reconnect.
+      }
+    }
+
+    const recovered = await this.sideChannel.onRecoverMessages({
+      ...context,
+      sessionInfo: info.is_processing ? undefined : info,
+    });
+    if (recovered) {
+      this.sideChannel.onProcessingDone();
+      return createRecoveredFinishedStream();
+    }
+
+    throw new Error(
+      'Connection to the Space was interrupted before the message was accepted. Please retry.',
+    );
+  }
+
   // -- ChatTransport interface ---------------------------------------------
 
   async sendMessages(
@@ -370,6 +511,7 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
     ) || [];
 
     let body: Record<string, unknown>;
+    let submittedText: string | undefined;
     if (approvedParts.length > 0) {
       // Approval continuation — extract approval decisions
       const approvals = approvedParts.map((p) => {
@@ -394,34 +536,42 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
             .map(p => p.text)
             .join('')
         : '';
+      submittedText = text;
       body = { text };
     }
 
     // POST to SSE endpoint
-    const response = await apiFetch(`/api/chat/${sessionId}`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-      signal: options.abortSignal,
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-      },
-    });
+    let response: Response;
+    try {
+      response = await apiFetch(`/api/chat/${sessionId}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+        signal: options.abortSignal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        },
+      });
+    } catch (error) {
+      if (isAbortError(error, options.abortSignal) || !isRecoverableFetchError(error)) {
+        throw error;
+      }
+      logger.warn('Chat POST failed; attempting session recovery:', error);
+      return this.recoverFailedSend({
+        submittedText,
+        currentMessageCount: options.messages.length,
+        currentUserMessageCount: options.messages.filter(m => m.role === 'user').length,
+      });
+    }
 
     if (response.status === 404) {
       // Backend lost this session (e.g. Space restart). Signal the UI so
       // it can flag the session for the catch-up banner.
       this.sideChannel.onSessionDead(sessionId);
     }
-    if (response.status === 429) {
-      // Premium-model daily quota gate tripped. The prefix is the detection marker
-      // for useAgentChat's onError handler, which surfaces the cap dialog
-      // instead of a generic error banner.
-      throw new Error('CLAUDE_QUOTA_EXHAUSTED');
-    }
     if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Request failed');
-      throw new Error(`Chat request failed: ${response.status} ${errorText}`);
+      const errorText = await readErrorResponse(response);
+      throw new Error(`Chat request failed (${response.status}): ${errorText}`);
     }
 
     if (!response.body) {
@@ -445,20 +595,7 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
       const info = await infoRes.json();
       if (!info.is_processing) return null;
 
-      // Session is mid-turn — subscribe to its event broadcast.
-      const lastSeq = localStorage.getItem(lastEventKey(this.sessionId));
-      const qs = lastSeq ? `?after=${encodeURIComponent(lastSeq)}` : '';
-      const response = await apiFetch(`/api/events/${this.sessionId}${qs}`, {
-        headers: { 'Accept': 'text/event-stream' },
-      });
-      if (!response.ok || !response.body) return null;
-
-      this.sideChannel.onProcessing();
-
-      return response.body
-        .pipeThrough(new TextDecoderStream())
-        .pipeThrough(createSSEParserStream(this.sessionId))
-        .pipeThrough(createEventToChunkStream(this.sideChannel));
+      return this.connectToEventStream();
     } catch {
       return null;
     }

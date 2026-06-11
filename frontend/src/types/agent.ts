@@ -14,9 +14,17 @@ export interface SessionMeta {
   id: string;
   title: string;
   createdAt: string;
+  usageWindowStartedAt?: string | null;
   isActive: boolean;
   needsAttention: boolean;
   model?: string | null;
+  /** True when the backend reports this session is mid-turn (from
+   *  GET /sessions). A processing session is already live in memory, so it
+   *  keeps streaming in the background; idle sessions are NOT hydrated on app
+   *  load, which is what keeps them from refilling the active-session pool.
+   *  Transient — never persisted to localStorage (always re-derived from the
+   *  server list). */
+  isProcessing?: boolean;
   /** True when the backend no longer recognizes this session id (e.g.
    *  after a backend restart). The UI shows a recovery banner and
    *  disables input until the user chooses to restore-with-summary or
@@ -40,4 +48,5 @@ export interface User {
   username?: string;
   name?: string;
   picture?: string;
+  plan?: 'free' | 'pro';
 }

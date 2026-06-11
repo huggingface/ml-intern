@@ -17,7 +17,8 @@ from litellm import Message, acompletion
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
 from agent.core.llm_params import _resolve_llm_params
-from agent.core.prompt_caching import with_prompt_caching
+from agent.core.model_ids import strip_huggingface_model_prefix
+from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
 from agent.core.session import Event
 
 logger = logging.getLogger(__name__)
@@ -220,13 +221,8 @@ RESEARCH_TOOL_SPEC = {
 
 
 def _get_research_model(main_model: str) -> str:
-    """Pick a cheaper model for research based on the main model."""
-    if main_model.startswith("anthropic/"):
-        return "anthropic/claude-sonnet-4-6"
-    if main_model.startswith("bedrock/") and "anthropic" in main_model:
-        return "bedrock/us.anthropic.claude-sonnet-4-6"
-    # For non-Anthropic models (HF router etc.), use the same model
-    return main_model
+    """Normalize the main model id for the research sub-call."""
+    return strip_huggingface_model_prefix(main_model) or main_model
 
 
 async def research_handler(
@@ -251,19 +247,20 @@ async def research_handler(
         user_content = f"Context: {context}\n\n{user_content}"
     messages.append(Message(role="user", content=user_content))
 
-    # Use a cheaper/faster model for research
+    # Use the normalized router model for research
     main_model = session.config.model_name
     research_model = _get_research_model(main_model)
-    # Research is a cheap sub-call — cap the main session's effort at "high"
-    # so a user preference of ``max``/``xhigh`` (valid for Opus 4.6/4.7) doesn't
-    # propagate to a Sonnet research model that may not accept those levels.
-    # We also haven't probed this sub-model so we don't know its ceiling.
+    # Research is a cheap sub-call — cap the main session's effort at "high".
+    # We also haven't probed this sub-call's model so we don't know its ceiling.
     _pref = getattr(session.config, "reasoning_effort", None)
     _capped = "high" if _pref in ("max", "xhigh") else _pref
     llm_params = _resolve_llm_params(
         research_model,
         getattr(session, "hf_token", None),
         reasoning_effort=_capped,
+    )
+    llm_params = with_prompt_cache_params(
+        llm_params, session_id=getattr(session, "session_id", None)
     )
 
     # Get read-only tool specs from the session's tool router
@@ -341,10 +338,10 @@ async def research_handler(
                 )
             )
             try:
-                _msgs, _ = with_prompt_caching(messages, None, llm_params.get("model"))
                 _t0 = time.monotonic()
+                cached_messages, _ = with_prompt_caching(messages, None, llm_params)
                 response = await acompletion(
-                    messages=_msgs,
+                    messages=cached_messages,
                     tools=None,  # no tools — force text response
                     stream=False,
                     timeout=120,
@@ -389,13 +386,13 @@ async def research_handler(
             )
 
         try:
-            _msgs, _tools = with_prompt_caching(
-                messages, tool_specs if tool_specs else None, llm_params.get("model")
-            )
             _t0 = time.monotonic()
+            cached_messages, cached_tools = with_prompt_caching(
+                messages, tool_specs if tool_specs else None, llm_params
+            )
             response = await acompletion(
-                messages=_msgs,
-                tools=_tools,
+                messages=cached_messages,
+                tools=cached_tools,
                 tool_choice="auto",
                 stream=False,
                 timeout=120,
@@ -508,10 +505,10 @@ async def research_handler(
         )
     )
     try:
-        _msgs, _ = with_prompt_caching(messages, None, llm_params.get("model"))
         _t0 = time.monotonic()
+        cached_messages, _ = with_prompt_caching(messages, None, llm_params)
         response = await acompletion(
-            messages=_msgs,
+            messages=cached_messages,
             tools=None,
             stream=False,
             timeout=120,

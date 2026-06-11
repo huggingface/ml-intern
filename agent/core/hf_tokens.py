@@ -41,19 +41,11 @@ def resolve_hf_router_token(session_hf_token: str | None = None) -> str | None:
     """Resolve the token used for Hugging Face Router LLM calls.
 
     App-specific precedence:
-    1. INFERENCE_TOKEN: shared hosted-Space inference token.
-    2. session_hf_token: the active user/session token.
-    3. huggingface_hub.get_token(): HF_TOKEN/HUGGING_FACE_HUB_TOKEN or
+    1. session_hf_token: the active user/session token.
+    2. huggingface_hub.get_token(): HF_TOKEN/HUGGING_FACE_HUB_TOKEN or
        local ``hf auth login`` cache.
     """
-    return resolve_hf_token(os.environ.get("INFERENCE_TOKEN"), session_hf_token)
-
-
-def get_hf_bill_to() -> str | None:
-    """Return X-HF-Bill-To only when a shared inference token is active."""
-    if clean_hf_token(os.environ.get("INFERENCE_TOKEN")):
-        return os.environ.get("HF_BILL_TO", "smolagents")
-    return None
+    return resolve_hf_token(session_hf_token)
 
 
 def bearer_token_from_header(auth_header: str | None) -> str | None:

@@ -396,7 +396,7 @@ sessions/YYYY-MM-DD/<session_id>.jsonl
 **WARNING: no comprehensive redaction or human review has been performed for this dataset.**
 
 ML Intern applies automated best-effort scrubbing for common secret patterns
-such as Hugging Face, Anthropic, OpenAI, GitHub, and AWS tokens before upload.
+such as Hugging Face, GitHub, AWS, and provider API tokens before upload.
 This is not a privacy guarantee.
 
 These traces may contain sensitive information, including prompts, code,

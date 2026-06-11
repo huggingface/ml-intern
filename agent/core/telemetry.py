@@ -21,6 +21,8 @@ import logging
 import time
 from typing import Any
 
+from agent.core.cost_estimation import hf_jobs_price_catalog
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,10 +32,8 @@ logger = logging.getLogger(__name__)
 def extract_usage(response_or_chunk: Any) -> dict:
     """Flat usage dict from a litellm response or final-chunk usage object.
 
-    Normalizes across providers: Anthropic exposes cache tokens as
-    ``cache_read_input_tokens`` / ``cache_creation_input_tokens``; OpenAI uses
-    ``prompt_tokens_details.cached_tokens``. Exposed under the stable keys
-    ``cache_read_tokens`` / ``cache_creation_tokens``.
+    Normalizes cache-token details across provider response shapes. Exposed
+    under the stable keys ``cache_read_tokens`` / ``cache_creation_tokens``.
     """
     u = getattr(response_or_chunk, "usage", None)
     if u is None and isinstance(response_or_chunk, dict):
@@ -52,14 +52,18 @@ def extract_usage(response_or_chunk: Any) -> dict:
 
     cache_read = _g("cache_read_input_tokens")
     cache_creation = _g("cache_creation_input_tokens")
+    details = _g("prompt_tokens_details", None)
 
-    if not cache_read:
-        details = _g("prompt_tokens_details", None)
-        if details is not None:
-            if isinstance(details, dict):
-                cache_read = details.get("cached_tokens", 0) or 0
-            else:
-                cache_read = getattr(details, "cached_tokens", 0) or 0
+    if not cache_read and details is not None:
+        if isinstance(details, dict):
+            cache_read = details.get("cached_tokens", 0) or 0
+        else:
+            cache_read = getattr(details, "cached_tokens", 0) or 0
+    if not cache_creation and details is not None:
+        if isinstance(details, dict):
+            cache_creation = details.get("cache_write_tokens", 0) or 0
+        else:
+            cache_creation = getattr(details, "cache_write_tokens", 0) or 0
 
     return {
         "prompt_tokens": int(prompt),
@@ -97,11 +101,10 @@ async def record_llm_call(
     Pre-2026-04-29 only ``main`` calls were instrumented; observed gap on
     Cost Explorer was ~67%, with the other 5 call sites accounting for
     the rest. Tagging lets us split the dataset's ``total_cost_usd`` by
-    category and validate against AWS billing.
+    category and validate against billing data.
 
-    The ``/title`` (HF Router, not Bedrock) and ``/health/llm`` (diagnostic
-    endpoint, no session context) call sites are intentionally not
-    instrumented — together they're <1% of spend.
+    The ``/title`` and ``/health/llm`` diagnostic call sites are intentionally
+    not instrumented because they have no session context and are tiny.
     """
     usage = extract_usage(response) if response is not None else {}
     cost_usd = 0.0
@@ -193,6 +196,18 @@ async def record_hf_job_complete(
 
     try:
         wall_time_s = int(time.monotonic() - submit_ts)
+        billable_seconds = max(0, wall_time_s)
+        price_usd_per_hour = None
+        estimated_cost_usd = None
+        cost_estimate_source = "unknown_price"
+        prices = await hf_jobs_price_catalog()
+        if flavor in prices:
+            price_usd_per_hour = float(prices[flavor])
+            estimated_cost_usd = round(
+                price_usd_per_hour * (billable_seconds / 3600),
+                4,
+            )
+            cost_estimate_source = "runtime_price_catalog"
         await session.send_event(
             Event(
                 event_type="hf_job_complete",
@@ -201,6 +216,10 @@ async def record_hf_job_complete(
                     "flavor": flavor,
                     "final_status": final_status,
                     "wall_time_s": wall_time_s,
+                    "billable_seconds_estimate": billable_seconds,
+                    "price_usd_per_hour": price_usd_per_hour,
+                    "estimated_cost_usd": estimated_cost_usd,
+                    "cost_estimate_source": cost_estimate_source,
                 },
             )
         )

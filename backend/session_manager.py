@@ -6,20 +6,34 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
 from agent.config import load_config
 from agent.core.agent_loop import process_submission
+from agent.core.model_ids import (
+    KIMI_K26_MODEL_ID,
+    is_known_router_model_id,
+    strip_huggingface_model_prefix,
+)
 from agent.core.session import Event, OpType, Session
 from agent.core.session_persistence import get_session_store
 from agent.core.tools import ToolRouter
+from agent.core.usage_thresholds import (
+    USAGE_THRESHOLD_TOOL_NAME,
+    USAGE_WARNING_FIRST_THRESHOLD_USD,
+    is_usage_threshold_pending,
+    next_usage_warning_threshold,
+    normalize_usage_threshold,
+    usage_threshold_pending_to_tool,
+)
 from agent.messaging.gateway import NotificationGateway
 
 # Get project root (parent of backend directory)
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_CONFIG_PATH = str(PROJECT_ROOT / "configs" / "frontend_agent_config.json")
+USAGE_WARNING_SPEND_CACHE_TTL_SECONDS = 30.0
 
 
 # These dataclasses match agent/main.py structure
@@ -94,16 +108,28 @@ class AgentSession:
     user_id: str = "dev"  # Owner of this session
     hf_username: str | None = None  # HF namespace used for personal trace uploads
     hf_token: str | None = None  # User's HF OAuth token for tool execution
+    user_plan: str | None = None  # Active HF account plan for plan-aware agent CTAs
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
+    # Last genuine activity (submit/turn-start/turn-finish/direct user write).
+    # Drives the idle reaper. Defaults to load time so a freshly-restored but
+    # untouched session isn't reaped for a full idle window.
+    last_active_at: datetime = field(default_factory=datetime.utcnow)
     is_active: bool = True
     is_processing: bool = False  # True while a submission is being executed
+    # Set under the lock by the reaper while tearing this session down. Blocks
+    # submit() from enqueueing onto a session that's being evicted.
+    is_reaping: bool = False
     broadcaster: Any = None
     title: str | None = None
-    # True once this session has been counted against the user's daily
-    # Claude quota. Guards double-counting when the user re-selects an
-    # Anthropic model mid-session.
-    claude_counted: bool = False
+    usage_window_started_at: datetime | None = None
+    usage_window_baseline: dict[str, Any] | None = None
+    usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
+    usage_warning_spend_cache: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.usage_window_started_at is None:
+            self.usage_window_started_at = self.created_at
 
 
 class SessionCapacityError(Exception):
@@ -125,25 +151,52 @@ DEFAULT_YOLO_COST_CAP_USD: float = 5.0
 SANDBOX_SHUTDOWN_CLEANUP_CONCURRENCY: int = 10
 SANDBOX_SHUTDOWN_CLEANUP_TIMEOUT_S: float = 60.0
 
+# ── Idle-session reaper ─────────────────────────────────────────────
+# A live session idle ≥ REAPER_IDLE_MINUTES with no in-flight work has its
+# sandbox + RAM released and is evicted from the live pool, while staying
+# fully resumable from Mongo (it reappears as a normal chat, never "ended").
+# This frees both the global pool and the user's concurrent slots.
+REAPER_IDLE_MINUTES: float = float(os.environ.get("REAPER_IDLE_MINUTES", "15"))
+REAPER_INTERVAL_S: float = float(os.environ.get("REAPER_INTERVAL_S", "300"))
+REAP_TEARDOWN_TIMEOUT_S: float = float(os.environ.get("REAP_TEARDOWN_TIMEOUT_S", "30"))
+REAPER_IDLE = timedelta(minutes=REAPER_IDLE_MINUTES)
+
 
 class SessionManager:
     """Manages multiple concurrent agent sessions."""
 
     def __init__(self, config_path: str | None = None) -> None:
         self.config = load_config(config_path or DEFAULT_CONFIG_PATH)
+        normalized_default = strip_huggingface_model_prefix(self.config.model_name)
+        if normalized_default:
+            self.config.model_name = normalized_default
         self.messaging_gateway = NotificationGateway(self.config.messaging)
         self.sessions: dict[str, AgentSession] = {}
         self._lock = asyncio.Lock()
         self.persistence_store = None
+        # In-flight create_session calls that have passed the capacity check
+        # but not yet inserted their session. Counted alongside
+        # active_session_count to hard-cap the global pool against the
+        # check-then-create race (see create_session).
+        self._pending_creates: int = 0
+        self._reaper_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """Start shared background resources."""
         self.persistence_store = get_session_store()
         await self.persistence_store.init()
         await self.messaging_gateway.start()
+        self._reaper_task = asyncio.create_task(self._reaper_loop())
 
     async def close(self) -> None:
         """Flush and close shared background resources."""
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            try:
+                await self._reaper_task
+            except asyncio.CancelledError:
+                pass
+            self._reaper_task = None
         await self._cleanup_all_sandboxes_on_close()
         await self.messaging_gateway.close()
         if self.persistence_store is not None:
@@ -160,6 +213,32 @@ class SessionManager:
             1 for s in self.sessions.values() if s.user_id == user_id and s.is_active
         )
 
+    @staticmethod
+    def _touch(agent_session: "AgentSession") -> None:
+        """Stamp genuine activity so the idle reaper's clock resets.
+
+        Call on real user/agent activity (submit, turn start/finish, direct
+        user-initiated writes) — never on passive reads or hydration, which
+        would keep an otherwise-idle session alive forever.
+        """
+        agent_session.last_active_at = datetime.utcnow()
+
+    @staticmethod
+    def _model_from_saved_metadata(
+        model: str | None,
+    ) -> str:
+        normalized = strip_huggingface_model_prefix(model)
+        if normalized and is_known_router_model_id(normalized):
+            return normalized
+
+        fallback_model = KIMI_K26_MODEL_ID
+        logger.warning(
+            "Saved session model %r failed validation; using %r",
+            model,
+            fallback_model,
+        )
+        return fallback_model
+
     def _create_session_sync(
         self,
         *,
@@ -167,6 +246,7 @@ class SessionManager:
         user_id: str,
         hf_username: str | None,
         hf_token: str | None,
+        user_plan: str | None,
         model: str | None,
         event_queue: asyncio.Queue,
         notification_destinations: list[str] | None = None,
@@ -177,10 +257,11 @@ class SessionManager:
         t0 = _time.monotonic()
         tool_router = ToolRouter(self.config.mcpServers, hf_token=hf_token)
         # Deep-copy config so each session's model switches independently —
-        # tab A picking GLM doesn't flip tab B off Claude.
+        # tab A picking GLM doesn't flip tab B off the default model.
         session_config = self.config.model_copy(deep=True)
-        if model:
-            session_config.model_name = model
+        normalized_model = strip_huggingface_model_prefix(model)
+        if normalized_model:
+            session_config.model_name = normalized_model
         session = Session(
             event_queue=event_queue,
             config=session_config,
@@ -188,6 +269,7 @@ class SessionManager:
             hf_token=hf_token,
             user_id=user_id,
             hf_username=hf_username,
+            user_plan=user_plan,
             notification_gateway=self.messaging_gateway,
             notification_destinations=notification_destinations or [],
             session_id=session_id,
@@ -202,6 +284,8 @@ class SessionManager:
 
     def _serialize_pending_approval(self, session: Session) -> list[dict[str, Any]]:
         pending = session.pending_approval or {}
+        if is_usage_threshold_pending(pending):
+            return [dict(pending)]
         tool_calls = pending.get("tool_calls") or []
         serialized: list[dict[str, Any]] = []
         for tc in tool_calls:
@@ -214,6 +298,8 @@ class SessionManager:
     @staticmethod
     def _pending_tools_for_api(session: Session) -> list[dict[str, Any]] | None:
         pending = session.pending_approval or {}
+        if is_usage_threshold_pending(pending):
+            return [usage_threshold_pending_to_tool(pending)]
         tool_calls = pending.get("tool_calls") or []
         if not tool_calls:
             return None
@@ -237,6 +323,10 @@ class SessionManager:
     ) -> None:
         if not pending_approval:
             session.pending_approval = None
+            return
+        first = pending_approval[0]
+        if isinstance(first, dict) and first.get("kind") == USAGE_THRESHOLD_TOOL_NAME:
+            session.pending_approval = dict(first)
             return
         from litellm import ChatCompletionMessageToolCall as ToolCall
 
@@ -266,6 +356,9 @@ class SessionManager:
     ) -> list[dict[str, Any]] | None:
         if not pending_approval:
             return None
+        first = pending_approval[0]
+        if isinstance(first, dict) and first.get("kind") == USAGE_THRESHOLD_TOOL_NAME:
+            return [usage_threshold_pending_to_tool(first)]
         result: list[dict[str, Any]] = []
         for raw in pending_approval:
             if "function" in raw:
@@ -316,6 +409,178 @@ class SessionManager:
             "estimated_spend_usd": round(estimated, 4),
             "remaining_usd": remaining,
         }
+
+    def _install_usage_threshold_checker(self, agent_session: AgentSession) -> None:
+        threshold = normalize_usage_threshold(
+            getattr(
+                agent_session.session,
+                "usage_warning_next_threshold_usd",
+                agent_session.usage_warning_next_threshold_usd,
+            )
+        )
+        agent_session.usage_warning_next_threshold_usd = threshold
+        agent_session.session.usage_warning_next_threshold_usd = threshold
+
+        async def _checker(payload: dict[str, Any]) -> bool:
+            return await self._maybe_request_usage_threshold_approval(
+                agent_session.session_id,
+                payload,
+            )
+
+        agent_session.session.usage_threshold_checker = _checker
+
+    @staticmethod
+    def _usage_spend_from_response(response: dict[str, Any]) -> tuple[float, str]:
+        def coerce_spend(value: Any) -> float | None:
+            if isinstance(value, bool) or value is None:
+                return None
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                return None
+
+        hf_account = response.get("hf_account")
+        if isinstance(hf_account, dict):
+            current_session = hf_account.get("current_session")
+            if isinstance(current_session, dict):
+                spend = coerce_spend(current_session.get("total_usd"))
+                if spend is not None:
+                    return spend, "hf_billing_current_session"
+
+        session_bucket = response.get("session")
+        if isinstance(session_bucket, dict):
+            spend = coerce_spend(session_bucket.get("total_usd"))
+            if spend is not None:
+                return spend, "app_telemetry_session"
+        return 0.0, "app_telemetry_session"
+
+    async def _current_session_usage_spend(
+        self,
+        agent_session: AgentSession,
+        *,
+        use_cache: bool = True,
+    ) -> tuple[float, str]:
+        now = datetime.now(UTC)
+        cache = agent_session.usage_warning_spend_cache
+        cache_expires_at = cache.get("expires_at")
+        if (
+            use_cache
+            and isinstance(cache_expires_at, datetime)
+            and cache_expires_at > now
+        ):
+            return (
+                float(cache.get("spend_usd") or 0.0),
+                str(cache.get("billing_source") or "app_telemetry_session"),
+            )
+
+        from usage import build_usage_response
+
+        response = await build_usage_response(
+            self,
+            user_id=agent_session.user_id,
+            hf_token=agent_session.hf_token,
+            session_id=agent_session.session_id,
+            timezone_name="UTC",
+        )
+        spend, billing_source = self._usage_spend_from_response(response)
+        agent_session.usage_warning_spend_cache = {
+            "spend_usd": spend,
+            "billing_source": billing_source,
+            "expires_at": now
+            + timedelta(seconds=USAGE_WARNING_SPEND_CACHE_TTL_SECONDS),
+        }
+        return spend, billing_source
+
+    @staticmethod
+    def _runtime_session_usage_spend(agent_session: AgentSession) -> float:
+        from usage import aggregate_usage_events, event_created_at
+
+        window_start = agent_session.usage_window_started_at
+        if isinstance(window_start, datetime):
+            if window_start.tzinfo is None:
+                window_start = window_start.replace(tzinfo=UTC)
+            else:
+                window_start = window_start.astimezone(UTC)
+        events = []
+        for raw_event in getattr(agent_session.session, "logged_events", []) or []:
+            if raw_event.get("event_type") not in {"llm_call", "hf_job_complete"}:
+                continue
+            if isinstance(window_start, datetime):
+                created_at = event_created_at(raw_event, timezone_name="UTC")
+                if created_at is not None and created_at < window_start:
+                    continue
+            events.append(raw_event)
+        bucket = aggregate_usage_events(
+            events,
+            session_id=agent_session.session_id,
+        )
+        return float(bucket.get("total_usd") or 0.0)
+
+    async def _maybe_request_usage_threshold_approval(
+        self,
+        session_id: str,
+        continuation_payload: dict[str, Any],
+    ) -> bool:
+        agent_session = self.sessions.get(session_id)
+        if not agent_session or not agent_session.is_active:
+            return False
+
+        session = agent_session.session
+        if session.pending_approval:
+            return False
+
+        threshold = normalize_usage_threshold(
+            getattr(
+                session,
+                "usage_warning_next_threshold_usd",
+                agent_session.usage_warning_next_threshold_usd,
+            )
+        )
+        force_check = bool(continuation_payload.get("force_check"))
+        local_spend = self._runtime_session_usage_spend(agent_session)
+        if not force_check and local_spend < threshold:
+            return False
+
+        current_spend, billing_source = await self._current_session_usage_spend(
+            agent_session,
+            use_cache=not force_check,
+        )
+        if current_spend < threshold:
+            return False
+
+        next_threshold = next_usage_warning_threshold(current_spend, threshold)
+        tool_call_id = f"usage-threshold-{uuid.uuid4().hex[:10]}"
+        pending: dict[str, Any] = {
+            "kind": USAGE_THRESHOLD_TOOL_NAME,
+            "tool_call_id": tool_call_id,
+            "threshold_usd": round(threshold, 4),
+            "current_spend_usd": round(current_spend, 6),
+            "next_threshold_usd": next_threshold,
+            "billing_source": billing_source,
+            "continuation": continuation_payload.get("continuation")
+            or "continue_agent",
+            "history_size": int(
+                continuation_payload.get("history_size")
+                or len(session.context_manager.items)
+            ),
+        }
+        final_response = continuation_payload.get("final_response")
+        if isinstance(final_response, str):
+            pending["final_response"] = final_response
+
+        session.pending_approval = pending
+        self._touch(agent_session)
+        await session.send_event(
+            Event(
+                event_type="approval_required",
+                data={
+                    "tools": [usage_threshold_pending_to_tool(pending)],
+                    "count": 1,
+                    "usage_threshold": True,
+                },
+            )
+        )
+        return True
 
     async def _start_agent_session(
         self,
@@ -369,6 +634,7 @@ class SessionManager:
         *,
         hf_token: str | None,
         hf_username: str | None,
+        user_plan: str | None = None,
     ) -> None:
         if hf_token:
             agent_session.hf_token = hf_token
@@ -376,6 +642,9 @@ class SessionManager:
         if hf_username:
             agent_session.hf_username = hf_username
             agent_session.session.hf_username = hf_username
+        if user_plan is not None:
+            agent_session.user_plan = user_plan
+            agent_session.session.user_plan = user_plan
 
     @staticmethod
     def _has_active_sandbox_preload(agent_session: AgentSession) -> bool:
@@ -500,10 +769,20 @@ class SessionManager:
         *,
         runtime_state: str | None = None,
         status: str = "active",
+        raise_on_error: bool = False,
     ) -> None:
-        """Persist the current runtime context snapshot."""
+        """Persist the current runtime context snapshot.
+
+        Best-effort by default: a disabled store is a no-op and write failures
+        are swallowed. Pass ``raise_on_error=True`` when the caller must know
+        the snapshot was durably written (e.g. the reaper, which only evicts a
+        session after confirming it stayed resumable) — then a disabled store
+        or a write failure raises instead of silently dropping the snapshot.
+        """
         store = self._store()
         if not getattr(store, "enabled", False):
+            if raise_on_error:
+                raise RuntimeError("persistence store is disabled")
             return
         try:
             await store.save_snapshot(
@@ -518,8 +797,9 @@ class SessionManager:
                 pending_approval=self._serialize_pending_approval(
                     agent_session.session
                 ),
-                claude_counted=agent_session.claude_counted,
                 created_at=agent_session.created_at,
+                usage_window_started_at=agent_session.usage_window_started_at,
+                usage_window_baseline=agent_session.usage_window_baseline,
                 notification_destinations=list(
                     agent_session.session.notification_destinations
                 ),
@@ -537,8 +817,18 @@ class SessionManager:
                     )
                     or 0.0
                 ),
+                usage_warning_next_threshold_usd=normalize_usage_threshold(
+                    getattr(
+                        agent_session.session,
+                        "usage_warning_next_threshold_usd",
+                        agent_session.usage_warning_next_threshold_usd,
+                    )
+                ),
+                raise_on_error=raise_on_error,
             )
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.warning(
                 "Failed to persist snapshot for %s: %s",
                 agent_session.session_id,
@@ -551,6 +841,7 @@ class SessionManager:
         user_id: str,
         hf_token: str | None = None,
         hf_username: str | None = None,
+        user_plan: str | None = None,
         preload_sandbox: bool = True,
     ) -> AgentSession | None:
         """Return a live runtime session, lazily restoring it from Mongo."""
@@ -562,7 +853,9 @@ class SessionManager:
                     existing,
                     hf_token=hf_token,
                     hf_username=hf_username,
+                    user_plan=user_plan,
                 )
+                self._install_usage_threshold_checker(existing)
                 self._restart_cpu_preload_if_token_recovered(
                     existing,
                     preload_sandbox=preload_sandbox,
@@ -583,7 +876,9 @@ class SessionManager:
                     existing,
                     hf_token=hf_token,
                     hf_username=hf_username,
+                    user_plan=user_plan,
                 )
+                self._install_usage_threshold_checker(existing)
                 self._restart_cpu_preload_if_token_recovered(
                     existing,
                     preload_sandbox=preload_sandbox,
@@ -604,7 +899,9 @@ class SessionManager:
 
         from litellm import Message
 
-        model = meta.get("model") or self.config.model_name
+        model = self._model_from_saved_metadata(
+            meta.get("model") or self.config.model_name,
+        )
         event_queue: asyncio.Queue = asyncio.Queue()
         submission_queue: asyncio.Queue = asyncio.Queue()
         tool_router, session = await asyncio.to_thread(
@@ -613,6 +910,7 @@ class SessionManager:
             user_id=owner or user_id,
             hf_username=hf_username,
             hf_token=hf_token,
+            user_plan=user_plan,
             model=model,
             event_queue=event_queue,
             notification_destinations=meta.get("notification_destinations") or [],
@@ -634,6 +932,32 @@ class SessionManager:
                 *restored_messages,
             ]
 
+        # If this session ever had a sandbox, its container did not survive the
+        # resume (a fresh, empty one is lazily recreated). Tell the agent so it
+        # recreates files/packages instead of assuming /app/train.py et al. still
+        # exist. Gated on sandbox_status so pure Q&A chats get no note. Mirrors
+        # the seed_from_summary note convention.
+        #
+        # Skip it when an approval is pending: the restored context ends with an
+        # assistant tool-call message awaiting results, so injecting a user
+        # message here would sit between the tool_calls and their results. On
+        # approval the real results get appended after the note, leaving them
+        # orphaned (the context manager stubs the "missing" result right after
+        # the assistant message) — which the provider rejects. The agent still
+        # learns the sandbox is empty when the approved tool runs against it.
+        if meta.get("sandbox_status") and not meta.get("pending_approval"):
+            session.context_manager.items.append(
+                Message(
+                    role="user",
+                    content=(
+                        "[SYSTEM: This session was resumed and its sandbox was "
+                        "reset. Any files, installed packages, or running "
+                        "processes from earlier are gone — recreate what you "
+                        "need before using the sandbox.]"
+                    ),
+                )
+            )
+
         self._restore_pending_approval(session, meta.get("pending_approval") or [])
         session.turn_count = int(meta.get("turn_count") or 0)
         session.auto_approval_enabled = bool(meta.get("auto_approval_enabled", False))
@@ -644,10 +968,19 @@ class SessionManager:
         session.auto_approval_estimated_spend_usd = float(
             meta.get("auto_approval_estimated_spend_usd") or 0.0
         )
+        session.usage_warning_next_threshold_usd = normalize_usage_threshold(
+            meta.get("usage_warning_next_threshold_usd")
+        )
 
         created_at = meta.get("created_at")
         if not isinstance(created_at, datetime):
             created_at = datetime.utcnow()
+        usage_window_started_at = meta.get("usage_window_started_at")
+        if not isinstance(usage_window_started_at, datetime):
+            usage_window_started_at = created_at
+        usage_window_baseline = meta.get("usage_window_baseline")
+        if not isinstance(usage_window_baseline, dict):
+            usage_window_baseline = None
 
         agent_session = AgentSession(
             session_id=session_id,
@@ -657,12 +990,16 @@ class SessionManager:
             user_id=owner or user_id,
             hf_username=hf_username,
             hf_token=hf_token,
+            user_plan=user_plan,
             created_at=created_at,
+            usage_window_started_at=usage_window_started_at,
+            usage_window_baseline=usage_window_baseline,
+            usage_warning_next_threshold_usd=session.usage_warning_next_threshold_usd,
             is_active=True,
             is_processing=False,
-            claude_counted=bool(meta.get("claude_counted")),
             title=meta.get("title"),
         )
+        self._install_usage_threshold_checker(agent_session)
         started = await self._start_agent_session(
             agent_session=agent_session,
             event_queue=event_queue,
@@ -673,6 +1010,7 @@ class SessionManager:
                 started,
                 hf_token=hf_token,
                 hf_username=hf_username,
+                user_plan=user_plan,
             )
             return started
         if preload_sandbox:
@@ -685,6 +1023,7 @@ class SessionManager:
         user_id: str = "dev",
         hf_username: str | None = None,
         hf_token: str | None = None,
+        user_plan: str | None = None,
         model: str | None = None,
         is_pro: bool | None = None,
     ) -> str:
@@ -698,20 +1037,27 @@ class SessionManager:
             user_id: The ID of the user who owns this session.
             hf_username: The HF username/namespace used for personal trace uploads.
             hf_token: The user's HF OAuth token, stored for tool execution.
+            user_plan: The active HF account plan used for plan-aware agent CTAs.
             model: Optional model override. When set, replaces ``model_name``
                 on the per-session config clone. None falls back to the
                 config default.
 
         Raises:
             SessionCapacityError: If the server or user has reached the
-                maximum number of concurrent sessions.
+                maximum number of live sessions.
         """
         # ── Capacity checks ──────────────────────────────────────────
+        # Reserve a global slot under the lock so concurrent creates can't all
+        # pass the check then over-admit past MAX_SESSIONS (the build + insert
+        # happen later, outside the lock). active_session_count won't reflect
+        # this session until _start_agent_session inserts it, so we count
+        # _pending_creates alongside it to close that gap.
         async with self._lock:
             active_count = self.active_session_count
-            if active_count >= MAX_SESSIONS:
+            projected = active_count + self._pending_creates
+            if projected >= MAX_SESSIONS:
                 raise SessionCapacityError(
-                    f"Server is at capacity ({active_count}/{MAX_SESSIONS} sessions). "
+                    f"Server is at capacity ({projected}/{MAX_SESSIONS} sessions). "
                     "Please try again later.",
                     error_type="global",
                 )
@@ -720,9 +1066,12 @@ class SessionManager:
                 if user_count >= MAX_SESSIONS_PER_USER:
                     raise SessionCapacityError(
                         f"You have reached the maximum of {MAX_SESSIONS_PER_USER} "
-                        "concurrent sessions. Please close an existing session first.",
+                        f"live sessions. Close an existing session, or wait "
+                        f"{REAPER_IDLE_MINUTES:g} minutes after your last activity "
+                        "for an idle session to be released.",
                         error_type="per_user",
                     )
+            self._pending_creates += 1
 
         session_id = str(uuid.uuid4())
 
@@ -730,41 +1079,60 @@ class SessionManager:
         submission_queue: asyncio.Queue = asyncio.Queue()
         event_queue: asyncio.Queue = asyncio.Queue()
 
-        # Run blocking constructors in a thread to keep the event loop responsive.
-        tool_router, session = await asyncio.to_thread(
-            self._create_session_sync,
-            session_id=session_id,
-            user_id=user_id,
-            hf_username=hf_username,
-            hf_token=hf_token,
-            model=model,
-            event_queue=event_queue,
-        )
+        reserved = True
+        try:
+            # Run blocking constructors in a thread to keep the event loop responsive.
+            tool_router, session = await asyncio.to_thread(
+                self._create_session_sync,
+                session_id=session_id,
+                user_id=user_id,
+                hf_username=hf_username,
+                hf_token=hf_token,
+                user_plan=user_plan,
+                model=model,
+                event_queue=event_queue,
+            )
 
-        # Create wrapper
-        agent_session = AgentSession(
-            session_id=session_id,
-            session=session,
-            tool_router=tool_router,
-            submission_queue=submission_queue,
-            user_id=user_id,
-            hf_username=hf_username,
-            hf_token=hf_token,
-        )
+            # Create wrapper
+            agent_session = AgentSession(
+                session_id=session_id,
+                session=session,
+                tool_router=tool_router,
+                submission_queue=submission_queue,
+                user_id=user_id,
+                hf_username=hf_username,
+                hf_token=hf_token,
+                user_plan=user_plan,
+            )
+            self._install_usage_threshold_checker(agent_session)
 
-        await self._start_agent_session(
-            agent_session=agent_session,
-            event_queue=event_queue,
-            tool_router=tool_router,
-        )
-        await self.persist_session_snapshot(agent_session, runtime_state="idle")
-        self._start_cpu_sandbox_preload(agent_session)
+            await self._start_agent_session(
+                agent_session=agent_session,
+                event_queue=event_queue,
+                tool_router=tool_router,
+            )
+            # The session is now in self.sessions, so active_session_count
+            # reflects it — release the reservation before the slower (and
+            # non-capacity) persistence + preload work.
+            async with self._lock:
+                self._pending_creates -= 1
+                reserved = False
 
-        if is_pro is not None and user_id and user_id != "dev":
-            await self._track_pro_status(agent_session, is_pro=is_pro)
+            await self.persist_session_snapshot(agent_session, runtime_state="idle")
+            self._start_cpu_sandbox_preload(agent_session)
 
-        logger.info(f"Created session {session_id} for user {user_id}")
-        return session_id
+            if is_pro is not None and user_id and user_id != "dev":
+                await self._track_pro_status(agent_session, is_pro=is_pro)
+
+            logger.info(f"Created session {session_id} for user {user_id}")
+            return session_id
+        finally:
+            # Build/start failed before the session was inserted — always
+            # release the reservation so a failed create can't permanently
+            # shrink the pool.
+            if reserved:
+                async with self._lock:
+                    self._pending_creates -= 1
 
     async def _track_pro_status(
         self, agent_session: AgentSession, *, is_pro: bool
@@ -824,9 +1192,8 @@ class SessionManager:
 
         session = agent_session.session
         # Pass the real tool specs so the summarizer sees what the agent
-        # actually has — otherwise Anthropic's modify_params injects a
-        # dummy tool and the summarizer editorializes that the original
-        # tool calls were fabricated.
+        # actually has. Without them, the summarizer can editorialize that
+        # original tool calls were fabricated.
         tool_specs = None
         try:
             tool_specs = agent_session.tool_router.get_tool_specs_for_llm()
@@ -856,6 +1223,7 @@ class SessionManager:
             ),
         )
         session.context_manager.items.append(seed)
+        self._touch(agent_session)
         await self.persist_session_snapshot(agent_session, runtime_state="idle")
         return len(parsed)
 
@@ -907,6 +1275,156 @@ class SessionManager:
                 SANDBOX_SHUTDOWN_CLEANUP_TIMEOUT_S,
             )
 
+    async def _reaper_loop(self) -> None:
+        """Periodically release resources held by idle sessions.
+
+        Modeled on EventBroadcaster.run: a long-lived task started in start()
+        and cancelled in close(). Per-sweep exceptions are swallowed so one bad
+        sweep never kills the loop.
+        """
+        while True:
+            try:
+                await asyncio.sleep(REAPER_INTERVAL_S)
+                await self._reap_idle_sessions()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Idle-session reaper sweep failed: %s", e)
+
+    async def _reap_idle_sessions(self) -> None:
+        """Select idle candidates under the lock, then tear each down.
+
+        Candidates are non-dev sessions that are live, not processing, not
+        awaiting tool approval (those are "approve later", not idle — reaping
+        would destroy the sandbox the approved tool needs), and untouched for
+        the idle window. We only snapshot IDs under the lock; the actual
+        teardown in _reap_one re-acquires it, because tearing a session down
+        while holding the lock would deadlock (the lock is non-reentrant).
+        """
+        # Reaping is only safe when sessions stay resumable from Mongo. With no
+        # store, eviction would destroy non-dev chats outright, so don't reap.
+        if not getattr(self._store(), "enabled", False):
+            return
+
+        cutoff = datetime.utcnow() - REAPER_IDLE
+        async with self._lock:
+            candidates = [
+                agent_session.session_id
+                for agent_session in self.sessions.values()
+                if agent_session.is_active
+                and not agent_session.is_processing
+                and not agent_session.is_reaping
+                and agent_session.user_id != "dev"
+                and not agent_session.session.pending_approval
+                and agent_session.last_active_at <= cutoff
+            ]
+        if not candidates:
+            return
+
+        reaped = 0
+        for session_id in candidates:
+            try:
+                if await self._reap_one(session_id, cutoff):
+                    reaped += 1
+            except Exception as e:
+                logger.warning("Failed to reap idle session %s: %s", session_id, e)
+        if reaped:
+            logger.info("Reaped %d idle session(s)", reaped)
+
+    async def _reap_one(self, session_id: str, cutoff: datetime) -> bool:
+        """Tear down one idle session, leaving it resumable from Mongo.
+
+        Re-checks every idle condition under the lock (a user may have become
+        active in the gap since selection), marks the session reaping, persists
+        a resumable snapshot outside the lock, then does one final locked
+        re-check before eviction. The runtime task is cancelled *outside* the
+        lock: its own ``finally`` frees the sandbox, and its identity-gated
+        persist no-ops because the session is already popped — so it can't
+        overwrite our resumable snapshot with ``"ended"`` and there's no
+        deadlock. Returns True if the session was reaped.
+        """
+        async with self._lock:
+            agent_session = self.sessions.get(session_id)
+            if (
+                agent_session is None
+                or not agent_session.is_active
+                or agent_session.is_processing
+                or agent_session.is_reaping
+                or agent_session.session.pending_approval
+                or agent_session.last_active_at > cutoff
+                or not agent_session.submission_queue.empty()
+            ):
+                return False
+            agent_session.is_reaping = True
+
+        # Persist a resumable snapshot *before* eviction so a concurrent reopen
+        # reloads clean state. status="active" (never "ended") keeps it a normal
+        # chat in the sidebar. Do this outside the manager lock: Mongo writes can
+        # take network round trips, and is_reaping=True is enough to block submit
+        # from enqueueing while the snapshot is in flight.
+        try:
+            await self.persist_session_snapshot(
+                agent_session,
+                runtime_state="idle",
+                status="active",
+                raise_on_error=True,
+            )
+        except Exception as e:
+            async with self._lock:
+                if self.sessions.get(session_id) is agent_session:
+                    agent_session.is_reaping = False
+            logger.warning(
+                "Skipping reap of %s: could not persist resumable snapshot: %s",
+                session_id,
+                e,
+            )
+            return False
+
+        async with self._lock:
+            current = self.sessions.get(session_id)
+            if current is not agent_session:
+                return False
+            if (
+                not agent_session.is_active
+                or agent_session.is_processing
+                or agent_session.session.pending_approval
+                or agent_session.last_active_at > cutoff
+                or not agent_session.submission_queue.empty()
+            ):
+                agent_session.is_reaping = False
+                return False
+            self.sessions.pop(session_id, None)
+            task = agent_session.task
+            session = agent_session.session
+
+        if task is not None and not task.done():
+            task.cancel()
+            # Use asyncio.wait, not wait_for: wait_for re-raises the cancelled
+            # task's CancelledError, which we'd have to swallow — and that same
+            # bare except would also eat an *outer* cancel aimed at the reaper
+            # itself (close() cancelling _reaper_task), hanging shutdown.
+            # asyncio.wait returns the cancelled task in `done` and lets an
+            # outer cancel propagate cleanly.
+            done, _pending = await asyncio.wait({task}, timeout=REAP_TEARDOWN_TIMEOUT_S)
+            if not done:
+                logger.warning(
+                    "Reaper teardown timed out after %.0fs for %s; orphan "
+                    "sweeper will handle any sandbox straggler",
+                    REAP_TEARDOWN_TIMEOUT_S,
+                    session_id,
+                )
+            elif not task.cancelled():
+                # Surface (and retrieve, to avoid "exception never retrieved")
+                # any non-cancellation teardown error.
+                exc = task.exception()
+                if exc is not None:
+                    logger.warning("Reaper teardown error for %s: %s", session_id, exc)
+        else:
+            # No live task to run the cleanup finally — free the sandbox here so
+            # a reaped session never leaves an orphaned Space behind.
+            await self._cleanup_sandbox(session)
+        return True
+
     async def _run_session(
         self,
         session_id: str,
@@ -941,12 +1459,17 @@ class SessionManager:
                             submission_queue.get(), timeout=1.0
                         )
                         agent_session.is_processing = True
+                        self._touch(agent_session)
                         try:
                             should_continue = await process_submission(
                                 session, submission
                             )
                         finally:
                             agent_session.is_processing = False
+                            # Stamp on turn finish too: a turn that ran longer
+                            # than the idle window would otherwise be reaped the
+                            # instant it completes.
+                            self._touch(agent_session)
                             await self.persist_session_snapshot(agent_session)
                         if not should_continue:
                             break
@@ -982,10 +1505,10 @@ class SessionManager:
                     logger.warning(f"Final-flush failed for {session_id}: {e}")
 
             async with self._lock:
-                if session_id in self.sessions:
-                    self.sessions[session_id].is_active = False
+                if self.sessions.get(session_id) is agent_session:
+                    agent_session.is_active = False
                     await self.persist_session_snapshot(
-                        self.sessions[session_id],
+                        agent_session,
                         runtime_state="ended",
                         status="ended",
                     )
@@ -993,16 +1516,26 @@ class SessionManager:
             logger.info(f"Session {session_id} ended")
 
     async def submit(self, session_id: str, operation: Operation) -> bool:
-        """Submit an operation to a session."""
+        """Submit an operation to a session.
+
+        Enqueues under the lock and rejects sessions being reaped, so submit
+        and reap can't interleave: either the message is enqueued before the
+        reaper's empty() re-check (which then aborts the reap), or the session
+        is already popped (we return False and the caller reloads a fresh
+        runtime from Mongo). The queue is unbounded, so put_nowait never blocks.
+        """
+        submission = Submission(id=f"sub_{uuid.uuid4().hex[:8]}", operation=operation)
         async with self._lock:
             agent_session = self.sessions.get(session_id)
-
-        if not agent_session or not agent_session.is_active:
-            logger.warning(f"Session {session_id} not found or inactive")
-            return False
-
-        submission = Submission(id=f"sub_{uuid.uuid4().hex[:8]}", operation=operation)
-        await agent_session.submission_queue.put(submission)
+            if (
+                not agent_session
+                or not agent_session.is_active
+                or agent_session.is_reaping
+            ):
+                logger.warning(f"Session {session_id} not found or inactive")
+                return False
+            agent_session.submission_queue.put_nowait(submission)
+            self._touch(agent_session)
         return True
 
     async def submit_user_input(self, session_id: str, text: str) -> bool:
@@ -1042,6 +1575,7 @@ class SessionManager:
             user_message_index
         )
         if success:
+            self._touch(agent_session)
             await self.persist_session_snapshot(agent_session, runtime_state="idle")
         return success
 
@@ -1115,6 +1649,7 @@ class SessionManager:
         if not agent_session or not agent_session.is_active:
             return False
         agent_session.session.update_model(model_id)
+        self._touch(agent_session)
         await self.persist_session_snapshot(agent_session, runtime_state="idle")
         return True
 
@@ -1150,6 +1685,7 @@ class SessionManager:
         else:
             session.auto_approval_enabled = bool(enabled)
             session.auto_approval_cost_cap_usd = cost_cap_usd
+        self._touch(agent_session)
         await self.persist_session_snapshot(agent_session)
         return self._auto_approval_summary(session)
 
@@ -1185,6 +1721,9 @@ class SessionManager:
         return {
             "session_id": session_id,
             "created_at": agent_session.created_at.isoformat(),
+            "usage_window_started_at": (
+                agent_session.usage_window_started_at or agent_session.created_at
+            ).isoformat(),
             "is_active": agent_session.is_active,
             "is_processing": agent_session.is_processing,
             "message_count": len(agent_session.session.context_manager.items),
@@ -1197,6 +1736,33 @@ class SessionManager:
             ),
             "auto_approval": self._auto_approval_summary(agent_session.session),
         }
+
+    async def reset_session_usage_window(
+        self,
+        session_id: str,
+        *,
+        started_at: datetime | None = None,
+        baseline: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Reset the account-billing window used for the visible usage meter."""
+        agent_session = self.sessions.get(session_id)
+        if not agent_session:
+            return None
+
+        window_start = started_at or datetime.utcnow()
+        agent_session.usage_window_started_at = window_start
+        agent_session.usage_window_baseline = baseline
+        self._touch(agent_session)
+
+        store = self._store()
+        if getattr(store, "enabled", False):
+            await store.update_session_fields(
+                session_id,
+                usage_window_started_at=window_start,
+                usage_window_baseline=baseline,
+                last_active_at=agent_session.last_active_at,
+            )
+        return self.get_session_info(session_id)
 
     def set_notification_destinations(
         self, session_id: str, destinations: list[str]
@@ -1222,6 +1788,7 @@ class SessionManager:
                 seen.add(name)
 
         agent_session.session.set_notification_destinations(normalized)
+        self._touch(agent_session)
         return normalized
 
     async def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]:
@@ -1247,11 +1814,21 @@ class SessionManager:
                     created_at_str = created_at.isoformat()
                 else:
                     created_at_str = str(created_at or datetime.utcnow().isoformat())
+                usage_window_started_at = (
+                    row.get("usage_window_started_at") or created_at
+                )
+                if isinstance(usage_window_started_at, datetime):
+                    usage_window_started_at_str = usage_window_started_at.isoformat()
+                else:
+                    usage_window_started_at_str = str(
+                        usage_window_started_at or created_at_str
+                    )
                 pending = self._pending_docs_for_api(row.get("pending_approval") or [])
                 results.append(
                     {
                         "session_id": str(sid),
                         "created_at": created_at_str,
+                        "usage_window_started_at": usage_window_started_at_str,
                         "is_active": row.get("status") != "ended",
                         "is_processing": row.get("runtime_state") == "processing",
                         "message_count": int(row.get("message_count") or 0),

@@ -18,10 +18,9 @@ from typing import Any
 _PATTERNS: list[tuple[re.Pattern, str]] = [
     # Hugging Face tokens: hf_[A-Za-z0-9]{30,}
     (re.compile(r"hf_[A-Za-z0-9]{30,}"), "[REDACTED_HF_TOKEN]"),
-    # Anthropic: sk-ant-[A-Za-z0-9_\-]{20,}
-    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"), "[REDACTED_ANTHROPIC_KEY]"),
-    # OpenAI: sk-[A-Za-z0-9]{40,}  (legacy + proj keys)
-    (re.compile(r"sk-(?!ant-)[A-Za-z0-9_\-]{40,}"), "[REDACTED_OPENAI_KEY]"),
+    # Provider API keys with common sk-* prefixes.
+    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"), "[REDACTED_PROVIDER_API_KEY]"),
+    (re.compile(r"sk-(?!ant-)[A-Za-z0-9_\-]{40,}"), "[REDACTED_PROVIDER_API_KEY]"),
     # GitHub classic PATs: ghp_, gho_, ghu_, ghs_, ghr_ followed by 36+ chars
     (re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"), "[REDACTED_GITHUB_TOKEN]"),
     # GitHub fine-grained PATs: github_pat_<alphanumeric_underscore>
@@ -36,8 +35,7 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
 # still see which secret was referenced. Covers `KEY=value` and `KEY: value`
 # when the key looks secret-y.
 _SECRETY_NAMES = re.compile(
-    r"(?i)\b(HF_TOKEN|HUGGINGFACEHUB_API_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|"
-    r"GITHUB_TOKEN|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|PASSWORD|SECRET|API_KEY)"
+    r"(?i)\b([A-Z0-9_]*(?:TOKEN|API_KEY|SECRET|PASSWORD|ACCESS_KEY_ID))"
     r"\s*[:=]\s*([^\s\"']+)"
 )
 

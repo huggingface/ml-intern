@@ -16,7 +16,7 @@ from fastapi import HTTPException, Request, status
 
 from agent.core.hf_tokens import bearer_token_from_header, clean_hf_token
 
-from agent.core.hf_access import fetch_whoami_v2
+from agent.core.hf_access import fetch_whoami_v2, normalize_hf_user_plan
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ DEV_USER: dict[str, Any] = {
     "user_id": "dev",
     "username": "dev",
     "authenticated": True,
-    "plan": "pro",  # Dev runs at the Pro quota tier so local testing isn't capped.
+    "plan": "pro",  # Dev uses the Pro web default model.
 }
 
 INTERNAL_HF_TOKEN_KEY = "_hf_token"
@@ -43,6 +43,7 @@ OAUTH_SCOPE_COOKIE = "hf_oauth_scope_hash"
 REQUIRED_OAUTH_SCOPES: tuple[str, ...] = (
     "openid",
     "profile",
+    "read-billing",
     "read-repos",
     "write-repos",
     "contribute-repos",
@@ -137,22 +138,16 @@ def _user_from_info(user_info: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_user_plan(whoami: Any) -> str:
-    """Normalize a whoami-v2 payload to the app's personal quota tiers."""
-    if not isinstance(whoami, dict):
-        return "free"
-
-    if whoami.get("isPro") is True:
-        return "pro"
-
-    return "free"
+    """Normalize a whoami-v2 payload to the app's supported plan tiers."""
+    return normalize_hf_user_plan(whoami) or "free"
 
 
 async def _fetch_user_plan(token: str) -> str:
     """Look up the user's HF plan via /api/whoami-v2.
 
     Returns 'free' | 'pro'. Non-200, network errors, or an unknown
-    payload shape all collapse to 'free' — safe default; we'd rather under-
-    grant the Pro cap than over-grant it on bad data.
+    payload shape all collapse to 'free' — safe default; we'd rather avoid
+    selecting the Pro default on bad data.
     """
     global _WHOAMI_SHAPE_LOGGED
     whoami = await fetch_whoami_v2(token)
@@ -298,9 +293,7 @@ def _extract_token(request: Request) -> str | None:
 async def require_huggingface_org_member(request: Request) -> bool:
     """Return True if the caller is a member of the ``huggingface`` org.
 
-    Used to gate endpoints that can push a session onto an Anthropic model
-    billed to the Space's ``ANTHROPIC_API_KEY``. Returns True unconditionally
-    in dev mode so local testing isn't blocked.
+    Returns True unconditionally in dev mode so local testing isn't blocked.
     """
     if not AUTH_ENABLED:
         return True
