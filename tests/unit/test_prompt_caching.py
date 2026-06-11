@@ -1,7 +1,12 @@
 from litellm import Message
+from types import SimpleNamespace
 
 from agent.core.model_ids import HF_ROUTER_BASE_URL
-from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
+from agent.core.prompt_caching import (
+    router_session_id_for,
+    with_prompt_cache_params,
+    with_prompt_caching,
+)
 
 
 def _anthropic_fal_params() -> dict:
@@ -221,6 +226,19 @@ def test_prompt_cache_params_adds_session_id_for_cerebras_router_model():
     assert cached_params is not llm_params
     assert cached_params["extra_body"] == {"session_id": "session-1"}
     assert "extra_body" not in llm_params
+
+
+def test_router_session_id_prefers_billing_window_id():
+    assert (
+        router_session_id_for(
+            SimpleNamespace(
+                session_id="session-1",
+                inference_billing_session_id="session-1:usage:window-1",
+            )
+        )
+        == "session-1:usage:window-1"
+    )
+    assert router_session_id_for(SimpleNamespace(session_id="session-1")) == "session-1"
 
 
 def test_prompt_cache_params_adds_anthropic_cache_control_without_session_id():

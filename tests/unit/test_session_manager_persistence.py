@@ -153,6 +153,8 @@ async def test_reset_session_usage_window_updates_runtime_and_store():
     agent_session = _runtime_agent_session("s1")
     manager.sessions["s1"] = agent_session
     started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
+    original_billing_session_id = agent_session.inference_billing_session_id
+    agent_session.usage_warning_spend_cache = {"spend_usd": 12.0}
 
     info = await manager.reset_session_usage_window(
         "s1",
@@ -160,15 +162,23 @@ async def test_reset_session_usage_window_updates_runtime_and_store():
     )
 
     assert agent_session.usage_window_started_at == started_at
+    assert agent_session.inference_billing_session_id is not None
+    assert agent_session.inference_billing_session_id != original_billing_session_id
+    assert agent_session.inference_billing_session_id.startswith("s1:usage:")
+    assert (
+        agent_session.session.inference_billing_session_id
+        == agent_session.inference_billing_session_id
+    )
+    assert agent_session.usage_warning_spend_cache == {}
     assert info is not None
     assert info["usage_window_started_at"] == started_at.isoformat()
-    assert store.updated_fields[-1] == (
-        "s1",
-        {
-            "usage_window_started_at": started_at,
-            "last_active_at": agent_session.last_active_at,
-        },
-    )
+    session_id, fields = store.updated_fields[-1]
+    assert session_id == "s1"
+    assert fields == {
+        "usage_window_started_at": started_at,
+        "inference_billing_session_id": agent_session.inference_billing_session_id,
+        "last_active_at": agent_session.last_active_at,
+    }
 
 
 def test_usage_threshold_pending_approval_serializes_and_restores():

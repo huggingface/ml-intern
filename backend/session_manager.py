@@ -1,6 +1,7 @@
 """Session manager for handling multiple concurrent agent sessions."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from agent.messaging.gateway import NotificationGateway
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_CONFIG_PATH = str(PROJECT_ROOT / "configs" / "frontend_agent_config.json")
 USAGE_WARNING_SPEND_CACHE_TTL_SECONDS = 30.0
+INFERENCE_BILLING_SESSION_ID_MAX_LENGTH = 256
 
 
 # These dataclasses match agent/main.py structure
@@ -123,12 +125,51 @@ class AgentSession:
     broadcaster: Any = None
     title: str | None = None
     usage_window_started_at: datetime | None = None
+    inference_billing_session_id: str | None = None
     usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
     usage_warning_spend_cache: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.usage_window_started_at is None:
             self.usage_window_started_at = self.created_at
+        if not self.inference_billing_session_id:
+            self.inference_billing_session_id = new_inference_billing_session_id(
+                self.session_id,
+                self.usage_window_started_at,
+            )
+        try:
+            self.session.inference_billing_session_id = (
+                self.inference_billing_session_id
+            )
+        except AttributeError:
+            pass
+
+
+def _billing_window_stamp(started_at: datetime | None) -> str:
+    window_start = started_at or datetime.utcnow()
+    if window_start.tzinfo is None:
+        window_start = window_start.replace(tzinfo=UTC)
+    else:
+        window_start = window_start.astimezone(UTC)
+    return window_start.strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def new_inference_billing_session_id(
+    session_id: str,
+    started_at: datetime | None = None,
+) -> str:
+    """Return a Router session ID scoped to one visible usage window."""
+    stamp = _billing_window_stamp(started_at)
+    nonce = uuid.uuid4().hex[:12]
+    suffix = f":usage:{stamp}:{nonce}"
+    candidate = f"{session_id}{suffix}"
+    if len(candidate) <= INFERENCE_BILLING_SESSION_ID_MAX_LENGTH:
+        return candidate
+
+    digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+    suffix = f":{digest}{suffix}"
+    prefix_length = max(0, INFERENCE_BILLING_SESSION_ID_MAX_LENGTH - len(suffix))
+    return f"{session_id[:prefix_length]}{suffix}"
 
 
 class SessionCapacityError(Exception):
@@ -427,6 +468,19 @@ class SessionManager:
             )
 
         agent_session.session.usage_threshold_checker = _checker
+
+    @staticmethod
+    def _set_inference_billing_session_id(
+        agent_session: AgentSession,
+        inference_billing_session_id: str,
+    ) -> None:
+        agent_session.inference_billing_session_id = inference_billing_session_id
+        try:
+            agent_session.session.inference_billing_session_id = (
+                inference_billing_session_id
+            )
+        except AttributeError:
+            pass
 
     @staticmethod
     def _usage_spend_from_response(response: dict[str, Any]) -> tuple[float, str]:
@@ -808,6 +862,9 @@ class SessionManager:
                 ),
                 created_at=agent_session.created_at,
                 usage_window_started_at=agent_session.usage_window_started_at,
+                inference_billing_session_id=(
+                    agent_session.inference_billing_session_id
+                ),
                 notification_destinations=list(
                     agent_session.session.notification_destinations
                 ),
@@ -986,6 +1043,12 @@ class SessionManager:
         usage_window_started_at = meta.get("usage_window_started_at")
         if not isinstance(usage_window_started_at, datetime):
             usage_window_started_at = created_at
+        inference_billing_session_id = meta.get("inference_billing_session_id")
+        if not isinstance(inference_billing_session_id, str):
+            inference_billing_session_id = new_inference_billing_session_id(
+                session_id,
+                usage_window_started_at,
+            )
 
         agent_session = AgentSession(
             session_id=session_id,
@@ -998,6 +1061,7 @@ class SessionManager:
             user_plan=user_plan,
             created_at=created_at,
             usage_window_started_at=usage_window_started_at,
+            inference_billing_session_id=inference_billing_session_id,
             usage_warning_next_threshold_usd=session.usage_warning_next_threshold_usd,
             is_active=True,
             is_processing=False,
@@ -1754,6 +1818,9 @@ class SessionManager:
 
         window_start = started_at or datetime.utcnow()
         agent_session.usage_window_started_at = window_start
+        billing_session_id = new_inference_billing_session_id(session_id, window_start)
+        self._set_inference_billing_session_id(agent_session, billing_session_id)
+        agent_session.usage_warning_spend_cache = {}
         self._touch(agent_session)
 
         store = self._store()
@@ -1761,6 +1828,7 @@ class SessionManager:
             await store.update_session_fields(
                 session_id,
                 usage_window_started_at=window_start,
+                inference_billing_session_id=billing_session_id,
                 last_active_at=agent_session.last_active_at,
             )
         return self.get_session_info(session_id)

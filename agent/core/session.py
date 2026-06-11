@@ -140,6 +140,7 @@ class Session:
         )
         self.event_queue = event_queue
         self.session_id = session_id or str(uuid.uuid4())
+        self.inference_billing_session_id: str | None = None
         self.config = config
         self.is_running = True
         self.current_plan: list[dict[str, str]] = []
@@ -454,6 +455,7 @@ class Session:
         self.context_manager.running_context_usage = 0
 
         self.session_id = str(uuid.uuid4())
+        self.inference_billing_session_id = None
         self.session_start_time = datetime.now().astimezone().isoformat()
         self.turn_count = 0
         self.last_auto_save_turn = 0

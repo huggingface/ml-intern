@@ -22,11 +22,14 @@ async def test_probe_effort_sends_session_id_to_hf_router(monkeypatch):
         "moonshotai/Kimi-K2.6:novita",
         "high",
         "hf_fake",
-        session=SimpleNamespace(session_id="session-1"),
+        session=SimpleNamespace(
+            session_id="session-1",
+            inference_billing_session_id="session-1:usage:window-1",
+        ),
     )
 
     assert outcome.effective_effort == "high"
     assert completions[0]["extra_body"] == {
         "reasoning_effort": "high",
-        "session_id": "session-1",
+        "session_id": "session-1:usage:window-1",
     }

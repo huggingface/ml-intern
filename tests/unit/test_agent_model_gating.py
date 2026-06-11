@@ -133,6 +133,12 @@ async def test_generate_title_sends_session_id_to_hf_router(monkeypatch):
     async def fake_check_session_access(session_id, user):
         assert session_id == "session-1"
         assert user["user_id"] == "u1"
+        return SimpleNamespace(
+            session=SimpleNamespace(
+                session_id="session-1",
+                inference_billing_session_id="session-1:usage:window-1",
+            )
+        )
 
     async def fake_update_session_title(session_id, title):
         titles.append((session_id, title))
@@ -154,7 +160,7 @@ async def test_generate_title_sends_session_id_to_hf_router(monkeypatch):
     assert response == {"title": "Clean title"}
     assert completions[0]["extra_body"] == {
         "reasoning_effort": "low",
-        "session_id": "session-1",
+        "session_id": "session-1:usage:window-1",
     }
     assert titles == [("session-1", "Clean title")]
 

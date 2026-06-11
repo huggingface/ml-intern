@@ -19,6 +19,17 @@ _CACHEABLE_ROLES = {"system", "user"}
 _OPENROUTER_SESSION_ID_MAX_LENGTH = 256
 
 
+def router_session_id_for(session: Any) -> str | None:
+    """Return the usage-window-scoped Router session ID for a runtime session."""
+    billing_session_id = getattr(session, "inference_billing_session_id", None)
+    if isinstance(billing_session_id, str) and billing_session_id:
+        return billing_session_id
+    session_id = getattr(session, "session_id", None)
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    return None
+
+
 def _is_hf_router_request(llm_params: dict[str, Any]) -> bool:
     api_base = str(llm_params.get("api_base") or "").rstrip("/")
     return api_base == HF_ROUTER_BASE_URL

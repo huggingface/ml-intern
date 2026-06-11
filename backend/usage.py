@@ -498,26 +498,46 @@ def _session_usage_window_started_at(
     return None
 
 
-async def _load_persisted_session_usage_window_started_at(
-    manager: Any,
-    session_id: str | None,
-) -> datetime | None:
+def _session_inference_billing_session_id(
+    manager: Any, session_id: str | None
+) -> str | None:
     if not session_id:
         return None
+    agent_session = getattr(manager, "sessions", {}).get(session_id)
+    billing_session_id = getattr(agent_session, "inference_billing_session_id", None)
+    if isinstance(billing_session_id, str) and billing_session_id:
+        return billing_session_id
+    runtime_session = getattr(agent_session, "session", None)
+    billing_session_id = getattr(runtime_session, "inference_billing_session_id", None)
+    if isinstance(billing_session_id, str) and billing_session_id:
+        return billing_session_id
+    return None
+
+
+async def _load_persisted_session_usage_window_metadata(
+    manager: Any,
+    session_id: str | None,
+) -> tuple[datetime | None, str | None]:
+    if not session_id:
+        return None, None
     store = manager._store()
     if not getattr(store, "enabled", False) or not hasattr(store, "load_session"):
-        return None
+        return None, None
     loaded = await store.load_session(session_id)
     metadata = loaded.get("metadata") if isinstance(loaded, dict) else None
     started_at = None
+    billing_session_id = None
     if isinstance(metadata, dict):
         started_at = metadata.get("usage_window_started_at") or metadata.get(
             "created_at"
         )
+        raw_billing_session_id = metadata.get("inference_billing_session_id")
+        if isinstance(raw_billing_session_id, str) and raw_billing_session_id:
+            billing_session_id = raw_billing_session_id
     if isinstance(started_at, datetime):
-        return _utc(started_at)
+        return _utc(started_at), billing_session_id
     parsed = _parse_timestamp(started_at)
-    return _utc(parsed) if parsed is not None else None
+    return (_utc(parsed) if parsed is not None else None), billing_session_id
 
 
 async def _build_hf_account_usage(
@@ -541,10 +561,16 @@ async def _build_hf_account_usage(
         return account_usage
 
     session_start = _session_usage_window_started_at(manager, session_id)
-    if session_start is None:
-        session_start = await _load_persisted_session_usage_window_started_at(
-            manager, session_id
-        )
+    billing_session_id = _session_inference_billing_session_id(manager, session_id)
+    if session_start is None or billing_session_id is None:
+        (
+            persisted_start,
+            persisted_billing_session_id,
+        ) = await _load_persisted_session_usage_window_metadata(manager, session_id)
+        if session_start is None:
+            session_start = persisted_start
+        if billing_session_id is None:
+            billing_session_id = persisted_billing_session_id
 
     window_tasks: dict[str, tuple[datetime, asyncio.Task[dict[str, Any] | None]]] = {
         "month": (
@@ -554,7 +580,7 @@ async def _build_hf_account_usage(
             ),
         ),
     }
-    if session_id is not None and session_start is not None:
+    if billing_session_id is not None and session_start is not None:
         window_tasks["current_session"] = (
             session_start,
             asyncio.create_task(
@@ -582,10 +608,10 @@ async def _build_hf_account_usage(
             if name == "current_session":
                 account_usage["error"] = "session_billing_usage_unavailable"
             continue
-        if name == "current_session" and session_id is not None:
+        if name == "current_session" and billing_session_id is not None:
             account_usage[name] = _session_bucket_from_inference_session_usage(
                 payload,
-                session_id=session_id,
+                session_id=billing_session_id,
                 window_start=start,
                 window_end=now_utc,
                 timezone=timezone,

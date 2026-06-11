@@ -18,7 +18,11 @@ from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import strip_huggingface_model_prefix
-from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
+from agent.core.prompt_caching import (
+    router_session_id_for,
+    with_prompt_cache_params,
+    with_prompt_caching,
+)
 from agent.core.session import Event
 
 logger = logging.getLogger(__name__)
@@ -260,7 +264,8 @@ async def research_handler(
         reasoning_effort=_capped,
     )
     llm_params = with_prompt_cache_params(
-        llm_params, session_id=getattr(session, "session_id", None)
+        llm_params,
+        session_id=router_session_id_for(session),
     )
 
     # Get read-only tool specs from the session's tool router

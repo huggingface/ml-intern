@@ -13,7 +13,11 @@ import yaml
 from jinja2 import Template
 from litellm import Message, acompletion
 
-from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
+from agent.core.prompt_caching import (
+    router_session_id_for,
+    with_prompt_cache_params,
+    with_prompt_caching,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +151,8 @@ async def summarize_messages(
         reasoning_effort="high",
     )
     llm_params = with_prompt_cache_params(
-        llm_params, session_id=getattr(session, "session_id", None)
+        llm_params,
+        session_id=router_session_id_for(session),
     )
     prompt_messages, tool_specs = with_prompt_caching(
         prompt_messages, tool_specs, llm_params

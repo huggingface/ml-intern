@@ -310,6 +310,7 @@ def _agent_session(session_id, user_id, events):
     return SimpleNamespace(
         session_id=session_id,
         user_id=user_id,
+        inference_billing_session_id=f"{session_id}:usage:window-1",
         session=SimpleNamespace(logged_events=events),
     )
 
@@ -451,6 +452,7 @@ async def test_hf_account_usage_uses_session_endpoint_for_current_session(
                 user_id="owner",
                 created_at=session_created_at,
                 usage_window_started_at=usage_window_started_at,
+                inference_billing_session_id="s1:usage:window-1",
                 session=SimpleNamespace(logged_events=[]),
             )
         }
@@ -480,7 +482,12 @@ async def test_hf_account_usage_uses_session_endpoint_for_current_session(
                 {
                     "period": "2026-06-01T00:00:00.000Z",
                     "sessions": [
-                        {"id": "s1", "requestCount": 3, "costCents": 125},
+                        {
+                            "id": "s1:usage:window-1",
+                            "requestCount": 3,
+                            "costCents": 125,
+                        },
+                        {"id": "s1", "requestCount": 11, "costCents": 500},
                         {"id": "other", "requestCount": 9, "costCents": 999},
                     ],
                 }
@@ -534,6 +541,7 @@ async def test_hf_account_usage_reports_session_endpoint_unavailable(monkeypatch
                 user_id="owner",
                 created_at=datetime(2026, 6, 5, 12, 0, tzinfo=UTC),
                 usage_window_started_at=usage_window_started_at,
+                inference_billing_session_id="s1:usage:window-1",
                 session=SimpleNamespace(logged_events=[]),
             )
         }
@@ -574,7 +582,12 @@ async def test_hf_account_usage_reports_session_endpoint_unavailable(monkeypatch
 @pytest.mark.asyncio
 async def test_hf_account_usage_falls_back_to_persisted_created_at(monkeypatch):
     session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
-    store = _MetadataStore({"created_at": session_created_at})
+    store = _MetadataStore(
+        {
+            "created_at": session_created_at,
+            "inference_billing_session_id": "s1:usage:window-1",
+        }
+    )
     manager = _Manager({}, store=store)
     usage_v2_calls = []
     session_usage_calls = []
@@ -632,6 +645,7 @@ async def test_usage_response_loads_only_session_events(monkeypatch):
                 session_id="s1",
                 user_id="owner",
                 created_at=session_created_at,
+                inference_billing_session_id="s1:usage:window-1",
                 session=SimpleNamespace(logged_events=[]),
             )
         },
