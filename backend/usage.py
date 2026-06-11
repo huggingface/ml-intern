@@ -605,8 +605,6 @@ async def _build_hf_account_usage(
     for name, (start, _) in window_tasks.items():
         payload = payloads.get(name)
         if payload is None:
-            if name == "current_session":
-                account_usage["error"] = "session_billing_usage_unavailable"
             continue
         if name == "current_session" and billing_session_id is not None:
             account_usage[name] = _session_bucket_from_inference_session_usage(

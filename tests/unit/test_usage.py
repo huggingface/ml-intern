@@ -532,7 +532,9 @@ async def test_hf_account_usage_uses_session_endpoint_for_current_session(
 
 
 @pytest.mark.asyncio
-async def test_hf_account_usage_reports_session_endpoint_unavailable(monkeypatch):
+async def test_hf_account_usage_keeps_account_available_when_session_endpoint_fails(
+    monkeypatch,
+):
     usage_window_started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
     manager = _Manager(
         {
@@ -576,7 +578,7 @@ async def test_hf_account_usage_reports_session_endpoint_unavailable(monkeypatch
     assert usage["hf_account"]["available"] is True
     assert usage["hf_account"]["current_session"] is None
     assert usage["hf_account"]["month"]["inference_providers_usd"] == 2.0
-    assert usage["hf_account"]["error"] == "session_billing_usage_unavailable"
+    assert "error" not in usage["hf_account"]
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,12 @@ if str(_BACKEND_DIR) not in sys.path:
 from agent.core.model_ids import KIMI_K26_MODEL_ID  # noqa: E402
 from agent.core.session_persistence import NoopSessionStore  # noqa: E402
 from agent.core.usage_thresholds import USAGE_THRESHOLD_TOOL_NAME  # noqa: E402
-from session_manager import AgentSession, SessionManager  # noqa: E402
+from session_manager import (  # noqa: E402
+    INFERENCE_BILLING_SESSION_ID_MAX_LENGTH,
+    AgentSession,
+    SessionManager,
+    new_inference_billing_session_id,
+)
 
 
 class FakeRuntimeSession:
@@ -144,6 +149,16 @@ def _runtime_agent_session(
         hf_token=hf_token,
         user_plan=user_plan,
     )
+
+
+def test_inference_billing_session_id_is_router_safe_for_long_agent_session_ids():
+    billing_session_id = new_inference_billing_session_id(
+        "s" * 300,
+        datetime(2026, 6, 5, 12, 30, tzinfo=UTC),
+    )
+
+    assert len(billing_session_id) <= INFERENCE_BILLING_SESSION_ID_MAX_LENGTH
+    assert ":usage:20260605T123000000000Z:" in billing_session_id
 
 
 @pytest.mark.asyncio
