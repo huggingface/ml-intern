@@ -59,10 +59,19 @@ export function llmMessagesToUIMessages(
   const uiMessages: UIMessage[] = [];
 
   // Helper to get existing message ID at a given position if roles match
-  const getExistingId = (index: number, role: 'user' | 'assistant'): string | null => {
+  const getExistingId = (
+    index: number,
+    role: 'user' | 'assistant',
+    expectedText?: string,
+  ): string | null => {
     if (!existingUIMessages || index >= existingUIMessages.length) return null;
     const existing = existingUIMessages[index];
-    return existing.role === role ? existing.id : null;
+    if (existing.role !== role) return null;
+    if (expectedText === undefined) return existing.id;
+
+    const existingText = joinText(existing.parts);
+    if (role === 'user') return existingText === expectedText ? existing.id : null;
+    return existingText.startsWith(expectedText) ? existing.id : null;
   };
   const getExistingPendingToolMessageId = (toolCallId: string): string | null => {
     for (const existing of existingUIMessages || []) {
@@ -89,11 +98,12 @@ export function llmMessagesToUIMessages(
         continue;
       }
       // Try to reuse existing ID if the message at this position matches
-      const existingId = getExistingId(uiMessages.length, 'user');
+      const content = msg.content || '';
+      const existingId = getExistingId(uiMessages.length, 'user', content);
       uiMessages.push({
         id: existingId || nextId(),
         role: 'user',
-        parts: [{ type: 'text', text: msg.content || '' }],
+        parts: [{ type: 'text', text: content }],
       });
       continue;
     }
@@ -153,7 +163,12 @@ export function llmMessagesToUIMessages(
         prev.parts.push(...parts);
       } else {
         // Try to reuse existing ID if the message at this position matches
-        const existingId = getExistingId(uiMessages.length, 'assistant');
+        const expectedText = joinText(parts);
+        const existingId = getExistingId(
+          uiMessages.length,
+          'assistant',
+          expectedText,
+        );
         const newId = existingId || nextId();
         uiMessages.push({
           id: newId,
