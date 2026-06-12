@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -72,10 +73,15 @@ class EventBroadcaster:
     this in-memory fanout. Durable replay is handled by session_persistence.
     """
 
-    def __init__(self, event_queue: asyncio.Queue):
+    def __init__(
+        self,
+        event_queue: asyncio.Queue,
+        on_event: Callable[[], None] | None = None,
+    ):
         self._source = event_queue
         self._subscribers: dict[int, asyncio.Queue] = {}
         self._counter = 0
+        self._on_event = on_event
 
     def subscribe(self) -> tuple[int, asyncio.Queue]:
         """Create a new subscriber. Returns (id, queue)."""
@@ -93,6 +99,8 @@ class EventBroadcaster:
         while True:
             try:
                 event: Event = await self._source.get()
+                if self._on_event is not None:
+                    self._on_event()
                 msg = {
                     "event_type": event.event_type,
                     "data": event.data,
@@ -124,6 +132,11 @@ class AgentSession:
     # Drives the idle reaper. Defaults to load time so a freshly-restored but
     # untouched session isn't reaped for a full idle window.
     last_active_at: datetime = field(default_factory=datetime.utcnow)
+    # Last event observed on the broadcast path. Drives stalled-turn detection:
+    # healthy long turns emit events continuously (chunks, tool updates,
+    # heartbeats); a hung turn goes silent. Defaults to load time so a fresh
+    # or restored session gets a full stalled window.
+    last_event_at: datetime = field(default_factory=datetime.utcnow)
     is_active: bool = True
     is_processing: bool = False  # True while a submission is being executed
     # Set under the lock by the reaper while tearing this session down. Blocks
@@ -198,6 +211,20 @@ REAPER_IDLE_MINUTES: float = float(os.environ.get("REAPER_IDLE_MINUTES", "15"))
 REAPER_INTERVAL_S: float = float(os.environ.get("REAPER_INTERVAL_S", "300"))
 REAP_TEARDOWN_TIMEOUT_S: float = float(os.environ.get("REAP_TEARDOWN_TIMEOUT_S", "30"))
 REAPER_IDLE = timedelta(minutes=REAPER_IDLE_MINUTES)
+# Sessions parked on a real tool-permission prompt keep their slot longer than
+# plain idle ones (the user may genuinely want to "approve later"), but not
+# forever — an unanswered prompt must not pin a capacity slot indefinitely.
+# Acknowledgement-type prompts (usage-threshold / YOLO-cap), which are created
+# automatically at turn end with no user action, use the normal idle window.
+REAPER_TOOL_APPROVAL_IDLE_MINUTES: float = float(
+    os.environ.get("REAPER_TOOL_APPROVAL_IDLE_MINUTES", "60")
+)
+REAPER_TOOL_APPROVAL_IDLE = timedelta(minutes=REAPER_TOOL_APPROVAL_IDLE_MINUTES)
+# A processing turn that has emitted no event for this long is considered hung
+# and evicted. Healthy long turns stream chunks/tool updates/heartbeats, which
+# stamp last_event_at and keep them alive.
+REAPER_STALLED_MINUTES: float = float(os.environ.get("REAPER_STALLED_MINUTES", "15"))
+REAPER_STALLED = timedelta(minutes=REAPER_STALLED_MINUTES)
 
 
 class SessionManager:
@@ -251,6 +278,28 @@ class SessionManager:
             1 for s in self.sessions.values() if s.user_id == user_id and s.is_active
         )
 
+    def _user_slot_breakdown(self, user_id: str) -> str:
+        """Summarize what holds a user's live slots, for the capacity error.
+
+        Call under the manager lock so the breakdown matches the count that
+        triggered the error.
+        """
+        awaiting = processing = idle = 0
+        for s in self.sessions.values():
+            if s.user_id != user_id or not s.is_active:
+                continue
+            if s.session.pending_approval:
+                awaiting += 1
+            elif s.is_processing:
+                processing += 1
+            else:
+                idle += 1
+        return (
+            f"{awaiting} awaiting your approval, "
+            f"{processing} still processing, "
+            f"{idle} idle"
+        )
+
     @staticmethod
     def _touch(agent_session: "AgentSession") -> None:
         """Stamp genuine activity so the idle reaper's clock resets.
@@ -260,6 +309,15 @@ class SessionManager:
         would keep an otherwise-idle session alive forever.
         """
         agent_session.last_active_at = datetime.utcnow()
+
+    @staticmethod
+    def _stamp_event(agent_session: "AgentSession") -> None:
+        """Stamp event flow so the stalled-turn detector's clock resets.
+
+        Deliberately separate from _touch: a queued user message proves the
+        user is active, not that the in-flight turn is making progress.
+        """
+        agent_session.last_event_at = datetime.utcnow()
 
     @staticmethod
     def _model_from_saved_metadata(
@@ -438,6 +496,43 @@ class SessionManager:
         if not agent_session.is_active:
             return "ended"
         return "idle"
+
+    @staticmethod
+    def _reaper_verdict(agent_session: AgentSession, now: datetime) -> str:
+        """Classify a live session for the reaper.
+
+        Returns an ``evict_*`` reason when the session should be torn down
+        this sweep, a ``skip_*`` label when it holds a slot for a known
+        reason, or ``"skip"`` when it is simply fresh. ``is_reaping`` is
+        deliberately not consulted here: callers handle it (_reap_one
+        re-checks the verdict after setting the flag itself).
+
+        ``is_processing`` is evaluated before ``pending_approval``: when both
+        are true (an in-flight exec-approval continuation), event silence is
+        the signal that matters. Stalled turns ignore the queue guard — a
+        hung turn never drains its queue, so the guard would pin the slot
+        harder.
+        """
+        if agent_session.user_id == "dev" or not agent_session.is_active:
+            return "skip"
+        if agent_session.is_processing:
+            if now - agent_session.last_event_at >= REAPER_STALLED:
+                return "evict_stalled"
+            return "skip_processing"
+        queue_empty = agent_session.submission_queue.empty()
+        idle_for = now - agent_session.last_active_at
+        pending = agent_session.session.pending_approval
+        if pending:
+            if is_usage_threshold_pending(pending) or is_yolo_budget_pending(pending):
+                if idle_for >= REAPER_IDLE and queue_empty:
+                    return "evict_pending_ack"
+                return "skip_pending_ack"
+            if idle_for >= REAPER_TOOL_APPROVAL_IDLE and queue_empty:
+                return "evict_pending_tool"
+            return "skip_pending_tool"
+        if idle_for >= REAPER_IDLE and queue_empty:
+            return "evict_idle"
+        return "skip"
 
     @staticmethod
     def _auto_approval_summary(session: Session) -> dict[str, Any]:
@@ -1298,7 +1393,8 @@ class SessionManager:
                         f"You have reached the maximum of {MAX_SESSIONS_PER_USER} "
                         f"live sessions. Close an existing session, or wait "
                         f"{REAPER_IDLE_MINUTES:g} minutes after your last activity "
-                        "for an idle session to be released.",
+                        "for an idle session to be released. Currently held: "
+                        f"{self._user_slot_breakdown(user_id)}.",
                         error_type="per_user",
                     )
             self._pending_creates += 1
@@ -1523,80 +1619,113 @@ class SessionManager:
                 logger.error("Idle-session reaper sweep failed: %s", e)
 
     async def _reap_idle_sessions(self) -> None:
-        """Select idle candidates under the lock, then tear each down.
+        """Classify live sessions under the lock, then tear down evictees.
 
-        Candidates are non-dev sessions that are live, not processing, not
-        awaiting tool approval (those are "approve later", not idle — reaping
-        would destroy the sandbox the approved tool needs), and untouched for
-        the idle window. We only snapshot IDs under the lock; the actual
-        teardown in _reap_one re-acquires it, because tearing a session down
-        while holding the lock would deadlock (the lock is non-reentrant).
+        Each session gets a verdict from _reaper_verdict: plain idle,
+        approval prompts unanswered past their window, or a processing turn
+        gone event-silent. We only snapshot (id, verdict) pairs under the
+        lock; the actual teardown in _reap_one re-acquires it, because
+        tearing a session down while holding the lock would deadlock (the
+        lock is non-reentrant).
         """
         # Reaping is only safe when sessions stay resumable from Mongo. With no
-        # store, eviction would destroy non-dev chats outright, so don't reap.
-        if not getattr(self._store(), "enabled", False):
-            return
+        # store, eviction would destroy non-dev chats outright, so don't reap —
+        # but give a Mongo store that failed its boot-time init a chance to
+        # recover instead of staying disabled until the next restart. The sweep
+        # interval is the retry backoff.
+        store = self._store()
+        if not getattr(store, "enabled", False):
+            if not await store.maybe_reconnect():
+                return
 
-        cutoff = datetime.utcnow() - REAPER_IDLE
+        now = datetime.utcnow()
+        counters = {
+            "evicted_idle": 0,
+            "evicted_pending_ack": 0,
+            "evicted_pending_tool": 0,
+            "evicted_stalled": 0,
+            "skipped_processing": 0,
+            "skipped_pending_tool_within_window": 0,
+            "skipped_pending_ack_within_window": 0,
+            "aborted": 0,
+        }
+        candidates: list[tuple[str, str]] = []
         async with self._lock:
-            candidates = [
-                agent_session.session_id
-                for agent_session in self.sessions.values()
-                if agent_session.is_active
-                and not agent_session.is_processing
-                and not agent_session.is_reaping
-                and agent_session.user_id != "dev"
-                and not agent_session.session.pending_approval
-                and agent_session.last_active_at <= cutoff
-            ]
-        if not candidates:
-            return
+            for agent_session in self.sessions.values():
+                if agent_session.is_reaping:
+                    continue
+                verdict = self._reaper_verdict(agent_session, now)
+                if verdict.startswith("evict_"):
+                    candidates.append((agent_session.session_id, verdict))
+                elif verdict == "skip_processing":
+                    counters["skipped_processing"] += 1
+                elif verdict == "skip_pending_tool":
+                    counters["skipped_pending_tool_within_window"] += 1
+                elif verdict == "skip_pending_ack":
+                    counters["skipped_pending_ack_within_window"] += 1
 
-        reaped = 0
-        for session_id in candidates:
+        for session_id, verdict in candidates:
             try:
-                if await self._reap_one(session_id, cutoff):
-                    reaped += 1
+                if await self._reap_one(session_id, verdict=verdict, now=now):
+                    counters["evicted_" + verdict.removeprefix("evict_")] += 1
+                else:
+                    counters["aborted"] += 1
             except Exception as e:
                 logger.warning("Failed to reap idle session %s: %s", session_id, e)
-        if reaped:
-            logger.info("Reaped %d idle session(s)", reaped)
+                counters["aborted"] += 1
+        if any(counters.values()):
+            logger.info(
+                "Reaper sweep: evicted_idle=%d evicted_pending_ack=%d "
+                "evicted_pending_tool=%d evicted_stalled=%d "
+                "skipped_processing=%d skipped_pending_tool_within_window=%d "
+                "skipped_pending_ack_within_window=%d aborted=%d",
+                counters["evicted_idle"],
+                counters["evicted_pending_ack"],
+                counters["evicted_pending_tool"],
+                counters["evicted_stalled"],
+                counters["skipped_processing"],
+                counters["skipped_pending_tool_within_window"],
+                counters["skipped_pending_ack_within_window"],
+                counters["aborted"],
+            )
 
-    async def _reap_one(self, session_id: str, cutoff: datetime) -> bool:
-        """Tear down one idle session, leaving it resumable from Mongo.
+    async def _reap_one(self, session_id: str, *, verdict: str, now: datetime) -> bool:
+        """Tear down one evictable session, leaving it resumable from Mongo.
 
-        Re-checks every idle condition under the lock (a user may have become
-        active in the gap since selection), marks the session reaping, persists
-        a resumable snapshot outside the lock, then does one final locked
-        re-check before eviction. The runtime task is cancelled *outside* the
-        lock: its own ``finally`` frees the sandbox, and its identity-gated
-        persist no-ops because the session is already popped — so it can't
-        overwrite our resumable snapshot with ``"ended"`` and there's no
-        deadlock. Returns True if the session was reaped.
+        Re-checks the verdict under the lock (a user may have become active —
+        or answered a prompt — in the gap since selection), marks the session
+        reaping, persists a resumable snapshot outside the lock, then does one
+        final locked re-check before eviction. The runtime task is cancelled
+        *outside* the lock: its own ``finally`` frees the sandbox, and its
+        identity-gated persist no-ops because the session is already popped —
+        so it can't overwrite our resumable snapshot with ``"ended"`` and
+        there's no deadlock. Returns True if the session was reaped.
         """
         async with self._lock:
             agent_session = self.sessions.get(session_id)
             if (
                 agent_session is None
-                or not agent_session.is_active
-                or agent_session.is_processing
                 or agent_session.is_reaping
-                or agent_session.session.pending_approval
-                or agent_session.last_active_at > cutoff
-                or not agent_session.submission_queue.empty()
+                or self._reaper_verdict(agent_session, now) != verdict
             ):
                 return False
             agent_session.is_reaping = True
+            queued = agent_session.submission_queue.qsize()
 
         # Persist a resumable snapshot *before* eviction so a concurrent reopen
         # reloads clean state. status="active" (never "ended") keeps it a normal
-        # chat in the sidebar. Do this outside the manager lock: Mongo writes can
-        # take network round trips, and is_reaping=True is enough to block submit
-        # from enqueueing while the snapshot is in flight.
+        # chat in the sidebar; runtime_state never persists as "processing", or
+        # an evicted row would render as processing forever in list_sessions.
+        # Do this outside the manager lock: Mongo writes can take network round
+        # trips, and is_reaping=True is enough to block submit from enqueueing
+        # while the snapshot is in flight.
+        runtime_state = (
+            "waiting_approval" if agent_session.session.pending_approval else "idle"
+        )
         try:
             await self.persist_session_snapshot(
                 agent_session,
-                runtime_state="idle",
+                runtime_state=runtime_state,
                 status="active",
                 raise_on_error=True,
             )
@@ -1615,18 +1744,24 @@ class SessionManager:
             current = self.sessions.get(session_id)
             if current is not agent_session:
                 return False
-            if (
-                not agent_session.is_active
-                or agent_session.is_processing
-                or agent_session.session.pending_approval
-                or agent_session.last_active_at > cutoff
-                or not agent_session.submission_queue.empty()
-            ):
+            if self._reaper_verdict(agent_session, now) != verdict:
                 agent_session.is_reaping = False
                 return False
             self.sessions.pop(session_id, None)
             task = agent_session.task
             session = agent_session.session
+
+        if verdict == "evict_stalled":
+            logger.warning(
+                "Evicting stalled session %s: processing but no events for "
+                ">= %.0f min (queued submissions dropped: %d)",
+                session_id,
+                REAPER_STALLED_MINUTES,
+                queued,
+            )
+            # Set the cooperative interrupt flag first (as interrupt() does)
+            # so tool-wait races exit cleanly; task.cancel() is the backstop.
+            session.cancel()
 
         if task is not None and not task.done():
             task.cancel()
@@ -1671,8 +1806,11 @@ class SessionManager:
 
         session = agent_session.session
 
-        # Start event broadcaster task
-        broadcaster = EventBroadcaster(event_queue)
+        # Start event broadcaster task. Every agent event passes through this
+        # queue, so it doubles as the stalled-turn liveness signal.
+        broadcaster = EventBroadcaster(
+            event_queue, on_event=lambda: self._stamp_event(agent_session)
+        )
         agent_session.broadcaster = broadcaster
         broadcast_task = asyncio.create_task(broadcaster.run())
 
@@ -1691,6 +1829,10 @@ class SessionManager:
                         )
                         agent_session.is_processing = True
                         self._touch(agent_session)
+                        # Reset the stalled clock too: a session parked on an
+                        # approval for 40 minutes must not be classified
+                        # stalled before its first event arrives.
+                        self._stamp_event(agent_session)
                         try:
                             should_continue = await process_submission(
                                 session, submission

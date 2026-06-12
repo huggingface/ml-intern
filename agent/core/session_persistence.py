@@ -65,6 +65,10 @@ class NoopSessionStore:
     async def init(self) -> None:
         return None
 
+    async def maybe_reconnect(self) -> bool:
+        """Return True when the store is usable; subclasses may retry a failed init."""
+        return self.enabled
+
     async def close(self) -> None:
         return None
 
@@ -129,6 +133,16 @@ class MongoSessionStore(NoopSessionStore):
                 await self.client.close()
             self.client = None
             self.db = None
+
+    async def maybe_reconnect(self) -> bool:
+        """Retry a failed init so one Mongo blip at boot doesn't disable
+        persistence (and with it the idle reaper) until the next restart."""
+        if self.enabled:
+            return True
+        await self.init()
+        if self.enabled:
+            logger.info("Mongo session persistence recovered after earlier failure")
+        return self.enabled
 
     async def close(self) -> None:
         if self.client is not None:
