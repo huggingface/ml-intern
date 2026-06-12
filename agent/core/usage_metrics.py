@@ -135,9 +135,14 @@ def _sandbox_duration_seconds(
     return int((destroy_at - interval_start).total_seconds())
 
 
-def _aggregate_sandbox_lifecycle(
+def summarize_sandbox_lifecycle(
     lifecycle_events: list[tuple[int, dict[str, Any]]],
 ) -> dict[str, Any]:
+    """Pair sandbox lifecycle events and estimate billed usage.
+
+    Shared by dataset usage metrics and backend usage responses so sandbox
+    pricing and create/destroy pairing semantics cannot drift.
+    """
     ordered_events = [
         event
         for _, event in sorted(
@@ -327,7 +332,7 @@ def summarize_usage_events(
         elif event_type == "assistant_stream_end":
             assistant_stream_end_count += 1
 
-    sandbox = _aggregate_sandbox_lifecycle(lifecycle_events)
+    sandbox = summarize_sandbox_lifecycle(lifecycle_events)
     app["sandbox_count"] = sandbox["matched_pairs"]
     app["sandbox_estimated_usd"] = sandbox["estimated_usd"]
     app["sandbox_billable_seconds_estimate"] = sandbox["billable_seconds_estimate"]

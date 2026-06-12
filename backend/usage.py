@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
-from agent.core.cost_estimation import SPACE_PRICE_USD_PER_HOUR
+from agent.core.usage_metrics import summarize_sandbox_lifecycle
 
 USAGE_EVENT_TYPES = (
     "llm_call",
@@ -239,47 +239,6 @@ def aggregate_usage_events(
     return bucket
 
 
-def _event_sort_key(
-    indexed_event: tuple[int, dict[str, Any]],
-) -> tuple[bool, datetime, int]:
-    index, event = indexed_event
-    created_at = event_created_at(event)
-    return (
-        created_at is None,
-        created_at or datetime.min.replace(tzinfo=UTC),
-        index,
-    )
-
-
-def _sandbox_id(event: dict[str, Any]) -> str | None:
-    data = event.get("data") or {}
-    sandbox_id = data.get("sandbox_id")
-    return sandbox_id if isinstance(sandbox_id, str) and sandbox_id else None
-
-
-def _sandbox_duration_seconds(
-    create_event: dict[str, Any],
-    destroy_event: dict[str, Any],
-) -> int:
-    create_data = create_event.get("data") or {}
-    destroy_data = destroy_event.get("data") or {}
-    lifetime_s = _coerce_int(destroy_data.get("lifetime_s"))
-
-    if lifetime_s > 0:
-        # Telemetry starts the lifetime clock before create latency elapses.
-        return lifetime_s
-
-    create_at = event_created_at(create_event)
-    destroy_at = event_created_at(destroy_event)
-    if create_at is None or destroy_at is None:
-        return 0
-    create_latency_s = max(0, _coerce_int(create_data.get("create_latency_s")))
-    interval_start = create_at - timedelta(seconds=create_latency_s)
-    if destroy_at <= interval_start:
-        return 0
-    return int((destroy_at - interval_start).total_seconds())
-
-
 def _aggregate_sandbox_usage(
     events: list[dict[str, Any]],
     bucket: dict[str, Any],
@@ -289,41 +248,10 @@ def _aggregate_sandbox_usage(
         for index, event in enumerate(events)
         if event.get("event_type") in {"sandbox_create", "sandbox_destroy"}
     ]
-    ordered_events = [
-        event
-        for _, event in sorted(
-            lifecycle_events,
-            key=_event_sort_key,
-        )
-    ]
-    active_creates: dict[str, dict[str, Any]] = {}
-
-    for event in ordered_events:
-        event_type = event.get("event_type")
-        sandbox_id = _sandbox_id(event)
-        if sandbox_id is None:
-            continue
-
-        if event_type == "sandbox_create":
-            active_creates[sandbox_id] = event
-            continue
-
-        if event_type != "sandbox_destroy":
-            continue
-
-        create_event = active_creates.pop(sandbox_id, None)
-        if create_event is None:
-            continue
-
-        create_data = create_event.get("data") or {}
-        hardware = str(create_data.get("hardware") or "cpu-basic")
-        price_usd_per_hour = SPACE_PRICE_USD_PER_HOUR.get(hardware, 0.0)
-        seconds = _sandbox_duration_seconds(create_event, event)
-
-        bucket["sandbox_count"] += 1
-        if price_usd_per_hour > 0:
-            bucket["sandbox_billable_seconds_estimate"] += seconds
-        bucket["sandbox_estimated_usd"] += price_usd_per_hour * (seconds / 3600)
+    sandbox = summarize_sandbox_lifecycle(lifecycle_events)
+    bucket["sandbox_count"] += sandbox["matched_pairs"]
+    bucket["sandbox_billable_seconds_estimate"] += sandbox["billable_seconds_estimate"]
+    bucket["sandbox_estimated_usd"] += sandbox["estimated_usd"]
 
 
 def _account_bucket_from_billing_usage(

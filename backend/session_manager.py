@@ -42,6 +42,7 @@ from agent.messaging.gateway import NotificationGateway
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_CONFIG_PATH = str(PROJECT_ROOT / "configs" / "frontend_agent_config.json")
 USAGE_WARNING_SPEND_CACHE_TTL_SECONDS = 30.0
+USAGE_BILLING_REFRESH_TIMEOUT_SECONDS = 2.0
 
 
 # These dataclasses match agent/main.py structure
@@ -584,6 +585,7 @@ class SessionManager:
         agent_session: AgentSession,
         *,
         error_code: str = "billing_snapshot_error",
+        billing_timeout_s: float | None = USAGE_BILLING_REFRESH_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Refresh the dataset usage snapshot stored on the runtime session."""
         from agent.core.usage_metrics import (
@@ -594,12 +596,26 @@ class SessionManager:
 
         session = agent_session.session
         try:
-            hf_billing_snapshot = await build_hf_billing_snapshot(
+            billing_snapshot = build_hf_billing_snapshot(
                 self,
                 hf_token=agent_session.hf_token or getattr(session, "hf_token", None),
                 session_id=agent_session.session_id,
                 timezone_name="UTC",
             )
+            if billing_timeout_s is not None and billing_timeout_s > 0:
+                hf_billing_snapshot = await asyncio.wait_for(
+                    billing_snapshot,
+                    timeout=billing_timeout_s,
+                )
+            else:
+                hf_billing_snapshot = await billing_snapshot
+        except TimeoutError:
+            logger.debug(
+                "HF billing snapshot refresh timed out for %s after %.2fs",
+                agent_session.session_id,
+                billing_timeout_s or 0,
+            )
+            hf_billing_snapshot = self._fallback_hf_billing_snapshot(error_code)
         except Exception as e:
             logger.debug(
                 "HF billing snapshot refresh failed for %s: %s",

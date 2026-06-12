@@ -178,6 +178,42 @@ def test_aggregate_usage_events_falls_back_to_sandbox_timestamps():
     assert usage["total_usd"] == 0.3
 
 
+def test_sandbox_lifecycle_pairing_is_shared_for_duplicate_creates():
+    events = [
+        _event(
+            "sandbox_create",
+            {"sandbox_id": "alice/sandbox-reused", "hardware": "t4-small"},
+            created_at="2026-06-01T12:00:00+00:00",
+        ),
+        _event(
+            "sandbox_create",
+            {"sandbox_id": "alice/sandbox-reused", "hardware": "cpu-basic"},
+            created_at="2026-06-01T12:05:00+00:00",
+        ),
+        _event(
+            "sandbox_destroy",
+            {"sandbox_id": "alice/sandbox-reused", "lifetime_s": 300},
+            created_at="2026-06-01T12:10:00+00:00",
+        ),
+        _event(
+            "sandbox_destroy",
+            {"sandbox_id": "alice/sandbox-reused", "lifetime_s": 1200},
+            created_at="2026-06-01T12:20:00+00:00",
+        ),
+    ]
+
+    usage = aggregate_usage_events(events, session_id="s1")
+    metrics = summarize_usage_events(events, session_id="s1")
+
+    assert usage["sandbox_count"] == 2
+    assert usage["sandbox_billable_seconds_estimate"] == 1200
+    assert usage["sandbox_estimated_usd"] == 0.2
+    assert metrics["sandboxes"]["matched_pairs"] == usage["sandbox_count"]
+    assert metrics["sandboxes"]["unpaired_creates"] == 0
+    assert metrics["sandboxes"]["unpaired_destroys"] == 0
+    assert metrics["sandboxes"]["estimated_usd"] == usage["sandbox_estimated_usd"]
+
+
 def test_usage_event_type_allowlists_include_sandbox_lifecycle():
     assert set(USAGE_EVENT_TYPES) >= {"sandbox_create", "sandbox_destroy"}
     assert set(session_persistence.USAGE_EVENT_TYPES) >= {

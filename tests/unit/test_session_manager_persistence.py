@@ -463,6 +463,45 @@ async def test_refresh_usage_metrics_failure_records_error_code(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_refresh_usage_metrics_timeout_records_error_code(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token="owner-token")
+    agent_session.session.logged_events = [
+        {
+            "timestamp": "2026-06-01T12:00:00+00:00",
+            "event_type": "llm_call",
+            "data": {"cost_usd": 2.0, "total_tokens": 10},
+        }
+    ]
+
+    async def slow_billing_snapshot(*_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        return {
+            "hf_billing": {
+                "available": True,
+                "current_session": {"total_usd": 999},
+            }
+        }
+
+    monkeypatch.setattr("usage.build_hf_billing_snapshot", slow_billing_snapshot)
+
+    metrics = await manager.refresh_session_usage_metrics(
+        agent_session,
+        error_code="unit_billing_timeout",
+        billing_timeout_s=0.001,
+    )
+
+    assert metrics["total_usd"] == 2.0
+    assert metrics["total_usd_source"] == "app_telemetry_fallback"
+    assert metrics["hf_billing"] == {
+        "source": "hf_billing_usage_v2",
+        "available": False,
+        "error": "unit_billing_timeout",
+        "current_session": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_usage_threshold_checker_creates_synthetic_pending_approval(monkeypatch):
     manager = _manager_with_store(NoopSessionStore())
     agent_session = _runtime_agent_session("s1")
