@@ -120,7 +120,7 @@ function AccountUsageSection({
           strong
         />
         <UsageRow
-          label={useJobEstimate ? 'HF Jobs estimated' : 'HF Jobs'}
+          label="HF Jobs"
           value={formatUsd(
             useJobEstimate ? telemetry?.hf_jobs_estimated_usd : account?.hf_jobs_usd,
           )}
