@@ -404,6 +404,17 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
       onUsageEvent: (eventType, data) => {
         useUsageStore.getState().applyUsageEvent(sessionId, eventType, data);
       },
+      onSessionUpdate: (data) => {
+        const autoApproval = data.auto_approval;
+        if (autoApproval && typeof autoApproval === 'object') {
+          updateSessionYolo(sessionId, autoApproval as {
+            enabled: boolean;
+            cost_cap_usd?: number | null;
+            estimated_spend_usd?: number;
+            remaining_usd?: number | null;
+          });
+        }
+      },
       onInterrupted: () => { /* no-op — handled by stop() caller */ },
       onRecoverMessages: async ({
         submittedText,
