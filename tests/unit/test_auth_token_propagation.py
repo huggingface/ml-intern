@@ -120,6 +120,7 @@ async def test_oauth_login_requests_collection_write_scope(monkeypatch):
     scopes = set(params["scope"][0].split())
 
     assert "write-collections" in scopes
+    assert "read-billing" in scopes
 
 
 def test_oauth_callback_detects_missing_required_collection_scope():
@@ -127,6 +128,14 @@ def test_oauth_callback_detects_missing_required_collection_scope():
 
     assert auth._missing_required_scopes({"scope": " ".join(granted)}) == {
         "write-collections"
+    }
+
+
+def test_oauth_callback_detects_missing_required_billing_scope():
+    granted = [scope for scope in auth.OAUTH_SCOPES if scope != "read-billing"]
+
+    assert auth._missing_required_scopes({"scope": " ".join(granted)}) == {
+        "read-billing"
     }
 
 

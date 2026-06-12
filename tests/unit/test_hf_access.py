@@ -1,4 +1,9 @@
-from agent.core.hf_access import is_billing_error, jobs_access_from_whoami
+from agent.core.hf_access import (
+    is_billing_error,
+    is_inference_billing_error,
+    jobs_access_from_whoami,
+    normalize_hf_user_plan,
+)
 
 
 def test_personal_user_lists_username_namespace():
@@ -67,3 +72,25 @@ def test_is_billing_error_detects_402_and_credit_phrasing():
     assert is_billing_error("Out of credit, please add billing")
     assert not is_billing_error("Internal server error")
     assert not is_billing_error("")
+
+
+def test_jobs_billing_classifier_ignores_non_credit_quota_errors():
+    assert not is_billing_error("quota exceeded")
+    assert not is_billing_error("insufficient_quota")
+    assert not is_billing_error("flavor quota exceeded")
+
+
+def test_is_inference_billing_error_detects_credit_and_quota_phrasing():
+    assert is_inference_billing_error("402 Payment Required")
+    assert is_inference_billing_error("exhausted monthly credits")
+    assert is_inference_billing_error("insufficient_quota")
+    assert is_inference_billing_error("quota exceeded")
+    assert is_inference_billing_error("monthly credits exhausted")
+    assert not is_inference_billing_error("503 service unavailable")
+
+
+def test_normalize_hf_user_plan_uses_ispro_only():
+    assert normalize_hf_user_plan({"isPro": True}) == "pro"
+    assert normalize_hf_user_plan({"isPro": False}) == "free"
+    assert normalize_hf_user_plan({"plan": "HF Pro"}) == "free"
+    assert normalize_hf_user_plan(None) is None

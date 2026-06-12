@@ -51,12 +51,6 @@ from agent.tools.research_tool import RESEARCH_TOOL_SPEC, research_handler
 from agent.tools.sandbox_tool import get_sandbox_tools
 from agent.tools.web_search_tool import WEB_SEARCH_TOOL_SPEC, web_search_handler
 
-# NOTE: Private HF repo tool disabled - replaced by hf_repo_files and hf_repo_git
-# from agent.tools.private_hf_repo_tools import (
-#     PRIVATE_HF_REPO_TOOL_SPEC,
-#     private_hf_repo_handler,
-# )
-
 # Suppress aiohttp deprecation warning
 warnings.filterwarnings(
     "ignore", category=DeprecationWarning, module="aiohttp.connector"

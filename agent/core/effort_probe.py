@@ -29,15 +29,16 @@ from typing import Any
 from litellm import acompletion
 
 from agent.core.llm_params import UnsupportedEffortError, _resolve_llm_params
+from agent.core.prompt_caching import router_session_id_for, with_prompt_cache_params
+from agent.core.yolo_budget import maybe_pause_yolo_after_spend
 
 logger = logging.getLogger(__name__)
 
 
 # Cascade: for each user-stated preference, the ordered list of levels to
-# try. First success wins. ``max`` is Anthropic-only; ``xhigh`` is also
-# supported on current OpenAI GPT-5 models. Providers that don't accept a
-# requested level raise ``UnsupportedEffortError`` synchronously (no wasted
-# network round-trip) and we advance to the next level.
+# try. First success wins. HF Router accepts low/medium/high generically;
+# higher preferences are kept in the cascade for future/provider-specific
+# support and are skipped synchronously when unsupported.
 _EFFORT_CASCADE: dict[str, list[str]] = {
     "max": ["max", "xhigh", "high", "medium", "low"],
     "xhigh": ["xhigh", "high", "medium", "low"],
@@ -79,9 +80,7 @@ class ProbeOutcome:
 def _is_thinking_unsupported(e: Exception) -> bool:
     """Model rejected any thinking config.
 
-    Matches Anthropic's 'thinking.type.enabled is not supported for this
-    model' as well as the adaptive variant. Substring-match because the
-    exact wording shifts across API versions.
+    Substring-match because exact wording shifts across models and providers.
     """
     s = str(e).lower()
     return "thinking" in s and "not supported" in s
@@ -90,16 +89,12 @@ def _is_thinking_unsupported(e: Exception) -> bool:
 def _is_invalid_effort(e: Exception) -> bool:
     """The requested effort level isn't accepted for this model.
 
-    Covers both API responses (Anthropic/OpenAI 400 with "invalid", "must
-    be one of", etc.) and LiteLLM's local validation that fires *before*
-    the request (e.g. "effort='max' is only supported by Claude Opus 4.6"
-    — LiteLLM knows max is Opus-4.6-only and raises synchronously). The
-    cascade walks down on either.
+    Covers API responses with "invalid", "must be one of", etc. and local
+    validation that fires *before* the request. The cascade walks down on
+    either.
 
     Explicitly returns False when the message is really about thinking
-    itself (e.g. Anthropic's 4.7 error mentions ``output_config.effort``
-    in its fix hint, but the actual failure is ``thinking.type.enabled``
-    being unsupported). That case is caught by ``_is_thinking_unsupported``.
+    itself. That case is caught by ``_is_thinking_unsupported``.
     """
     if _is_thinking_unsupported(e):
         return False
@@ -196,6 +191,10 @@ async def probe_effort(
                 reasoning_effort=effort,
                 strict=True,
             )
+            params = with_prompt_cache_params(
+                params,
+                session_id=router_session_id_for(session),
+            )
         except UnsupportedEffortError:
             # Provider can't even accept this effort name (e.g. "max" on
             # HF router). Skip without a network call.
@@ -203,12 +202,13 @@ async def probe_effort(
             continue
 
         attempts += 1
+        probe_messages = [{"role": "user", "content": "ping"}]
+        params = {**params, "max_tokens": _PROBE_MAX_TOKENS}
         try:
             _t0 = time.monotonic()
             response = await asyncio.wait_for(
                 acompletion(
-                    messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=_PROBE_MAX_TOKENS,
+                    messages=probe_messages,
                     stream=False,
                     **params,
                 ),
@@ -220,7 +220,7 @@ async def probe_effort(
                 try:
                     from agent.core import telemetry
 
-                    await telemetry.record_llm_call(
+                    usage = await telemetry.record_llm_call(
                         session,
                         model=model_name,
                         response=response,
@@ -230,6 +230,19 @@ async def probe_effort(
                         else None,
                         kind="effort_probe",
                     )
+                    if await maybe_pause_yolo_after_spend(
+                        session,
+                        spend_kind="effort_probe",
+                        observed_cost_usd=usage.get("cost_usd")
+                        if isinstance(usage, dict)
+                        else None,
+                    ):
+                        return ProbeOutcome(
+                            effective_effort=effort,
+                            attempts=attempts,
+                            elapsed_ms=int((loop.time() - start) * 1000),
+                            note="YOLO budget paused effort probe",
+                        )
                 except Exception as _telem_err:
                     logger.debug("effort_probe telemetry failed: %s", _telem_err)
         except Exception as e:

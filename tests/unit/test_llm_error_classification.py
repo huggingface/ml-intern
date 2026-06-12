@@ -2,12 +2,12 @@
 
 Covers two regressions on 2026-04-25:
 
-1. Non-Anthropic context overflow (Kimi 365k > 262k) was not classified as
+1. Router context overflow (Kimi 365k > 262k) was not classified as
    ``_is_context_overflow_error``, so the recovery path didn't fire and
    session 62ccfdcb died with 68 wasted compaction events.
 
-2. Bedrock TPM rate limit (`Too many tokens, please wait before trying
-   again.`) needs the longer rate-limit retry schedule. The old schedule
+2. Provider token-bucket rate limits (`Too many tokens, please wait before
+   trying again.`) need the longer rate-limit retry schedule. The old schedule
    ([5, 15, 30] = 50s) burned through 6 sessions costing >$2,400 combined
    on the same day.
 """
@@ -16,6 +16,7 @@ from agent.core.agent_loop import (
     _MAX_LLM_RETRIES,
     _LLM_RATE_LIMIT_RETRY_DELAYS,
     _LLM_RETRY_DELAYS,
+    _friendly_error_message,
     _is_context_overflow_error,
     _is_rate_limit_error,
     _is_transient_error,
@@ -48,10 +49,10 @@ def test_random_error_is_not_context_overflow():
 # ── rate limit ──────────────────────────────────────────────────────────
 
 
-def test_bedrock_too_many_tokens_is_rate_limit():
+def test_provider_too_many_tokens_is_rate_limit():
     # Verbatim from sessions b37a3823, c4d7a831, b63c4933 (2026-04-25).
     err = Exception(
-        'litellm.RateLimitError: BedrockException - {"message":"Too many '
+        'litellm.RateLimitError: ProviderException - {"message":"Too many '
         'tokens, please wait before trying again."}'
     )
     assert _is_rate_limit_error(err)
@@ -95,8 +96,43 @@ def test_non_transient_returns_none():
     assert _retry_delay_for(err, 0) is None
 
 
-def test_rate_limit_total_budget_covers_bedrock_bucket_recovery():
+def test_rate_limit_total_budget_covers_token_bucket_recovery():
     """The whole point of the rate-limit schedule: total wait time should
-    exceed the ~60s Bedrock TPM bucket recovery window."""
+    exceed a typical ~60s provider token-bucket recovery window."""
     assert len(_LLM_RATE_LIMIT_RETRY_DELAYS) == _MAX_LLM_RETRIES - 1
     assert sum(_LLM_RATE_LIMIT_RETRY_DELAYS) > 60
+
+
+def test_free_user_credit_error_mentions_pro_and_billing_links():
+    msg = _friendly_error_message(
+        Exception("402 Payment Required: monthly credits exhausted"),
+        user_plan="free",
+    )
+
+    assert msg is not None
+    assert "https://huggingface.co/subscribe/pro" in msg
+    assert "https://huggingface.co/settings/billing" in msg
+
+
+def test_pro_user_credit_error_mentions_billing_only():
+    msg = _friendly_error_message(
+        Exception("insufficient_quota"),
+        user_plan="pro",
+    )
+
+    assert msg is not None
+    assert "https://huggingface.co/settings/billing" in msg
+    assert "https://huggingface.co/subscribe/pro" not in msg
+
+
+def test_unknown_plan_credit_error_uses_fallback_wording():
+    msg = _friendly_error_message(
+        Exception("exhausted monthly credits"),
+        user_plan="unknown",
+    )
+
+    assert msg is not None
+    assert "appear to be exhausted" in msg
+    assert "If this is a free account" in msg
+    assert "https://huggingface.co/settings/billing" in msg
+    assert "https://huggingface.co/subscribe/pro" in msg

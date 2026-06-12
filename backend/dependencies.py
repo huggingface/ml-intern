@@ -16,26 +16,22 @@ from fastapi import HTTPException, Request, status
 
 from agent.core.hf_tokens import bearer_token_from_header, clean_hf_token
 
-from agent.core.hf_access import fetch_whoami_v2
+from agent.core.hf_access import fetch_whoami_v2, normalize_hf_user_plan
 
 logger = logging.getLogger(__name__)
 
 OPENID_PROVIDER_URL = os.environ.get("OPENID_PROVIDER_URL", "https://huggingface.co")
 AUTH_ENABLED = bool(os.environ.get("OAUTH_CLIENT_ID", ""))
-HF_EMPLOYEE_ORG = os.environ.get("HF_EMPLOYEE_ORG", "huggingface")
 
 # Simple in-memory token cache: token -> (user_info, expiry_time)
 _token_cache: dict[str, tuple[dict[str, Any], float]] = {}
 TOKEN_CACHE_TTL = 300  # 5 minutes
 
-# Org membership cache: key -> expiry_time (only caches positive results)
-_org_member_cache: dict[str, float] = {}
-
 DEV_USER: dict[str, Any] = {
     "user_id": "dev",
     "username": "dev",
     "authenticated": True,
-    "plan": "pro",  # Dev runs at the Pro quota tier so local testing isn't capped.
+    "plan": "pro",  # Dev uses the Pro web default model.
 }
 
 INTERNAL_HF_TOKEN_KEY = "_hf_token"
@@ -43,6 +39,7 @@ OAUTH_SCOPE_COOKIE = "hf_oauth_scope_hash"
 REQUIRED_OAUTH_SCOPES: tuple[str, ...] = (
     "openid",
     "profile",
+    "read-billing",
     "read-repos",
     "write-repos",
     "contribute-repos",
@@ -137,22 +134,16 @@ def _user_from_info(user_info: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_user_plan(whoami: Any) -> str:
-    """Normalize a whoami-v2 payload to the app's personal quota tiers."""
-    if not isinstance(whoami, dict):
-        return "free"
-
-    if whoami.get("isPro") is True:
-        return "pro"
-
-    return "free"
+    """Normalize a whoami-v2 payload to the app's supported plan tiers."""
+    return normalize_hf_user_plan(whoami) or "free"
 
 
 async def _fetch_user_plan(token: str) -> str:
     """Look up the user's HF plan via /api/whoami-v2.
 
     Returns 'free' | 'pro'. Non-200, network errors, or an unknown
-    payload shape all collapse to 'free' — safe default; we'd rather under-
-    grant the Pro cap than over-grant it on bad data.
+    payload shape all collapse to 'free' — safe default; we'd rather avoid
+    selecting the Pro default on bad data.
     """
     global _WHOAMI_SHAPE_LOGGED
     whoami = await fetch_whoami_v2(token)
@@ -216,31 +207,6 @@ async def _dev_user_from_env() -> dict[str, Any]:
     }
 
 
-async def check_org_membership(token: str, org_name: str) -> bool:
-    """Check if the token owner belongs to an HF org. Only caches positive results."""
-    now = time.time()
-    key = token + org_name
-    cached = _org_member_cache.get(key)
-    if cached and cached > now:
-        return True
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            resp = await client.get(
-                f"{OPENID_PROVIDER_URL}/api/whoami-v2",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            if resp.status_code != 200:
-                return False
-            orgs = {o.get("name") for o in resp.json().get("orgs", [])}
-            if org_name in orgs:
-                _org_member_cache[key] = now + TOKEN_CACHE_TTL
-                return True
-            return False
-        except httpx.HTTPError:
-            return False
-
-
 async def get_current_user(request: Request) -> dict[str, Any]:
     """FastAPI dependency: extract and validate the current user.
 
@@ -282,29 +248,3 @@ async def get_current_user(request: Request) -> dict[str, Any]:
         detail="Not authenticated. Please log in via /auth/login.",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
-
-def _extract_token(request: Request) -> str | None:
-    """Pull the HF access token from the Authorization header or cookie.
-
-    Mirrors the lookup order used by ``get_current_user``.
-    """
-    token = bearer_token_from_header(request.headers.get("Authorization", ""))
-    if token:
-        return token
-    return request.cookies.get("hf_access_token")
-
-
-async def require_huggingface_org_member(request: Request) -> bool:
-    """Return True if the caller is a member of the ``huggingface`` org.
-
-    Used to gate endpoints that can push a session onto an Anthropic model
-    billed to the Space's ``ANTHROPIC_API_KEY``. Returns True unconditionally
-    in dev mode so local testing isn't blocked.
-    """
-    if not AUTH_ENABLED:
-        return True
-    token = _extract_token(request)
-    if not token:
-        return False
-    return await check_org_membership(token, HF_EMPLOYEE_ORG)

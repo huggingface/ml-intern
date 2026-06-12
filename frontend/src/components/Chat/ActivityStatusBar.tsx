@@ -25,7 +25,7 @@ function formatResearchStatus(raw: string): string {
   const s = raw.replace(/^▸\s*/, '');
   const jsonStart = s.indexOf('{');
   const toolName = jsonStart > 0 ? s.slice(0, jsonStart).trim() : s.trim();
-  let args: Record<string, string> = {};
+  const args: Record<string, string> = {};
   if (jsonStart > 0) {
     const jsonStr = s.slice(jsonStart);
     try {

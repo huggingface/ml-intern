@@ -5,15 +5,13 @@ Operations: list, read, upload, delete
 """
 
 import asyncio
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Optional
 
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
 from agent.core.hub_artifacts import is_known_hub_artifact, register_hub_artifact
 from agent.tools.types import ToolResult
-
-OperationType = Literal["list", "read", "upload", "delete"]
 
 
 async def _async_call(func, *args, **kwargs):

@@ -10,6 +10,8 @@ from litellm import Message
 
 from agent.core import session_resume
 
+ROUTER_GPT_55 = "openai/gpt-5.5:fal-ai"
+
 
 def _write_session_log(
     directory: Path,
@@ -29,7 +31,7 @@ def _write_session_log(
         "user_id": user_id,
         "session_start_time": "2026-01-01T00:00:00",
         "session_end_time": "2026-01-01T00:05:00",
-        "model_name": "openai/gpt-5.5",
+        "model_name": ROUTER_GPT_55,
         "messages": [
             {"role": "system", "content": "old system"},
             {"role": "user", "content": content},
@@ -114,10 +116,10 @@ def test_restore_continues_when_user_id_matches(tmp_path):
     assert result["restored_count"] == 1
     assert result["dropped_count"] == 0
     assert result["forked"] is False
-    assert result["model_name"] == "openai/gpt-5.5"
+    assert result["model_name"] == ROUTER_GPT_55
     assert result["had_redacted_content"] is False
     assert result["invalid_saved_model"] is None
-    assert session.config.model_name == "openai/gpt-5.5"
+    assert session.config.model_name == ROUTER_GPT_55
     assert session.session_id == "saved-session"
     # Source log path is never reused: future heartbeat saves write to a
     # fresh file so the snapshot stays intact (regression: see source-log
@@ -130,7 +132,7 @@ def test_restore_continues_when_user_id_matches(tmp_path):
     assert session.context_manager.items[0].content == "current system"
     assert session.context_manager.items[1].content == "continue this work"
     assert session.context_manager.running_context_usage == 123
-    assert session.context_manager.recompute_calls == ["openai/gpt-5.5"]
+    assert session.context_manager.recompute_calls == [ROUTER_GPT_55]
     assert len(session.logged_events) == 1
     marker = session.logged_events[0]
     assert marker["event_type"] == "resumed_from"
@@ -240,7 +242,7 @@ def test_restore_counts_dropped_messages(tmp_path):
             {
                 "session_id": "saved",
                 "user_id": "user-a",
-                "model_name": "openai/gpt-5.5",
+                "model_name": ROUTER_GPT_55,
                 "messages": [
                     {"role": "user", "content": "hi"},
                     {"role": "user", "content": 12345},  # invalid content type
@@ -279,7 +281,7 @@ def test_restore_does_not_overwrite_source_log_on_save(tmp_path, monkeypatch):
         "user_id": "user-a",
         "session_start_time": "2026-01-01T00:00:00",
         "session_end_time": "2026-01-01T00:05:00",
-        "model_name": "openai/gpt-5.5",
+        "model_name": ROUTER_GPT_55,
         "messages": [
             {"role": "system", "content": "old system"},
             {"role": "user", "content": "earlier work"},
@@ -293,7 +295,7 @@ def test_restore_does_not_overwrite_source_log_on_save(tmp_path, monkeypatch):
     src_bytes_before = src_path.read_bytes()
 
     class _Cfg:
-        model_name = "openai/gpt-5.5"
+        model_name = ROUTER_GPT_55
         save_sessions = True
         session_dataset_repo = None
         auto_save_interval = 1

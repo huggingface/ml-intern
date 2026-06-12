@@ -1,5 +1,6 @@
 """FastAPI application for HF Agent web interface."""
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -10,8 +11,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-# Load .env before importing routes/session_manager so persistence and quota
-# modules see local Mongo settings during startup.
+# Load .env before importing routes/session_manager so persistence and model
+# modules see local settings during startup.
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 from routes.agent import router as agent_router  # noqa: E402
@@ -24,6 +25,23 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+SHUTDOWN_USAGE_REFRESH_CONCURRENCY = 32
+
+
+async def _flush_session_on_shutdown(sid: str, agent_session, semaphore) -> None:
+    sess = agent_session.session
+    if not sess.config.save_sessions:
+        return
+    try:
+        async with semaphore:
+            await session_manager.refresh_session_usage_metrics(
+                agent_session,
+                error_code="lifespan_billing_snapshot_error",
+            )
+            sess.save_and_upload_detached(sess.config.session_dataset_repo)
+            logger.info("Flushed session %s on shutdown", sid)
+    except Exception as e:
+        logger.warning("Failed to flush session %s: %s", sid, e)
 
 
 @asynccontextmanager
@@ -50,16 +68,16 @@ async def lifespan(app: FastAPI):
         logger.warning("KPI scheduler shutdown failed: %s", e)
 
     # Final-flush: save every still-active session so we don't lose traces on
-    # server restart. Uploads are detached subprocesses — this is fast.
+    # server restart. Billing refreshes are timeboxed and bounded; uploads are
+    # detached subprocesses.
     try:
-        for sid, agent_session in list(session_manager.sessions.items()):
-            sess = agent_session.session
-            if sess.config.save_sessions:
-                try:
-                    sess.save_and_upload_detached(sess.config.session_dataset_repo)
-                    logger.info("Flushed session %s on shutdown", sid)
-                except Exception as e:
-                    logger.warning("Failed to flush session %s: %s", sid, e)
+        semaphore = asyncio.Semaphore(SHUTDOWN_USAGE_REFRESH_CONCURRENCY)
+        await asyncio.gather(
+            *(
+                _flush_session_on_shutdown(sid, agent_session, semaphore)
+                for sid, agent_session in list(session_manager.sessions.items())
+            )
+        )
     except Exception as e:
         logger.warning("Lifespan final-flush skipped: %s", e)
     await session_manager.close()

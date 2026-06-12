@@ -48,17 +48,6 @@ import httpx
 from huggingface_hub import CommitOperationAdd, HfApi
 
 TEMPLATE_SPACE = "burtenshaw/sandbox"
-HARDWARE_OPTIONS = [
-    "cpu-basic",
-    "cpu-upgrade",
-    "t4-small",
-    "t4-medium",
-    "a10g-small",
-    "a10g-large",
-    "a100-large",
-]
-OUTPUT_LIMIT = 25000
-LINE_LIMIT = 4000
 DEFAULT_READ_LIMIT = 2000
 DEFAULT_TIMEOUT = 240
 MAX_TIMEOUT = 1200
@@ -497,9 +486,6 @@ class ToolResult:
             return self.output or "(no output)"
         return f"ERROR: {self.error}"
 
-    def to_dict(self) -> dict:
-        return {"success": self.success, "output": self.output, "error": self.error}
-
 
 @dataclass
 class Sandbox:
@@ -793,15 +779,6 @@ class Sandbox:
         self._client.close()
         if log:
             log("Deleted.")
-
-    def pause(self):
-        """Pause the Space (stops billing, preserves state)."""
-        self._hf_api.pause_space(self.space_id)
-
-    def restart(self):
-        """Restart the Space."""
-        self._hf_api.restart_space(self.space_id)
-        self._wait_for_api()
 
     @property
     def url(self) -> str:
@@ -1130,10 +1107,6 @@ class Sandbox:
             },
         },
     }
-
-    @classmethod
-    def tool_definitions(cls) -> list[dict]:
-        return [{"name": name, **spec} for name, spec in cls.TOOLS.items()]
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         dispatch = {

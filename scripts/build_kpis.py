@@ -58,7 +58,7 @@ re-running the same hour overwrites.
     tool_calls_per_turn_p50 / _p95        — calls / turns, among sessions with turns>0
     tool_calls_by_name_json    — JSON {tool: total_calls} (all tools seen)
     sessions_using_tool_json   — JSON {tool: distinct_sessions_using}
-    sessions_by_model_json     — JSON {model_name: count} (CLI vs Bedrock split)
+    sessions_by_model_json     — JSON {model_name: count} (router/local split)
 
 ================================================================================
  Usage
@@ -560,7 +560,7 @@ def _aggregate(per_session: list[dict]) -> dict:
         "sessions_using_tool_json": json.dumps(
             dict(sessions_using_tool), sort_keys=True
         ),
-        # Surface split — answers "is research dropping on Bedrock specifically?".
+        # Surface split by selected model for dashboard drilldowns.
         "sessions_by_model_json": json.dumps(dict(sessions_by_model), sort_keys=True),
     }
 

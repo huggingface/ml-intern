@@ -5,30 +5,13 @@ Operations: branches, tags, PRs, repo management
 """
 
 import asyncio
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Optional
 
 from huggingface_hub import HfApi
 from huggingface_hub.utils import RepositoryNotFoundError
 
 from agent.core.hub_artifacts import register_hub_artifact
 from agent.tools.types import ToolResult
-
-OperationType = Literal[
-    "create_branch",
-    "delete_branch",
-    "create_tag",
-    "delete_tag",
-    "list_refs",
-    "create_pr",
-    "list_prs",
-    "get_pr",
-    "merge_pr",
-    "close_pr",
-    "comment_pr",
-    "change_pr_status",
-    "create_repo",
-    "update_repo",
-]
 
 
 async def _async_call(func, *args, **kwargs):

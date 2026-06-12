@@ -14,12 +14,18 @@ from typing import Any
 
 from bson import BSON
 from pymongo import AsyncMongoClient, DeleteMany, ReturnDocument, UpdateOne
-from pymongo.errors import DuplicateKeyError, InvalidDocument, PyMongoError
+from pymongo.errors import InvalidDocument, PyMongoError
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 MAX_BSON_BYTES = 15 * 1024 * 1024
+USAGE_EVENT_TYPES = (
+    "llm_call",
+    "hf_job_complete",
+    "sandbox_create",
+    "sandbox_destroy",
+)
 
 
 def _now() -> datetime:
@@ -86,16 +92,10 @@ class NoopSessionStore:
     async def load_events_after(self, *_: Any, **__: Any) -> list[dict[str, Any]]:
         return []
 
+    async def load_usage_events(self, *_: Any, **__: Any) -> list[dict[str, Any]]:
+        return []
+
     async def append_trace_message(self, *_: Any, **__: Any) -> int | None:
-        return None
-
-    async def get_quota(self, *_: Any, **__: Any) -> int | None:
-        return None
-
-    async def try_increment_quota(self, *_: Any, **__: Any) -> int | None:
-        return None
-
-    async def refund_quota(self, *_: Any, **__: Any) -> None:
         return None
 
     async def mark_pro_seen(self, *_: Any, **__: Any) -> dict[str, Any] | None:
@@ -151,6 +151,9 @@ class MongoSessionStore(NoopSessionStore):
         await self.db.session_events.create_index(
             [("session_id", 1), ("seq", 1)], unique=True
         )
+        await self.db.session_events.create_index(
+            [("session_id", 1), ("created_at", 1), ("event_type", 1)]
+        )
         await self.db.session_trace_messages.create_index(
             [("session_id", 1), ("seq", 1)], unique=True
         )
@@ -169,16 +172,18 @@ class MongoSessionStore(NoopSessionStore):
         title: str | None = None,
         surface: str = "frontend",
         created_at: datetime | None = None,
+        usage_window_started_at: datetime | None = None,
+        inference_billing_session_id: str | None = None,
         runtime_state: str = "idle",
         status: str = "active",
         message_count: int = 0,
         turn_count: int = 0,
         pending_approval: list[dict[str, Any]] | None = None,
-        claude_counted: bool = False,
         notification_destinations: list[str] | None = None,
         auto_approval_enabled: bool = False,
         auto_approval_cost_cap_usd: float | None = None,
         auto_approval_estimated_spend_usd: float = 0.0,
+        usage_warning_next_threshold_usd: float = 5.0,
     ) -> None:
         if not self._ready():
             return
@@ -198,6 +203,10 @@ class MongoSessionStore(NoopSessionStore):
                 "$set": {
                     "title": title,
                     "model": model,
+                    "usage_window_started_at": (
+                        usage_window_started_at or created_at or now
+                    ),
+                    "inference_billing_session_id": inference_billing_session_id,
                     "status": status,
                     "runtime_state": runtime_state,
                     "updated_at": now,
@@ -205,11 +214,11 @@ class MongoSessionStore(NoopSessionStore):
                     "message_count": message_count,
                     "turn_count": turn_count,
                     "pending_approval": pending_approval or [],
-                    "claude_counted": claude_counted,
                     "notification_destinations": notification_destinations or [],
                     "auto_approval_enabled": auto_approval_enabled,
                     "auto_approval_cost_cap_usd": auto_approval_cost_cap_usd,
                     "auto_approval_estimated_spend_usd": auto_approval_estimated_spend_usd,
+                    "usage_warning_next_threshold_usd": usage_warning_next_threshold_usd,
                 },
             },
             upsert=True,
@@ -227,14 +236,19 @@ class MongoSessionStore(NoopSessionStore):
         status: str = "active",
         turn_count: int = 0,
         pending_approval: list[dict[str, Any]] | None = None,
-        claude_counted: bool = False,
         created_at: datetime | None = None,
+        usage_window_started_at: datetime | None = None,
+        inference_billing_session_id: str | None = None,
         notification_destinations: list[str] | None = None,
         auto_approval_enabled: bool = False,
         auto_approval_cost_cap_usd: float | None = None,
         auto_approval_estimated_spend_usd: float = 0.0,
+        usage_warning_next_threshold_usd: float = 5.0,
+        raise_on_error: bool = False,
     ) -> None:
         if not self._ready():
+            if raise_on_error:
+                raise RuntimeError("session store not ready")
             return
         now = _now()
         await self.upsert_session(
@@ -248,11 +262,13 @@ class MongoSessionStore(NoopSessionStore):
             message_count=len(messages),
             turn_count=turn_count,
             pending_approval=pending_approval,
-            claude_counted=claude_counted,
             notification_destinations=notification_destinations,
+            usage_window_started_at=usage_window_started_at,
+            inference_billing_session_id=inference_billing_session_id,
             auto_approval_enabled=auto_approval_enabled,
             auto_approval_cost_cap_usd=auto_approval_cost_cap_usd,
             auto_approval_estimated_spend_usd=auto_approval_estimated_spend_usd,
+            usage_warning_next_threshold_usd=usage_warning_next_threshold_usd,
         )
         ops: list[Any] = []
         for idx, raw in enumerate(messages):
@@ -278,6 +294,11 @@ class MongoSessionStore(NoopSessionStore):
             if ops:
                 await self.db.session_messages.bulk_write(ops, ordered=False)
         except PyMongoError as e:
+            # Best-effort by default, but the reaper passes raise_on_error so a
+            # silent message-write failure doesn't let it evict a session whose
+            # latest messages never made it to Mongo.
+            if raise_on_error:
+                raise
             logger.warning("Failed to persist session %s snapshot: %s", session_id, e)
 
     async def load_session(
@@ -370,6 +391,42 @@ class MongoSessionStore(NoopSessionStore):
         ).sort("seq", 1)
         return [row async for row in cursor]
 
+    async def load_usage_events(
+        self,
+        user_id: str,
+        *,
+        session_id: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self._ready():
+            return []
+        session_query: dict[str, Any] = {"visibility": {"$ne": "deleted"}}
+        if user_id != "dev":
+            session_query["user_id"] = user_id
+        if session_id is not None:
+            session_query["_id"] = session_id
+
+        session_cursor = self.db.sessions.find(session_query, {"_id": 1})
+        session_ids = [str(row.get("_id")) async for row in session_cursor]
+        if not session_ids:
+            return []
+
+        event_query: dict[str, Any] = {
+            "session_id": {"$in": session_ids},
+            "event_type": {"$in": list(USAGE_EVENT_TYPES)},
+        }
+        if start is not None or end is not None:
+            created_at: dict[str, datetime] = {}
+            if start is not None:
+                created_at["$gte"] = start
+            if end is not None:
+                created_at["$lt"] = end
+            event_query["created_at"] = created_at
+
+        event_cursor = self.db.session_events.find(event_query).sort("created_at", 1)
+        return [row async for row in event_cursor]
+
     async def append_trace_message(
         self, session_id: str, message: dict[str, Any], source: str = "message"
     ) -> int | None:
@@ -392,45 +449,6 @@ class MongoSessionStore(NoopSessionStore):
         except PyMongoError as e:
             logger.debug("Failed to append trace message for %s: %s", session_id, e)
             return None
-
-    async def get_quota(self, user_id: str, day: str) -> int | None:
-        if not self._ready():
-            return None
-        doc = await self.db.claude_quotas.find_one({"_id": f"{user_id}:{day}"})
-        return int(doc.get("count", 0)) if doc else 0
-
-    async def try_increment_quota(self, user_id: str, day: str, cap: int) -> int | None:
-        if not self._ready():
-            return None
-        key = f"{user_id}:{day}"
-        now = _now()
-        try:
-            await self.db.claude_quotas.insert_one(
-                {
-                    "_id": key,
-                    "user_id": user_id,
-                    "day": day,
-                    "count": 1,
-                    "updated_at": now,
-                }
-            )
-            return 1
-        except DuplicateKeyError:
-            pass
-        doc = await self.db.claude_quotas.find_one_and_update(
-            {"_id": key, "count": {"$lt": cap}},
-            {"$inc": {"count": 1}, "$set": {"updated_at": now}},
-            return_document=ReturnDocument.AFTER,
-        )
-        return int(doc["count"]) if doc else None
-
-    async def refund_quota(self, user_id: str, day: str) -> None:
-        if not self._ready():
-            return
-        await self.db.claude_quotas.update_one(
-            {"_id": f"{user_id}:{day}", "count": {"$gt": 0}},
-            {"$inc": {"count": -1}, "$set": {"updated_at": _now()}},
-        )
 
     async def mark_pro_seen(
         self, user_id: str, *, is_pro: bool
@@ -500,10 +518,3 @@ def get_session_store() -> NoopSessionStore | MongoSessionStore:
         db_name = os.environ.get("MONGODB_DB", "ml-intern")
         _store = MongoSessionStore(uri, db_name) if uri else NoopSessionStore()
     return _store
-
-
-def _reset_store_for_tests(
-    store: NoopSessionStore | MongoSessionStore | None = None,
-) -> None:
-    global _store
-    _store = store

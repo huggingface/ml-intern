@@ -7,7 +7,7 @@ likely product impact.
 
 Usage:
     uv run python scripts/prioritize_backlog.py
-    uv run python scripts/prioritize_backlog.py --model openai/gpt-5.5
+    uv run python scripts/prioritize_backlog.py --model openai/gpt-5.5:fal-ai
 
 Outputs:
     scratch/backlog-prioritization/<timestamp>/sources.json
@@ -32,6 +32,11 @@ import httpx
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from agent.core.prompt_caching import (  # noqa: E402
+    with_prompt_cache_params,
+    with_prompt_caching,
+)
 
 GITHUB_API = "https://api.github.com"
 DEFAULT_GITHUB_REPO = "huggingface/ml-intern"
@@ -1277,7 +1282,7 @@ def _response_content(response: Any) -> str:
 
 
 def _temperature_for_params(llm_params: dict[str, Any]) -> float:
-    # Anthropic requires temperature=1 when adaptive/extended thinking is active.
+    # Some providers require temperature=1 when adaptive reasoning is active.
     if llm_params.get("thinking") or llm_params.get("output_config"):
         return 1.0
     return 0.2
@@ -1297,10 +1302,12 @@ async def _call_json_llm(
         completion_func = acompletion
 
     attempt_messages = list(messages)
+    llm_params = with_prompt_cache_params(llm_params)
     last_error: Exception | None = None
     for attempt in range(retries + 1):
+        cached_messages, _ = with_prompt_caching(attempt_messages, None, llm_params)
         response = await completion_func(
-            messages=attempt_messages,
+            messages=cached_messages,
             max_completion_tokens=max_completion_tokens,
             temperature=_temperature_for_params(llm_params),
             **llm_params,

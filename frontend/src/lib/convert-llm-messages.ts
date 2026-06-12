@@ -3,6 +3,9 @@
  */
 import type { UIMessage } from 'ai';
 
+const USAGE_THRESHOLD_TOOL_NAME = 'usage_threshold';
+const YOLO_BUDGET_TOOL_NAME = 'yolo_budget';
+
 interface LLMToolCall {
   id: string;
   function: { name: string; arguments: string };
@@ -14,6 +17,12 @@ interface LLMMessage {
   tool_calls?: LLMToolCall[] | null;
   tool_call_id?: string | null;
   name?: string | null;
+}
+
+export interface PendingApprovalItem {
+  tool: string;
+  tool_call_id: string;
+  arguments: Record<string, unknown>;
 }
 
 // Generate stable IDs based on message position to prevent duplicate renders
@@ -34,9 +43,11 @@ export function llmMessagesToUIMessages(
   messages: LLMMessage[],
   pendingApprovalIds?: Set<string>,
   existingUIMessages?: UIMessage[],
+  pendingApprovalItems?: PendingApprovalItem[],
 ): UIMessage[] {
   // Build a map of tool_call_id -> tool result for pairing
   const toolResults = new Map<string, { output: string; isError: boolean }>();
+  const restoredPendingIds = new Set<string>();
   for (const msg of messages) {
     if (msg.role === 'tool' && msg.tool_call_id) {
       toolResults.set(msg.tool_call_id, {
@@ -49,10 +60,31 @@ export function llmMessagesToUIMessages(
   const uiMessages: UIMessage[] = [];
 
   // Helper to get existing message ID at a given position if roles match
-  const getExistingId = (index: number, role: 'user' | 'assistant'): string | null => {
+  const getExistingId = (
+    index: number,
+    role: 'user' | 'assistant',
+    expectedText?: string,
+  ): string | null => {
     if (!existingUIMessages || index >= existingUIMessages.length) return null;
     const existing = existingUIMessages[index];
-    return existing.role === role ? existing.id : null;
+    if (existing.role !== role) return null;
+    if (expectedText === undefined) return existing.id;
+
+    const existingText = joinText(existing.parts);
+    if (role === 'user') return existingText === expectedText ? existing.id : null;
+    return existingText.startsWith(expectedText) ? existing.id : null;
+  };
+  const getExistingPendingToolMessageId = (toolCallId: string): string | null => {
+    for (const existing of existingUIMessages || []) {
+      if (existing.role !== 'assistant') continue;
+      const hasTool = existing.parts.some(
+        (part) =>
+          part.type === 'dynamic-tool' &&
+          part.toolCallId === toolCallId,
+      );
+      if (hasTool) return existing.id;
+    }
+    return null;
   };
 
   for (const msg of messages) {
@@ -67,11 +99,12 @@ export function llmMessagesToUIMessages(
         continue;
       }
       // Try to reuse existing ID if the message at this position matches
-      const existingId = getExistingId(uiMessages.length, 'user');
+      const content = msg.content || '';
+      const existingId = getExistingId(uiMessages.length, 'user', content);
       uiMessages.push({
         id: existingId || nextId(),
         role: 'user',
-        parts: [{ type: 'text', text: msg.content || '' }],
+        parts: [{ type: 'text', text: content }],
       });
       continue;
     }
@@ -101,6 +134,7 @@ export function llmMessagesToUIMessages(
               output: result.output,
             });
           } else if (pendingApprovalIds?.has(tc.id)) {
+            restoredPendingIds.add(tc.id);
             parts.push({
               type: 'dynamic-tool',
               toolCallId: tc.id,
@@ -130,7 +164,12 @@ export function llmMessagesToUIMessages(
         prev.parts.push(...parts);
       } else {
         // Try to reuse existing ID if the message at this position matches
-        const existingId = getExistingId(uiMessages.length, 'assistant');
+        const expectedText = joinText(parts);
+        const existingId = getExistingId(
+          uiMessages.length,
+          'assistant',
+          expectedText,
+        );
         const newId = existingId || nextId();
         uiMessages.push({
           id: newId,
@@ -139,6 +178,30 @@ export function llmMessagesToUIMessages(
         });
       }
     }
+  }
+
+  for (const pending of pendingApprovalItems || []) {
+    if (
+      ![USAGE_THRESHOLD_TOOL_NAME, YOLO_BUDGET_TOOL_NAME].includes(pending.tool) ||
+      restoredPendingIds.has(pending.tool_call_id)
+    ) {
+      continue;
+    }
+    const id = getExistingPendingToolMessageId(pending.tool_call_id) || nextId();
+    uiMessages.push({
+      id,
+      role: 'assistant',
+      parts: [
+        {
+          type: 'dynamic-tool',
+          toolCallId: pending.tool_call_id,
+          toolName: pending.tool,
+          state: 'approval-requested',
+          input: pending.arguments || {},
+          approval: { id: `approval-${pending.tool_call_id}` },
+        },
+      ],
+    });
   }
 
   return uiMessages;

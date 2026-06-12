@@ -21,6 +21,8 @@ import logging
 import time
 from typing import Any
 
+from agent.core.cost_estimation import hf_jobs_price_catalog
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,10 +32,8 @@ logger = logging.getLogger(__name__)
 def extract_usage(response_or_chunk: Any) -> dict:
     """Flat usage dict from a litellm response or final-chunk usage object.
 
-    Normalizes across providers: Anthropic exposes cache tokens as
-    ``cache_read_input_tokens`` / ``cache_creation_input_tokens``; OpenAI uses
-    ``prompt_tokens_details.cached_tokens``. Exposed under the stable keys
-    ``cache_read_tokens`` / ``cache_creation_tokens``.
+    Normalizes cache-token details across provider response shapes. Exposed
+    under the stable keys ``cache_read_tokens`` / ``cache_creation_tokens``.
     """
     u = getattr(response_or_chunk, "usage", None)
     if u is None and isinstance(response_or_chunk, dict):
@@ -52,14 +52,18 @@ def extract_usage(response_or_chunk: Any) -> dict:
 
     cache_read = _g("cache_read_input_tokens")
     cache_creation = _g("cache_creation_input_tokens")
+    details = _g("prompt_tokens_details", None)
 
-    if not cache_read:
-        details = _g("prompt_tokens_details", None)
-        if details is not None:
-            if isinstance(details, dict):
-                cache_read = details.get("cached_tokens", 0) or 0
-            else:
-                cache_read = getattr(details, "cached_tokens", 0) or 0
+    if not cache_read and details is not None:
+        if isinstance(details, dict):
+            cache_read = details.get("cached_tokens", 0) or 0
+        else:
+            cache_read = getattr(details, "cached_tokens", 0) or 0
+    if not cache_creation and details is not None:
+        if isinstance(details, dict):
+            cache_creation = details.get("cache_write_tokens", 0) or 0
+        else:
+            cache_creation = getattr(details, "cache_write_tokens", 0) or 0
 
     return {
         "prompt_tokens": int(prompt),
@@ -97,11 +101,10 @@ async def record_llm_call(
     Pre-2026-04-29 only ``main`` calls were instrumented; observed gap on
     Cost Explorer was ~67%, with the other 5 call sites accounting for
     the rest. Tagging lets us split the dataset's ``total_cost_usd`` by
-    category and validate against AWS billing.
+    category and validate against billing data.
 
-    The ``/title`` (HF Router, not Bedrock) and ``/health/llm`` (diagnostic
-    endpoint, no session context) call sites are intentionally not
-    instrumented — together they're <1% of spend.
+    The ``/title`` and ``/health/llm`` diagnostic call sites are intentionally
+    not instrumented because they have no session context and are tiny.
     """
     usage = extract_usage(response) if response is not None else {}
     cost_usd = 0.0
@@ -115,22 +118,23 @@ async def record_llm_call(
     from agent.core.session import Event  # local import to avoid cycle
 
     try:
+        payload = {
+            "model": model,
+            "latency_ms": latency_ms,
+            "finish_reason": finish_reason,
+            "cost_usd": cost_usd,
+            "kind": kind,
+            **usage,
+        }
         await session.send_event(
             Event(
                 event_type="llm_call",
-                data={
-                    "model": model,
-                    "latency_ms": latency_ms,
-                    "finish_reason": finish_reason,
-                    "cost_usd": cost_usd,
-                    "kind": kind,
-                    **usage,
-                },
+                data=payload,
             )
         )
     except Exception as e:
         logger.debug("record_llm_call failed (non-fatal): %s", e)
-    return usage
+    return {"cost_usd": cost_usd, **usage}
 
 
 # ── hf_jobs ────────────────────────────────────────────────────────────────
@@ -188,24 +192,43 @@ async def record_hf_job_complete(
     flavor: str,
     final_status: str,
     submit_ts: float,
-) -> None:
+) -> dict:
     from agent.core.session import Event
 
     try:
         wall_time_s = int(time.monotonic() - submit_ts)
+        billable_seconds = max(0, wall_time_s)
+        price_usd_per_hour = None
+        estimated_cost_usd = None
+        cost_estimate_source = "unknown_price"
+        prices = await hf_jobs_price_catalog()
+        if flavor in prices:
+            price_usd_per_hour = float(prices[flavor])
+            estimated_cost_usd = round(
+                price_usd_per_hour * (billable_seconds / 3600),
+                4,
+            )
+            cost_estimate_source = "runtime_price_catalog"
+        payload = {
+            "job_id": getattr(job, "id", None),
+            "flavor": flavor,
+            "final_status": final_status,
+            "wall_time_s": wall_time_s,
+            "billable_seconds_estimate": billable_seconds,
+            "price_usd_per_hour": price_usd_per_hour,
+            "estimated_cost_usd": estimated_cost_usd,
+            "cost_estimate_source": cost_estimate_source,
+        }
         await session.send_event(
             Event(
                 event_type="hf_job_complete",
-                data={
-                    "job_id": getattr(job, "id", None),
-                    "flavor": flavor,
-                    "final_status": final_status,
-                    "wall_time_s": wall_time_s,
-                },
+                data=payload,
             )
         )
+        return payload
     except Exception as e:
         logger.debug("record_hf_job_complete failed (non-fatal): %s", e)
+    return {}
 
 
 # ── sandbox ─────────────────────────────────────────────────────────────────
@@ -237,23 +260,41 @@ async def record_sandbox_create(
         logger.debug("record_sandbox_create failed (non-fatal): %s", e)
 
 
-async def record_sandbox_destroy(session: Any, sandbox: Any) -> None:
+async def record_sandbox_destroy(session: Any, sandbox: Any) -> dict:
     from agent.core.session import Event
 
     try:
         created = getattr(session, "_sandbox_created_at", None)
         lifetime_s = int(time.monotonic() - created) if created else None
+        hardware = getattr(session, "sandbox_hardware", None) or "cpu-basic"
+        estimated_cost_usd = None
+        try:
+            from agent.core.cost_estimation import SPACE_PRICE_USD_PER_HOUR
+
+            price_usd_per_hour = SPACE_PRICE_USD_PER_HOUR.get(str(hardware))
+            if price_usd_per_hour is not None and lifetime_s is not None:
+                estimated_cost_usd = round(
+                    float(price_usd_per_hour) * (max(0, lifetime_s) / 3600),
+                    4,
+                )
+        except Exception:
+            estimated_cost_usd = None
+        payload = {
+            "sandbox_id": getattr(sandbox, "space_id", None),
+            "hardware": hardware,
+            "lifetime_s": lifetime_s,
+            "estimated_cost_usd": estimated_cost_usd,
+        }
         await session.send_event(
             Event(
                 event_type="sandbox_destroy",
-                data={
-                    "sandbox_id": getattr(sandbox, "space_id", None),
-                    "lifetime_s": lifetime_s,
-                },
+                data=payload,
             )
         )
+        return payload
     except Exception as e:
         logger.debug("record_sandbox_destroy failed (non-fatal): %s", e)
+    return {}
 
 
 # ── feedback ───────────────────────────────────────────────────────────────
@@ -283,30 +324,6 @@ async def record_feedback(
         )
     except Exception as e:
         logger.debug("record_feedback failed (non-fatal): %s", e)
-
-
-async def record_jobs_access_blocked(
-    session: Any,
-    *,
-    tool_call_ids: list[str],
-    plan: str,
-    eligible_namespaces: list[str],
-) -> None:
-    from agent.core.session import Event
-
-    try:
-        await session.send_event(
-            Event(
-                event_type="jobs_access_blocked",
-                data={
-                    "tool_call_ids": tool_call_ids,
-                    "plan": plan,
-                    "eligible_namespaces": eligible_namespaces,
-                },
-            )
-        )
-    except Exception as e:
-        logger.debug("record_jobs_access_blocked failed (non-fatal): %s", e)
 
 
 async def record_pro_cta_click(

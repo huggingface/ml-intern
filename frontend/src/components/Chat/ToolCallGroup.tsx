@@ -11,6 +11,8 @@ import { useAgentStore, type ResearchAgentState } from '@/store/agentStore';
 import { useLayoutStore } from '@/store/layoutStore';
 import { logger } from '@/utils/logger';
 import { RESEARCH_MAX_STEPS } from '@/lib/research-store';
+import { useSessionStore } from '@/store/sessionStore';
+import { apiFetch } from '@/utils/api';
 import type { UIMessage } from 'ai';
 
 // ---------------------------------------------------------------------------
@@ -19,6 +21,47 @@ import type { UIMessage } from 'ai';
 type DynamicToolPart = Extract<UIMessage['parts'][number], { type: 'dynamic-tool' }>;
 
 type ToolPartState = DynamicToolPart['state'];
+
+const USAGE_THRESHOLD_TOOL_NAME = 'usage_threshold';
+const YOLO_BUDGET_TOOL_NAME = 'yolo_budget';
+
+function formatApprovalUsd(value: unknown, fallback = 'Unknown'): string {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+  const amount = typeof value === 'number' && Number.isFinite(value) ? value : Number(value);
+  if (!Number.isFinite(amount)) {
+    return fallback;
+  }
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount);
+}
+
+function usageSourceLabel(source: unknown): string {
+  return source === 'hf_billing_current_session'
+    ? 'HF billing'
+    : 'app telemetry';
+}
+
+function numberOrNull(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function defaultExtendedYoloCap(args: Record<string, unknown> | undefined): number {
+  const current = numberOrNull(args?.current_spend_usd) ?? 0;
+  const cap = numberOrNull(args?.cap_usd) ?? current;
+  const estimate = numberOrNull(args?.estimated_next_usd) ?? 0;
+  return Math.ceil(Math.max(cap, current + estimate, current) + 5);
+}
 
 /** Check if a tool part was cancelled (output-error with cancellation message). */
 function isCancelledTool(tool: DynamicToolPart): boolean {
@@ -505,7 +548,45 @@ function InlineApproval({
   const autoApproval = useAgentStore((state) => state.budgetBlocks[toolCallId]);
   const { setPanel, getEditedScript } = useAgentStore();
   const { setRightPanelOpen, setLeftSidebarOpen } = useLayoutStore();
+  const { activeSessionId, updateSessionYolo } = useSessionStore();
   const hasEditedScript = !!getEditedScript(toolCallId);
+  const isUsageThreshold = toolName === USAGE_THRESHOLD_TOOL_NAME;
+  const isYoloBudget = toolName === YOLO_BUDGET_TOOL_NAME;
+  const activeSession = useSessionStore((state) =>
+    state.sessions.find((session) => session.id === state.activeSessionId),
+  );
+  const isYoloCapBlocked = Boolean(autoApproval && activeSession?.autoApprovalEnabled);
+  const yoloCapArgs = useMemo<Record<string, unknown> | undefined>(() => {
+    if (isYoloBudget) return args;
+    if (!isYoloCapBlocked) return undefined;
+    const currentSpend = activeSession?.autoApprovalEstimatedSpendUsd ?? 0;
+    const cap = activeSession?.autoApprovalCostCapUsd ?? currentSpend;
+    return {
+      current_spend_usd: currentSpend,
+      cap_usd: cap,
+      remaining_cap_usd:
+        autoApproval?.remainingCapUsd ?? activeSession?.autoApprovalRemainingUsd ?? null,
+      estimated_next_usd: autoApproval?.estimatedCostUsd ?? null,
+    };
+  }, [
+    activeSession?.autoApprovalCostCapUsd,
+    activeSession?.autoApprovalEstimatedSpendUsd,
+    activeSession?.autoApprovalRemainingUsd,
+    args,
+    autoApproval?.estimatedCostUsd,
+    autoApproval?.remainingCapUsd,
+    isYoloBudget,
+    isYoloCapBlocked,
+  ]);
+  const [yoloCapInput, setYoloCapInput] = useState('');
+  const [yoloCapBusy, setYoloCapBusy] = useState(false);
+  const [yoloCapError, setYoloCapError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!yoloCapArgs) return;
+    setYoloCapInput(String(defaultExtendedYoloCap(yoloCapArgs)));
+    setYoloCapError(null);
+  }, [yoloCapArgs]);
 
   const handleScriptClick = useCallback(() => {
     if (toolName === 'hf_jobs' && args?.script) {
@@ -519,6 +600,231 @@ function InlineApproval({
       setLeftSidebarOpen(false);
     }
   }, [toolCallId, toolName, args, scriptLabel, setPanel, getEditedScript, setRightPanelOpen, setLeftSidebarOpen]);
+
+  const handleExtendYoloCap = useCallback(async () => {
+    if (!activeSessionId) {
+      setYoloCapError('No active session.');
+      return;
+    }
+    const nextCap = Number(yoloCapInput);
+    const currentSpend = numberOrNull(yoloCapArgs?.current_spend_usd) ?? 0;
+    const nextEstimate = numberOrNull(yoloCapArgs?.estimated_next_usd) ?? 0;
+    const requiredCap = currentSpend + nextEstimate;
+    if (!Number.isFinite(nextCap) || nextCap < 0) {
+      setYoloCapError('Enter a valid dollar amount.');
+      return;
+    }
+    if (nextEstimate > 0 && nextCap < requiredCap) {
+      setYoloCapError('Set the cap to cover the estimated next action.');
+      return;
+    }
+    if (nextCap <= currentSpend) {
+      setYoloCapError('Set the cap above current spend.');
+      return;
+    }
+    setYoloCapBusy(true);
+    setYoloCapError(null);
+    try {
+      const response = await apiFetch(`/api/session/${activeSessionId}/yolo`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: true, cost_cap_usd: nextCap }),
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const policy = await response.json();
+      updateSessionYolo(activeSessionId, policy);
+      onResolve(toolCallId, true);
+    } catch {
+      setYoloCapError('Could not extend the YOLO cap.');
+    } finally {
+      setYoloCapBusy(false);
+    }
+  }, [activeSessionId, onResolve, toolCallId, updateSessionYolo, yoloCapArgs, yoloCapInput]);
+
+  if (isUsageThreshold) {
+    return (
+      <Box sx={{ px: 1.5, py: 1.5, borderTop: '1px solid var(--tool-border)' }}>
+        <Alert
+          severity="warning"
+          sx={{
+            mb: 1.5,
+            py: 0.5,
+            bgcolor: 'rgba(245,158,11,0.08)',
+            border: '1px solid rgba(245,158,11,0.18)',
+            color: 'var(--text)',
+            '& .MuiAlert-icon': { color: 'var(--accent-yellow)' },
+          }}
+        >
+          <Typography variant="body2" sx={{ fontSize: '0.74rem' }}>
+            Current session usage is {formatApprovalUsd(args?.current_spend_usd)} and crossed the{' '}
+            {formatApprovalUsd(args?.threshold_usd)} warning threshold.
+          </Typography>
+        </Alert>
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: '1fr auto',
+            gap: 0.75,
+            mb: 1.5,
+            fontSize: '0.72rem',
+          }}
+        >
+          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+            Next warning
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+            {formatApprovalUsd(args?.next_threshold_usd)}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+            Source
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem' }}>
+            {usageSourceLabel(args?.billing_source)}
+          </Typography>
+        </Box>
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <Button
+            size="small"
+            onClick={() => onResolve(toolCallId, false, 'Stopped at usage warning')}
+            sx={{
+              flex: 1,
+              textTransform: 'none',
+              border: '1px solid rgba(255,255,255,0.05)',
+              color: 'var(--accent-red)',
+              fontSize: '0.75rem',
+              py: 0.75,
+              borderRadius: '8px',
+              '&:hover': { bgcolor: 'rgba(224,90,79,0.05)', borderColor: 'var(--accent-red)' },
+            }}
+          >
+            Stop here
+          </Button>
+          <Button
+            size="small"
+            onClick={() => onResolve(toolCallId, true)}
+            sx={{
+              flex: 1,
+              textTransform: 'none',
+              border: '1px solid var(--accent-green)',
+              color: 'var(--accent-green)',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              py: 0.75,
+              borderRadius: '8px',
+              bgcolor: 'rgba(47,204,113,0.08)',
+              '&:hover': { bgcolor: 'rgba(47,204,113,0.1)' },
+            }}
+          >
+            Continue
+          </Button>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (isYoloBudget) {
+    return (
+      <Box sx={{ px: 1.5, py: 1.5, borderTop: '1px solid var(--tool-border)' }}>
+        <Alert
+          severity="warning"
+          sx={{
+            mb: 1.5,
+            py: 0.5,
+            bgcolor: 'rgba(245,158,11,0.08)',
+            border: '1px solid rgba(245,158,11,0.18)',
+            color: 'var(--text)',
+            '& .MuiAlert-icon': { color: 'var(--accent-yellow)' },
+          }}
+        >
+          <Typography variant="body2" sx={{ fontSize: '0.74rem' }}>
+            YOLO cap reached. Extend the YOLO cap to continue.
+          </Typography>
+        </Alert>
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: '1fr auto',
+            gap: 0.75,
+            mb: 1.5,
+          }}
+        >
+          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+            Current spend
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+            {formatApprovalUsd(yoloCapArgs?.current_spend_usd)}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+            Remaining cap
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+            {formatApprovalUsd(yoloCapArgs?.remaining_cap_usd)}
+          </Typography>
+        </Box>
+        <TextField
+          label="New YOLO cap (USD)"
+          type="number"
+          size="small"
+          value={yoloCapInput}
+          onChange={(event) => setYoloCapInput(event.target.value)}
+          inputProps={{ min: 0, step: 0.5 }}
+          error={Boolean(yoloCapError)}
+          helperText={yoloCapError || 'Set a cap above current spend.'}
+          sx={{
+            mb: 1.5,
+            width: '100%',
+            '& .MuiInputBase-input': {
+              color: 'var(--text)',
+              fontSize: '0.78rem',
+              fontVariantNumeric: 'tabular-nums',
+            },
+            '& .MuiInputLabel-root, & .MuiFormHelperText-root': {
+              color: 'var(--muted-text)',
+              fontSize: '0.72rem',
+            },
+          }}
+        />
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <Button
+            size="small"
+            onClick={() => onResolve(toolCallId, false, 'Stopped at YOLO cap')}
+            sx={{
+              flex: 1,
+              textTransform: 'none',
+              border: '1px solid rgba(255,255,255,0.05)',
+              color: 'var(--accent-red)',
+              fontSize: '0.75rem',
+              py: 0.75,
+              borderRadius: '8px',
+              '&:hover': { bgcolor: 'rgba(224,90,79,0.05)', borderColor: 'var(--accent-red)' },
+            }}
+          >
+            Stop here
+          </Button>
+          <Button
+            size="small"
+            onClick={handleExtendYoloCap}
+            disabled={yoloCapBusy}
+            sx={{
+              flex: 1,
+              textTransform: 'none',
+              border: '1px solid var(--accent-green)',
+              color: 'var(--accent-green)',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              py: 0.75,
+              borderRadius: '8px',
+              bgcolor: 'rgba(47,204,113,0.08)',
+              '&:hover': { bgcolor: 'rgba(47,204,113,0.1)' },
+            }}
+          >
+            Extend cap and continue
+          </Button>
+        </Box>
+      </Box>
+    );
+  }
 
   return (
     <Box sx={{ px: 1.5, py: 1.5, borderTop: '1px solid var(--tool-border)' }}>
@@ -538,6 +844,54 @@ function InlineApproval({
             YOLO paused: {autoApproval.reason || 'manual approval required.'}
           </Typography>
         </Alert>
+      )}
+
+      {isYoloCapBlocked && yoloCapArgs && (
+        <Box sx={{ mb: 1.5 }}>
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: '1fr auto',
+              gap: 0.75,
+              mb: 1.5,
+            }}
+          >
+            <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+              Current spend
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+              {formatApprovalUsd(yoloCapArgs.current_spend_usd)}
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+              Remaining cap
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+              {formatApprovalUsd(yoloCapArgs.remaining_cap_usd)}
+            </Typography>
+          </Box>
+          <TextField
+            label="New YOLO cap (USD)"
+            type="number"
+            size="small"
+            value={yoloCapInput}
+            onChange={(event) => setYoloCapInput(event.target.value)}
+            inputProps={{ min: 0, step: 0.5 }}
+            error={Boolean(yoloCapError)}
+            helperText={yoloCapError || 'Set a cap high enough for this action.'}
+            sx={{
+              width: '100%',
+              '& .MuiInputBase-input': {
+                color: 'var(--text)',
+                fontSize: '0.78rem',
+                fontVariantNumeric: 'tabular-nums',
+              },
+              '& .MuiInputLabel-root, & .MuiFormHelperText-root': {
+                color: 'var(--muted-text)',
+                fontSize: '0.72rem',
+              },
+            }}
+          />
+        </Box>
       )}
 
       {toolName === 'sandbox_create' && args && (() => {
@@ -695,7 +1049,8 @@ function InlineApproval({
         </Button>
         <Button
           size="small"
-          onClick={() => onResolve(toolCallId, true)}
+          onClick={isYoloCapBlocked ? handleExtendYoloCap : () => onResolve(toolCallId, true)}
+          disabled={isYoloCapBlocked && yoloCapBusy}
           sx={{
             flex: 1,
             textTransform: 'none',
@@ -708,7 +1063,11 @@ function InlineApproval({
             '&:hover': { bgcolor: 'rgba(47,204,113,0.05)', borderColor: 'var(--accent-green)' },
           }}
         >
-          {hasEditedScript ? 'Approve (edited)' : 'Approve'}
+          {isYoloCapBlocked
+            ? 'Extend cap and approve'
+            : hasEditedScript
+              ? 'Approve (edited)'
+              : 'Approve'}
         </Button>
       </Box>
     </Box>
@@ -748,22 +1107,31 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submittingRef = useRef(false);
 
-  // Track which toolCallIds we've already submitted so we can detect new approval rounds
-  const submittedIdsRef = useRef<Set<string>>(new Set());
+  const pendingSignatureRef = useRef('');
 
   // ── Panel lock state (for auto-follow vs user-selected) ───────────
   const [lockedToolId, setLockedToolId] = useState<string | null>(null);
 
-  // Reset submission state when new (unseen) pending tools arrive — e.g. second approval round
+  const pendingSignature = useMemo(
+    () => pendingTools.map(t => t.toolCallId).join('|'),
+    [pendingTools],
+  );
+
+  // Reset submission state when an approval-requested round appears. This also
+  // covers a repeated backend block for the same tool id after the user tried
+  // to approve without raising the YOLO cap.
   useEffect(() => {
-    if (!isSubmitting || pendingTools.length === 0) return;
-    const hasNewPending = pendingTools.some(t => !submittedIdsRef.current.has(t.toolCallId));
-    if (hasNewPending) {
+    if (!pendingSignature) {
+      pendingSignatureRef.current = '';
+      return;
+    }
+    if (pendingSignatureRef.current !== pendingSignature) {
+      pendingSignatureRef.current = pendingSignature;
       submittingRef.current = false;
       setIsSubmitting(false);
       setDecisions({});
     }
-  }, [pendingTools, isSubmitting]);
+  }, [pendingSignature]);
 
   // Clean up stale decisions for tools that are no longer pending
   useEffect(() => {
@@ -815,6 +1183,8 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
     for (const t of tools) {
       if (t.toolName === 'research') {
         displayMap[t.toolCallId] = 'research';
+      } else if (t.toolName === USAGE_THRESHOLD_TOOL_NAME) {
+        displayMap[t.toolCallId] = 'Usage warning';
       }
     }
     return { scriptLabelMap: scriptMap, toolDisplayMap: displayMap };
@@ -846,8 +1216,6 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
 
       const ok = await approveTools(approvals);
       if (ok) {
-        // Track which tool IDs were submitted so we can detect new approval rounds
-        for (const a of approvals) submittedIdsRef.current.add(a.tool_call_id);
         lockPanel();
       } else {
         logger.error('Batch approval failed');

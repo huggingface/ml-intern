@@ -7,6 +7,7 @@ dependency. In dev mode (no OAUTH_CLIENT_ID), auth is bypassed automatically.
 import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 from dependencies import (
@@ -41,6 +42,7 @@ from models import (
     SessionYoloRequest,
     SubmitRequest,
     TruncateRequest,
+    UsageResponse,
 )
 from session_manager import (
     MAX_SESSIONS,
@@ -49,77 +51,104 @@ from session_manager import (
     session_manager,
 )
 
-import user_quotas
-
 from agent.core.hf_access import get_jobs_access
-from agent.core.hf_tokens import resolve_hf_request_token, resolve_hf_router_token
+from agent.core.hf_tokens import resolve_hf_request_token
+from agent.core.local_models import local_model_provider
 from agent.core.llm_params import _resolve_llm_params
+from agent.core.model_ids import (
+    CLAUDE_OPUS_48_MODEL_ID,
+    DEEPSEEK_V4_PRO_MODEL_ID,
+    GLM_51_MODEL_ID,
+    GPT_55_MODEL_ID,
+    KIMI_K26_MODEL_ID,
+    MINIMAX_M27_MODEL_ID,
+    strip_huggingface_model_prefix,
+)
+from agent.core.prompt_caching import with_prompt_cache_params
+from usage import build_usage_response
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["agent"])
-_background_teardown_tasks: set[asyncio.Task] = set()
+_background_route_tasks: set[asyncio.Task] = set()
 
-DEFAULT_CLAUDE_MODEL_ID = "bedrock/us.anthropic.claude-opus-4-6-v1"
-DEFAULT_FREE_MODEL_ID = "moonshotai/Kimi-K2.6"
-PREMIUM_MODEL_IDS = {
-    DEFAULT_CLAUDE_MODEL_ID,
-    "openai/gpt-5.5",
-}
+DEFAULT_OPUS_MODEL_ID = CLAUDE_OPUS_48_MODEL_ID
+DEFAULT_GPT_MODEL_ID = GPT_55_MODEL_ID
+DEFAULT_FREE_MODEL_ID = KIMI_K26_MODEL_ID
 DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
 
 
-def _claude_picker_model_id() -> str:
-    """Return the model ID used by the Claude option in the UI.
+async def _reset_usage_window(session_id: str) -> dict[str, Any] | None:
+    return await session_manager.reset_session_usage_window(
+        session_id,
+        started_at=datetime.utcnow(),
+    )
 
-    The frontend config sets ``session_manager.config.model_name`` from
-    ``ML_INTERN_CLAUDE_MODEL_ID`` when that env var is present, otherwise it
-    falls back to the production Bedrock Claude model. This function only
-    exposes that resolved config value for the Claude picker; non-Claude models
-    are listed separately in the model switcher.
-    """
-    return session_manager.config.model_name
+
+async def _refresh_usage_and_upload(
+    agent_session: AgentSession,
+    *,
+    error_code: str,
+) -> None:
+    session = agent_session.session
+    try:
+        await session_manager.refresh_session_usage_metrics(
+            agent_session,
+            error_code=error_code,
+        )
+        session.save_and_upload_detached(session.config.session_dataset_repo)
+    except Exception as e:
+        logger.warning(
+            "Background usage refresh/upload failed for %s: %s",
+            agent_session.session_id,
+            e,
+        )
+
+
+def _schedule_usage_refresh_and_upload(
+    agent_session: AgentSession,
+    *,
+    error_code: str,
+) -> None:
+    task = asyncio.create_task(
+        _refresh_usage_and_upload(agent_session, error_code=error_code)
+    )
+    _background_route_tasks.add(task)
+    task.add_done_callback(_background_route_tasks.discard)
 
 
 def _available_models() -> list[dict[str, Any]]:
     models = [
         {
-            "id": "moonshotai/Kimi-K2.6",
+            "id": DEFAULT_OPUS_MODEL_ID,
+            "label": "Claude Opus 4.8",
+            "provider": "huggingface",
+            "recommended": True,
+        },
+        {
+            "id": DEFAULT_GPT_MODEL_ID,
+            "label": "GPT-5.5",
+            "provider": "huggingface",
+        },
+        {
+            "id": DEFAULT_FREE_MODEL_ID,
             "label": "Kimi K2.6",
             "provider": "huggingface",
-            "tier": "free",
-            "recommended": True,
         },
         {
-            "id": _claude_picker_model_id(),
-            "label": "Claude Opus 4.6",
-            "provider": "anthropic",
-            "tier": "pro",
-            "recommended": True,
-        },
-        {
-            "id": "openai/gpt-5.5",
-            "label": "GPT-5.5",
-            "provider": "openai",
-            "tier": "pro",
-        },
-        {
-            "id": "MiniMaxAI/MiniMax-M2.7",
+            "id": MINIMAX_M27_MODEL_ID,
             "label": "MiniMax M2.7",
             "provider": "huggingface",
-            "tier": "free",
         },
         {
-            "id": "zai-org/GLM-5.1",
+            "id": GLM_51_MODEL_ID,
             "label": "GLM 5.1",
             "provider": "huggingface",
-            "tier": "free",
         },
         {
-            "id": "deepseek-ai/DeepSeek-V4-Pro:deepinfra",
+            "id": DEEPSEEK_V4_PRO_MODEL_ID,
             "label": "DeepSeek V4 Pro",
             "provider": "huggingface",
-            "tier": "free",
         },
     ]
     return models
@@ -128,88 +157,41 @@ def _available_models() -> list[dict[str, Any]]:
 AVAILABLE_MODELS = _available_models()
 
 
-def _is_premium_model(model_id: str) -> bool:
-    return model_id in PREMIUM_MODEL_IDS
+def _valid_model_ids() -> set[str]:
+    return {m["id"] for m in AVAILABLE_MODELS}
+
+
+def _validate_model_id(model_id: str | None) -> None:
+    if not model_id or model_id in _valid_model_ids():
+        return
+    raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
+
+
+def _default_model_for_user(user: dict[str, Any]) -> str:
+    return DEFAULT_OPUS_MODEL_ID if user.get("plan") == "pro" else DEFAULT_FREE_MODEL_ID
 
 
 async def _model_override_for_new_session(
-    request: Request,
     requested_model: str | None,
+    user: dict[str, Any],
 ) -> str | None:
     """Return the model override to use when creating a new session.
 
-    Explicit premium model requests are allowed and charged at message-submit
-    time. Implicit default sessions are more forgiving: when the configured
-    default is premium, start them on the first free model instead of spending
-    premium quota accidentally.
+    Explicit model requests are honored. Empty web requests default to Kimi for
+    non-Pro users and Opus for Pro users.
     """
-    resolved_model = requested_model or session_manager.config.model_name
-    if not _is_premium_model(resolved_model):
-        return requested_model
-    if requested_model:
-        return requested_model
-
-    logger.info(
-        "Default premium model %s would spend quota; "
-        "creating session with free fallback %s",
-        resolved_model,
-        DEFAULT_FREE_MODEL_ID,
-    )
-    return DEFAULT_FREE_MODEL_ID
-
-
-async def _enforce_premium_model_quota(
-    user: dict[str, Any],
-    agent_session: AgentSession,
-) -> None:
-    """Charge the user's daily premium-model quota on first use in a session.
-
-    Runs at *message-submit* time, not session-create time — so spinning up a
-    premium-model session to look around doesn't burn quota. The
-    ``claude_counted`` flag on ``AgentSession`` guards against re-counting the
-    same session; the stored field name is kept for persistence compatibility.
-
-    No-ops when the session's current model isn't premium, or when this
-    session has already been charged. Raises 429 when the user has hit
-    their daily cap.
-    """
-    if agent_session.claude_counted:
-        return
-    model_name = agent_session.session.config.model_name
-    if not _is_premium_model(model_name):
-        return
-    user_id = user["user_id"]
-    plan = user.get("plan", "free")
-    cap = user_quotas.daily_cap_for(plan)
-    new_count = await user_quotas.try_increment_claude(user_id, cap)
-    if new_count is None:
-        if plan == "pro":
-            message = (
-                "Daily premium model limit reached. Use a free model and try "
-                "premium models again tomorrow."
-            )
-        else:
-            message = (
-                "Daily premium model limit reached. Upgrade to HF Pro for "
-                f"{user_quotas.CLAUDE_PRO_DAILY}/day or use a free model."
-            )
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "premium_model_daily_cap",
-                "plan": plan,
-                "cap": cap,
-                "message": message,
-            },
-        )
-    agent_session.claude_counted = True
-    await session_manager.persist_session_snapshot(agent_session)
+    return requested_model or _default_model_for_user(user)
 
 
 def _user_hf_token(user: dict[str, Any] | None) -> str | None:
     if not isinstance(user, dict):
         return None
     return user.get(INTERNAL_HF_TOKEN_KEY)
+
+
+def _model_requires_hf_router_token(model_id: str | None) -> bool:
+    normalized = strip_huggingface_model_prefix(model_id) or model_id or ""
+    return local_model_provider(normalized) is None
 
 
 def _reject_oversize_dataset_upload(request: Request) -> None:
@@ -286,6 +268,7 @@ async def _check_session_access(
         user["user_id"],
         hf_token=hf_token,
         hf_username=user.get("username"),
+        user_plan=user.get("plan"),
         preload_sandbox=preload_sandbox,
     )
     if not agent_session:
@@ -309,18 +292,28 @@ async def health_check() -> HealthResponse:
 
 
 @router.get("/health/llm", response_model=LLMHealthResponse)
-async def llm_health_check() -> LLMHealthResponse:
+async def llm_health_check(request: Request) -> LLMHealthResponse:
     """Check if the LLM provider is reachable and the API key is valid.
 
-    Makes a minimal 1-token completion call.  Catches common errors:
+    Makes a minimal 1-token completion call when a token is available. For
+    token-less HF Router requests, returns ``status="skipped"`` instead of
+    making an unauthenticated probe. Catches common errors:
     - 401 → invalid API key
     - 402/insufficient_quota → out of credits
     - 429 → rate limited
     - timeout / network → provider unreachable
     """
     model = session_manager.config.model_name
+    hf_token = resolve_hf_request_token(request)
+    if _model_requires_hf_router_token(model) and not hf_token:
+        return LLMHealthResponse(status="skipped", model=model)
+
     try:
-        llm_params = _resolve_llm_params(model, reasoning_effort="high")
+        llm_params = _resolve_llm_params(
+            model,
+            hf_token,
+            reasoning_effort="high",
+        )
         await acompletion(
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=1,
@@ -385,14 +378,15 @@ async def generate_title(
     reasoning model — reasoning_effort=low keeps the reasoning budget small
     so the 60-token output budget isn't consumed before the title is written.
     """
-    api_key = resolve_hf_router_token(_user_hf_token(user))
     try:
+        await _check_session_access(request.session_id, user)
+        llm_params = _resolve_llm_params(
+            "openai/gpt-oss-120b:cerebras",
+            _user_hf_token(user),
+            reasoning_effort="low",
+        )
+        llm_params = with_prompt_cache_params(llm_params)
         response = await acompletion(
-            # Double openai/ prefix: LiteLLM strips the first as its provider
-            # prefix, leaving the HF model id on the wire for the router.
-            model="openai/openai/gpt-oss-120b:cerebras",
-            api_base="https://router.huggingface.co/v1",
-            api_key=api_key,
             messages=[
                 {
                     "role": "system",
@@ -409,14 +403,13 @@ async def generate_title(
             max_tokens=60,
             temperature=0.3,
             timeout=10,
-            reasoning_effort="low",
+            **llm_params,
         )
         title = response.choices[0].message.content.strip().strip('"').strip("'")
         title = title.translate(_TITLE_STRIP_CHARS).strip()
         if len(title) > 50:
             title = title[:50].rstrip() + "…"
         try:
-            await _check_session_access(request.session_id, user)
             await session_manager.update_session_title(request.session_id, title)
         except Exception:
             logger.debug(
@@ -449,8 +442,7 @@ async def create_session(
     behalf of the user.
 
     Optional body ``{"model"?: <id>}`` selects the session's LLM; unknown
-    ids are rejected (400). The premium-model quota runs at message-submit
-    time, not here — spinning up a session to look around is free.
+    ids are rejected (400). Empty requests use the plan-aware web default.
 
     Returns 503 if the server or user has reached the session limit.
     """
@@ -466,29 +458,29 @@ async def create_session(
     if isinstance(body, dict):
         model = body.get("model")
 
-    valid_ids = {m["id"] for m in AVAILABLE_MODELS}
-    if model and model not in valid_ids:
-        raise HTTPException(status_code=400, detail=f"Unknown model: {model}")
+    _validate_model_id(model)
 
-    # Explicit premium selections are allowed. If the implicit configured
-    # default is premium, start the session on a free model instead.
-    model = await _model_override_for_new_session(request, model)
+    # Empty requests use the plan-aware web default.
+    model = await _model_override_for_new_session(model, user)
 
     try:
         session_id = await session_manager.create_session(
             user_id=user["user_id"],
             hf_username=user.get("username"),
             hf_token=hf_token,
+            user_plan=user.get("plan"),
             model=model,
             is_pro=user.get("plan") == "pro",
         )
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
+    await _reset_usage_window(session_id)
+
     return SessionResponse(
         session_id=session_id,
         ready=True,
-        model=model or session_manager.config.model_name,
+        model=model,
     )
 
 
@@ -501,8 +493,8 @@ async def restore_session_summary(
     summarization prompt on them and drop the result into the new
     session's context as a user-role system note.
 
-    Optional ``"model"`` in the body overrides the session's LLM. The
-    premium-model quota runs at message-submit time, not here.
+    Optional ``"model"`` in the body overrides the session's LLM; otherwise
+    the new session uses the plan-aware web default.
     """
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -511,23 +503,30 @@ async def restore_session_summary(
     hf_token = resolve_hf_request_token(request)
 
     model = body.get("model")
-    valid_ids = {m["id"] for m in AVAILABLE_MODELS}
-    if model and model not in valid_ids:
-        raise HTTPException(status_code=400, detail=f"Unknown model: {model}")
+    _validate_model_id(model)
 
-    model = await _model_override_for_new_session(request, model)
+    model = await _model_override_for_new_session(model, user)
 
     try:
         session_id = await session_manager.create_session(
             user_id=user["user_id"],
             hf_username=user.get("username"),
             hf_token=hf_token,
+            user_plan=user.get("plan"),
             model=model,
             is_pro=user.get("plan") == "pro",
         )
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
+    await _reset_usage_window(session_id)
+
+    await _check_session_access(
+        session_id,
+        user,
+        request,
+        preload_sandbox=False,
+    )
     try:
         summarized = await session_manager.seed_from_summary(session_id, messages)
     except ValueError as e:
@@ -543,7 +542,7 @@ async def restore_session_summary(
     return SessionResponse(
         session_id=session_id,
         ready=True,
-        model=model or session_manager.config.model_name,
+        model=model,
     )
 
 
@@ -557,6 +556,20 @@ async def get_session(
     return SessionInfo(**info)
 
 
+@router.post("/session/{session_id}/activate", response_model=SessionInfo)
+async def activate_session(
+    session_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> SessionInfo:
+    """Mark a session as actively revisited and reset its usage meter window."""
+    await _check_session_access(session_id, user, request)
+    info = await _reset_usage_window(session_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return SessionInfo(**info)
+
+
 @router.post("/session/{session_id}/model")
 async def set_session_model(
     session_id: str,
@@ -567,16 +580,13 @@ async def set_session_model(
     """Switch the active model for a single session (tab-scoped).
 
     Takes effect on the next LLM call in that session — other sessions
-    (including other browser tabs) are unaffected. Model switches don't
-    charge quota — the premium-model quota only fires at message-submit time.
+    (including other browser tabs) are unaffected.
     """
     agent_session = await _check_session_access(session_id, user, request)
     model_id = body.get("model")
     if not model_id:
         raise HTTPException(status_code=400, detail="Missing 'model' field")
-    valid_ids = {m["id"] for m in AVAILABLE_MODELS}
-    if model_id not in valid_ids:
-        raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
+    _validate_model_id(model_id)
     if not agent_session:
         raise HTTPException(status_code=404, detail="Session not found")
     await session_manager.update_session_model(session_id, model_id)
@@ -629,7 +639,7 @@ async def upload_session_dataset(
         if agent_session.session.pending_approval:
             raise HTTPException(
                 status_code=409,
-                detail="Approve or reject pending tools before uploading a dataset.",
+                detail="Resolve pending approvals before uploading a dataset.",
             )
 
         hf_token = (
@@ -659,6 +669,7 @@ async def upload_session_dataset(
         agent_session.session.context_manager.add_message(
             Message(role="user", content=dataset_context_note(uploaded))
         )
+        session_manager._touch(agent_session)
         await session_manager.persist_session_snapshot(agent_session)
         logger.info(
             "Uploaded dataset file %s to %s for session %s",
@@ -708,21 +719,6 @@ async def set_session_yolo(
     return {"session_id": session_id, **summary}
 
 
-@router.get("/user/quota")
-async def get_user_quota(user: dict = Depends(get_current_user)) -> dict:
-    """Return the user's plan tier and today's premium-model quota state."""
-    plan = user.get("plan", "free")
-    used = await user_quotas.get_claude_used_today(user["user_id"])
-    cap = user_quotas.daily_cap_for(plan)
-    remaining = max(0, cap - used)
-    return {
-        "plan": plan,
-        "premium_used_today": used,
-        "premium_daily_cap": cap,
-        "premium_remaining": remaining,
-    }
-
-
 @router.get("/user/jobs-access")
 async def get_jobs_access_info(
     request: Request, user: dict = Depends(get_current_user)
@@ -743,6 +739,44 @@ async def get_jobs_access_info(
     }
 
 
+@router.get("/usage", response_model=UsageResponse)
+async def get_usage(
+    request: Request,
+    session_id: str | None = None,
+    tz: str | None = None,
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Return app-attributed usage for the current user."""
+    if session_id:
+        await _check_session_access(
+            session_id,
+            user,
+            request,
+            preload_sandbox=False,
+        )
+    usage = await build_usage_response(
+        session_manager,
+        user_id=user["user_id"],
+        hf_token=(
+            resolve_hf_request_token(request, include_env_fallback=False)
+            or _user_hf_token(user)
+            or resolve_hf_request_token(request)
+        ),
+        session_id=session_id,
+        timezone_name=tz,
+    )
+    if session_id:
+        auto_approval = (
+            await session_manager.reconcile_session_auto_approval_from_usage(
+                session_id,
+                usage,
+            )
+        )
+        if auto_approval is not None:
+            usage["auto_approval"] = auto_approval
+    return usage
+
+
 @router.get("/sessions", response_model=list[SessionInfo])
 async def list_sessions(user: dict = Depends(get_current_user)) -> list[SessionInfo]:
     """List sessions belonging to the authenticated user."""
@@ -757,8 +791,8 @@ async def teardown_session_sandbox(
     """Best-effort sandbox teardown that preserves durable chat history."""
     await _check_session_access(session_id, user, preload_sandbox=False)
     task = asyncio.create_task(session_manager.teardown_sandbox(session_id))
-    _background_teardown_tasks.add(task)
-    task.add_done_callback(_background_teardown_tasks.discard)
+    _background_route_tasks.add(task)
+    task.add_done_callback(_background_route_tasks.discard)
     return {"status": "teardown_requested", "session_id": session_id}
 
 
@@ -801,12 +835,11 @@ async def submit_input(
                 }
             ]
         )
-    agent_session = await _check_session_access(raw_session_id, user)
+    await _check_session_access(raw_session_id, user)
     try:
         body = SubmitRequest(**payload)
     except ValidationError as exc:
         raise RequestValidationError(exc.errors()) from exc
-    await _enforce_premium_model_quota(user, agent_session)
     success = await session_manager.submit_user_input(body.session_id, body.text)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found or inactive")
@@ -857,16 +890,6 @@ async def chat_sse(
     # Submit the operation
     text = body.get("text")
     approvals = body.get("approvals")
-
-    # Gate user-message sends against the daily premium-model quota. Approvals are
-    # continuations of an in-progress turn — the session was already charged
-    # on its first message, so we skip the gate there.
-    if text is not None and not approvals:
-        try:
-            await _enforce_premium_model_quota(user, agent_session)
-        except HTTPException:
-            broadcaster.unsubscribe(sub_id)
-            raise
 
     try:
         if approvals:
@@ -919,8 +942,9 @@ async def record_pro_click(
         target=str(body.get("target") or "pro_pricing"),
     )
     if agent_session.session.config.save_sessions:
-        agent_session.session.save_and_upload_detached(
-            agent_session.session.config.session_dataset_repo
+        _schedule_usage_refresh_and_upload(
+            agent_session,
+            error_code="pro_click_billing_snapshot_error",
         )
     return {"status": "ok"}
 
@@ -1163,7 +1187,8 @@ async def submit_feedback(
     # Fire-and-forget save so feedback reaches the dataset even if the user
     # closes the tab right after clicking.
     if agent_session.session.config.save_sessions:
-        agent_session.session.save_and_upload_detached(
-            agent_session.session.config.session_dataset_repo
+        _schedule_usage_refresh_and_upload(
+            agent_session,
+            error_code="feedback_billing_snapshot_error",
         )
     return {"status": "ok"}

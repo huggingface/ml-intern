@@ -17,8 +17,14 @@ from litellm import Message, acompletion
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
 from agent.core.llm_params import _resolve_llm_params
-from agent.core.prompt_caching import with_prompt_caching
+from agent.core.model_ids import strip_huggingface_model_prefix
+from agent.core.prompt_caching import (
+    router_session_id_for,
+    with_prompt_cache_params,
+    with_prompt_caching,
+)
 from agent.core.session import Event
+from agent.core.yolo_budget import maybe_pause_yolo_after_spend
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,51 @@ RESEARCH_TOOL_NAMES = {
     "hf_inspect_dataset",
     "hf_repo_files",
 }
+
+
+async def _research_acompletion(
+    *,
+    session: Any,
+    research_model: str,
+    messages: list[Any],
+    tools: Any,
+    llm_params: dict[str, Any],
+    timeout: int,
+    tool_choice: str | None = None,
+):
+    kwargs: dict[str, Any] = {
+        "messages": messages,
+        "tools": tools,
+        "stream": False,
+        "timeout": timeout,
+        **llm_params,
+    }
+    if tool_choice is not None:
+        kwargs["tool_choice"] = tool_choice
+    return await acompletion(**kwargs)
+
+
+async def _record_research_llm_call(
+    session: Any,
+    *,
+    research_model: str,
+    response: Any,
+    started_at: float,
+) -> bool:
+    usage = await telemetry.record_llm_call(
+        session,
+        model=research_model,
+        response=response,
+        latency_ms=int((time.monotonic() - started_at) * 1000),
+        finish_reason=response.choices[0].finish_reason if response.choices else None,
+        kind="research",
+    )
+    return await maybe_pause_yolo_after_spend(
+        session,
+        spend_kind="research",
+        observed_cost_usd=usage.get("cost_usd") if isinstance(usage, dict) else None,
+    )
+
 
 RESEARCH_SYSTEM_PROMPT = """\
 You are a research sub-agent for an ML engineering assistant.
@@ -220,13 +271,8 @@ RESEARCH_TOOL_SPEC = {
 
 
 def _get_research_model(main_model: str) -> str:
-    """Pick a cheaper model for research based on the main model."""
-    if main_model.startswith("anthropic/"):
-        return "anthropic/claude-sonnet-4-6"
-    if main_model.startswith("bedrock/") and "anthropic" in main_model:
-        return "bedrock/us.anthropic.claude-sonnet-4-6"
-    # For non-Anthropic models (HF router etc.), use the same model
-    return main_model
+    """Normalize the main model id for the research sub-call."""
+    return strip_huggingface_model_prefix(main_model) or main_model
 
 
 async def research_handler(
@@ -251,19 +297,21 @@ async def research_handler(
         user_content = f"Context: {context}\n\n{user_content}"
     messages.append(Message(role="user", content=user_content))
 
-    # Use a cheaper/faster model for research
+    # Use the normalized router model for research
     main_model = session.config.model_name
     research_model = _get_research_model(main_model)
-    # Research is a cheap sub-call — cap the main session's effort at "high"
-    # so a user preference of ``max``/``xhigh`` (valid for Opus 4.6/4.7) doesn't
-    # propagate to a Sonnet research model that may not accept those levels.
-    # We also haven't probed this sub-model so we don't know its ceiling.
+    # Research is a cheap sub-call — cap the main session's effort at "high".
+    # We also haven't probed this sub-call's model so we don't know its ceiling.
     _pref = getattr(session.config, "reasoning_effort", None)
     _capped = "high" if _pref in ("max", "xhigh") else _pref
     llm_params = _resolve_llm_params(
         research_model,
         getattr(session, "hf_token", None),
         reasoning_effort=_capped,
+    )
+    llm_params = with_prompt_cache_params(
+        llm_params,
+        session_id=router_session_id_for(session),
     )
 
     # Get read-only tool specs from the session's tool router
@@ -341,29 +389,30 @@ async def research_handler(
                 )
             )
             try:
-                _msgs, _ = with_prompt_caching(messages, None, llm_params.get("model"))
                 _t0 = time.monotonic()
-                response = await acompletion(
-                    messages=_msgs,
+                cached_messages, _ = with_prompt_caching(messages, None, llm_params)
+                response = await _research_acompletion(
+                    session=session,
+                    research_model=research_model,
+                    messages=cached_messages,
                     tools=None,  # no tools — force text response
-                    stream=False,
+                    llm_params=llm_params,
                     timeout=120,
-                    **llm_params,
                 )
                 # Telemetry is best-effort; a logging blip must never mask a
                 # valid LLM response (the surrounding except would convert it
                 # to "summary call failed").
                 try:
-                    await telemetry.record_llm_call(
+                    if await _record_research_llm_call(
                         session,
-                        model=research_model,
+                        research_model=research_model,
                         response=response,
-                        latency_ms=int((time.monotonic() - _t0) * 1000),
-                        finish_reason=response.choices[0].finish_reason
-                        if response.choices
-                        else None,
-                        kind="research",
-                    )
+                        started_at=_t0,
+                    ):
+                        return (
+                            "Research paused because the YOLO cap was reached.",
+                            False,
+                        )
                 except Exception as _telem_err:
                     logger.debug("research telemetry failed: %s", _telem_err)
                 content = response.choices[0].message.content or ""
@@ -389,29 +438,27 @@ async def research_handler(
             )
 
         try:
-            _msgs, _tools = with_prompt_caching(
-                messages, tool_specs if tool_specs else None, llm_params.get("model")
-            )
             _t0 = time.monotonic()
-            response = await acompletion(
-                messages=_msgs,
-                tools=_tools,
+            cached_messages, cached_tools = with_prompt_caching(
+                messages, tool_specs if tool_specs else None, llm_params
+            )
+            response = await _research_acompletion(
+                session=session,
+                research_model=research_model,
+                messages=cached_messages,
+                tools=cached_tools,
                 tool_choice="auto",
-                stream=False,
+                llm_params=llm_params,
                 timeout=120,
-                **llm_params,
             )
             try:
-                await telemetry.record_llm_call(
+                if await _record_research_llm_call(
                     session,
-                    model=research_model,
+                    research_model=research_model,
                     response=response,
-                    latency_ms=int((time.monotonic() - _t0) * 1000),
-                    finish_reason=response.choices[0].finish_reason
-                    if response.choices
-                    else None,
-                    kind="research",
-                )
+                    started_at=_t0,
+                ):
+                    return "Research paused because the YOLO cap was reached.", False
             except Exception as _telem_err:
                 logger.debug("research telemetry failed: %s", _telem_err)
         except Exception as e:
@@ -508,26 +555,24 @@ async def research_handler(
         )
     )
     try:
-        _msgs, _ = with_prompt_caching(messages, None, llm_params.get("model"))
         _t0 = time.monotonic()
-        response = await acompletion(
-            messages=_msgs,
+        cached_messages, _ = with_prompt_caching(messages, None, llm_params)
+        response = await _research_acompletion(
+            session=session,
+            research_model=research_model,
+            messages=cached_messages,
             tools=None,
-            stream=False,
+            llm_params=llm_params,
             timeout=120,
-            **llm_params,
         )
         try:
-            await telemetry.record_llm_call(
+            if await _record_research_llm_call(
                 session,
-                model=research_model,
+                research_model=research_model,
                 response=response,
-                latency_ms=int((time.monotonic() - _t0) * 1000),
-                finish_reason=response.choices[0].finish_reason
-                if response.choices
-                else None,
-                kind="research",
-            )
+                started_at=_t0,
+            ):
+                return "Research paused because the YOLO cap was reached.", False
         except Exception as _telem_err:
             logger.debug("research telemetry failed: %s", _telem_err)
         content = response.choices[0].message.content or ""

@@ -13,6 +13,10 @@ interface SessionStore {
   deleteSession: (id: string) => void;
   switchSession: (id: string) => void;
   setSessionActive: (id: string, isActive: boolean) => void;
+  /** Track whether this session is mid-turn. Set false on terminal events so a
+   *  finished background task stops looking "processing" (which would otherwise
+   *  keep reactivating it until the next GET /sessions merge). */
+  setSessionProcessing: (id: string, isProcessing: boolean) => void;
   updateSessionTitle: (id: string, title: string) => void;
   updateSessionModel: (id: string, model: string | null) => void;
   setNeedsAttention: (id: string, needs: boolean) => void;
@@ -26,7 +30,9 @@ interface SessionStore {
     session_id: string;
     title?: string | null;
     created_at: string;
+    usage_window_started_at?: string | null;
     is_active?: boolean;
+    is_processing?: boolean;
     model?: string | null;
     pending_approval?: unknown[] | null;
     auto_approval?: {
@@ -55,10 +61,12 @@ export const useSessionStore = create<SessionStore>()(
       activeSessionId: null,
 
       createSession: (id: string, model?: string | null) => {
+        const now = new Date().toISOString();
         const newSession: SessionMeta = {
           id,
           title: `Chat ${get().sessions.length + 1}`,
-          createdAt: new Date().toISOString(),
+          createdAt: now,
+          usageWindowStartedAt: now,
           isActive: true,
           needsAttention: false,
           model: model ?? null,
@@ -117,7 +125,10 @@ export const useSessionStore = create<SessionStore>()(
                 ...existing,
                 title: server.title || existing.title,
                 isActive: server.is_active ?? existing.isActive,
+                isProcessing: Boolean(server.is_processing),
                 model: server.model ?? existing.model ?? null,
+                usageWindowStartedAt:
+                  server.usage_window_started_at ?? existing.usageWindowStartedAt ?? null,
                 needsAttention: Boolean(server.pending_approval?.length) || existing.needsAttention,
                 expired: false,
                 ...(auto
@@ -138,7 +149,9 @@ export const useSessionStore = create<SessionStore>()(
               id,
               title: server.title || `Chat ${merged.length + 1}`,
               createdAt: server.created_at || new Date().toISOString(),
+              usageWindowStartedAt: server.usage_window_started_at ?? null,
               isActive: server.is_active ?? true,
+              isProcessing: Boolean(server.is_processing),
               needsAttention: Boolean(server.pending_approval?.length),
               model: server.model ?? null,
               expired: false,
@@ -202,6 +215,14 @@ export const useSessionStore = create<SessionStore>()(
         }));
       },
 
+      setSessionProcessing: (id: string, isProcessing: boolean) => {
+        set((state) => ({
+          sessions: state.sessions.map((s) =>
+            s.id === id ? { ...s, isProcessing } : s
+          ),
+        }));
+      },
+
       updateSessionTitle: (id: string, title: string) => {
         set((state) => ({
           sessions: state.sessions.map((s) =>
@@ -229,7 +250,12 @@ export const useSessionStore = create<SessionStore>()(
     {
       name: 'hf-agent-sessions',
       partialize: (state) => ({
-        sessions: state.sessions,
+        // Reset transient processing so cold-load state is re-derived from
+        // the live GET /sessions list.
+        sessions: state.sessions.map((s) => ({
+          ...s,
+          isProcessing: false,
+        })),
         activeSessionId: state.activeSessionId,
       }),
     }

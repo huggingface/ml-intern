@@ -13,6 +13,11 @@ export type EventType =
   | 'tool_log'
   | 'approval_required'
   | 'tool_state_change'
+  | 'llm_call'
+  | 'hf_job_complete'
+  | 'sandbox_create'
+  | 'sandbox_destroy'
+  | 'session_update'
   | 'turn_complete'
   | 'compacted'
   | 'error'
@@ -25,64 +30,4 @@ export interface AgentEvent {
   event_type: EventType;
   data?: Record<string, unknown>;
   seq?: number;
-}
-
-export interface ReadyEventData {
-  message: string;
-}
-
-export interface ProcessingEventData {
-  message: string;
-}
-
-export interface AssistantMessageEventData {
-  content: string;
-}
-
-export interface ToolCallEventData {
-  tool: string;
-  arguments: Record<string, unknown>;
-}
-
-export interface ToolOutputEventData {
-  tool: string;
-  output: string;
-  success: boolean;
-}
-
-export interface ToolLogEventData {
-  tool: string;
-  log: string;
-}
-
-export interface PlanUpdateEventData {
-  plan: Array<{ id: string; content: string; status: 'pending' | 'in_progress' | 'completed' }>;
-}
-
-export interface ApprovalRequiredEventData {
-  tools: ApprovalToolItem[];
-  count: number;
-}
-
-export interface ApprovalToolItem {
-  tool: string;
-  arguments: Record<string, unknown>;
-  tool_call_id: string;
-  auto_approval_blocked?: boolean;
-  block_reason?: string | null;
-  estimated_cost_usd?: number | null;
-  remaining_cap_usd?: number | null;
-}
-
-export interface TurnCompleteEventData {
-  history_size: number;
-}
-
-export interface CompactedEventData {
-  old_tokens: number;
-  new_tokens: number;
-}
-
-export interface ErrorEventData {
-  error: string;
 }

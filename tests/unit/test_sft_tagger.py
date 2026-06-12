@@ -7,7 +7,7 @@ def _ev(event_type, data=None, ts="2026-04-24T10:00:00"):
     return {"timestamp": ts, "event_type": event_type, "data": data or {}}
 
 
-def _traj(events=None, messages=None, model="claude-opus-4-6"):
+def _traj(events=None, messages=None, model="anthropic/claude-opus-4.8:fal-ai"):
     return {
         "session_id": "sess-1",
         "model_name": model,
@@ -20,8 +20,7 @@ def _traj(events=None, messages=None, model="claude-opus-4-6"):
 
 
 def test_model_family():
-    assert "model:opus" in tag_session(_traj(model="claude-opus-4-6"))
-    assert "model:sonnet" in tag_session(_traj(model="bedrock/claude-sonnet-4-5"))
+    assert "model:opus" in tag_session(_traj(model="anthropic/claude-opus-4.8:fal-ai"))
     assert "model:kimi" in tag_session(_traj(model="moonshotai/Kimi-K2.6"))
     assert "model:other" in tag_session(_traj(model="unknown-model-xyz"))
 

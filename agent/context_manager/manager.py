@@ -13,7 +13,11 @@ import yaml
 from jinja2 import Template
 from litellm import Message, acompletion
 
-from agent.core.prompt_caching import with_prompt_caching
+from agent.core.prompt_caching import (
+    router_session_id_for,
+    with_prompt_cache_params,
+    with_prompt_caching,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +95,8 @@ class CompactionFailedError(Exception):
 
     Typically means an individual preserved message (system, first user, or
     untouched tail) exceeds what truncation can fix in one pass. The caller
-    must terminate the session — retrying produces an infinite loop that
-    burns Bedrock budget for free (~$3 per re-attempt on Opus).
+    must terminate the session; retrying produces an infinite loop that burns
+    hosted inference budget.
     """
 
 
@@ -133,30 +137,38 @@ async def summarize_messages(
     ``session`` is optional; when provided, the call is recorded via
     ``telemetry.record_llm_call`` so its cost lands in the session's
     ``total_cost_usd``. Without it, the call still happens but is
-    invisible in telemetry — which used to be the case for every
-    compaction call until 2026-04-29 (~30-50% of Bedrock spend was
-    attributed to this single source of dark cost).
+    invisible in telemetry, which used to hide a significant share of hosted
+    inference spend.
 
     Returns ``(summary_text, completion_tokens)``.
     """
     from agent.core.llm_params import _resolve_llm_params
 
     prompt_messages = list(messages) + [Message(role="user", content=prompt)]
-    llm_params = _resolve_llm_params(model_name, hf_token, reasoning_effort="high")
+    llm_params = _resolve_llm_params(
+        model_name,
+        hf_token,
+        reasoning_effort="high",
+    )
+    llm_params = with_prompt_cache_params(
+        llm_params,
+        session_id=router_session_id_for(session),
+    )
+    llm_params = {**llm_params, "max_completion_tokens": max_tokens}
     prompt_messages, tool_specs = with_prompt_caching(
-        prompt_messages, tool_specs, llm_params.get("model")
+        prompt_messages, tool_specs, llm_params
     )
     _t0 = time.monotonic()
     response = await acompletion(
         messages=prompt_messages,
-        max_completion_tokens=max_tokens,
         tools=tool_specs,
         **llm_params,
     )
     if session is not None:
         from agent.core import telemetry
+        from agent.core.yolo_budget import maybe_pause_yolo_after_spend
 
-        await telemetry.record_llm_call(
+        usage = await telemetry.record_llm_call(
             session,
             model=model_name,
             response=response,
@@ -165,6 +177,13 @@ async def summarize_messages(
             if response.choices
             else None,
             kind=kind,
+        )
+        await maybe_pause_yolo_after_spend(
+            session,
+            spend_kind=kind,
+            observed_cost_usd=usage.get("cost_usd")
+            if isinstance(usage, dict)
+            else None,
         )
     summary = response.choices[0].message.content or ""
     completion_tokens = response.usage.completion_tokens if response.usage else 0
@@ -469,9 +488,8 @@ class ContextManager:
             )
             # Preserve all known assistant-side fields (tool_calls, thinking_blocks,
             # reasoning_content, provider_specific_fields) even when content is
-            # replaced. Anthropic extended-thinking models reject the next request
-            # with "Invalid signature in thinking block" if thinking_blocks is
-            # dropped from a prior assistant message.
+            # replaced. Historical traces may still contain provider reasoning
+            # metadata, and truncation should not silently discard it.
             kept = {
                 k: getattr(msg, k, None)
                 for k in (
@@ -521,7 +539,7 @@ class ContextManager:
         a giant tool output stuck in the untouched tail) is too large for
         truncation to fix. The caller must terminate the session — retrying
         is what caused the 2026-05-03 infinite-compaction-loop pattern that
-        burned Bedrock budget invisibly.
+        burned hosted inference budget invisibly.
         """
         if not self.needs_compaction:
             return
@@ -549,7 +567,7 @@ class ContextManager:
         # otherwise recent_messages overlaps with the messages we put in
         # head". The walk-back's `idx > 1` guard is necessary (no system in
         # recent) but insufficient (first_user is also in head and would be
-        # duplicated). Anthropic API rejects two consecutive user messages
+        # duplicated). Chat providers can reject two consecutive user messages
         # with a 400 — bot review on PR #213 caught this on the second clamp
         # iteration.
         if idx <= first_user_idx:
@@ -611,7 +629,7 @@ class ContextManager:
 
         # Hard verify: if compaction didn't bring us below the threshold even
         # after truncating oversized preserved messages, retrying just burns
-        # Bedrock budget on the same useless compaction call. Raise so the
+        # hosted inference budget on the same useless compaction call. Raise so the
         # caller can terminate the session cleanly. Pre-2026-05-04, the
         # caller looped indefinitely (~$3/Opus retry) until the pod was
         # killed — invisible to the dataset because the session never
