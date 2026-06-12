@@ -42,6 +42,16 @@ function textFromUIMessage(message: UIMessage): string {
     .join('');
 }
 
+function messagesSignature(messages: UIMessage[]): string {
+  return JSON.stringify(
+    messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      parts: message.parts,
+    })),
+  );
+}
+
 function pendingApprovalItemsFromInfo(info: unknown): PendingApprovalItem[] | undefined {
   const pending = (info as { pending_approval?: unknown } | null)?.pending_approval;
   if (!Array.isArray(pending)) return undefined;
@@ -893,13 +903,14 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
   }, [sessionId, setProcessingState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // -- Persist messages ---------------------------------------------------
-  const prevLenRef = useRef(initialMessages.length);
+  const prevMessagesSignatureRef = useRef(messagesSignature(initialMessages));
   useEffect(() => {
     if (chat.messages.length === 0) return;
-    if (chat.messages.length !== prevLenRef.current) {
-      prevLenRef.current = chat.messages.length;
+    const signature = messagesSignature(chat.messages);
+    if (signature !== prevMessagesSignatureRef.current) {
+      prevMessagesSignatureRef.current = signature;
       saveMessages(sessionId, chat.messages);
-    } 
+    }
   }, [sessionId, chat.messages]);
 
   // -- Undo last turn (REST call + client-side message removal) -----------

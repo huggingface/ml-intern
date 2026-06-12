@@ -32,7 +32,11 @@ from agent.core.hf_access import (
     is_inference_billing_error,
 )
 from agent.core.llm_params import _resolve_llm_params
-from agent.core.prompt_caching import with_prompt_cache_params, with_prompt_caching
+from agent.core.prompt_caching import (
+    router_session_id_for,
+    with_prompt_cache_params,
+    with_prompt_caching,
+)
 from agent.core.session import DEFAULT_SESSION_LOG_DIR, Event, OpType, Session
 from agent.core.tools import ToolRouter
 from agent.core.usage_thresholds import (
@@ -925,7 +929,8 @@ async def _call_llm_streaming(
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
             request_llm_params = with_prompt_cache_params(
-                llm_params, session_id=getattr(session, "session_id", None)
+                llm_params,
+                session_id=router_session_id_for(session),
             )
             cached_messages, cached_tools = with_prompt_caching(
                 messages, tools, request_llm_params
@@ -1070,7 +1075,8 @@ async def _call_llm_non_streaming(
     for _llm_attempt in range(_MAX_LLM_RETRIES):
         try:
             request_llm_params = with_prompt_cache_params(
-                llm_params, session_id=getattr(session, "session_id", None)
+                llm_params,
+                session_id=router_session_id_for(session),
             )
             cached_messages, cached_tools = with_prompt_caching(
                 messages, tools, request_llm_params

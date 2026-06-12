@@ -183,11 +183,14 @@ export default function UsageMeter() {
     void fetchUsage(activeSessionId);
   }, [activeSessionId, fetchUsage]);
 
-  const accountSessionTotal = usage?.hf_account?.current_session?.total_usd;
+  const accountSessionInference =
+    usage?.hf_account?.current_session?.inference_providers_usd;
   const sessionTotal =
-    accountSessionTotal == null
+    accountSessionInference == null
       ? usage?.session?.total_usd
-      : accountSessionTotal + (usage?.session?.sandbox_estimated_usd ?? 0);
+      : accountSessionInference +
+        (usage?.session?.hf_jobs_estimated_usd ?? 0) +
+        (usage?.session?.sandbox_estimated_usd ?? 0);
   const links = useMemo(() => usage?.links ?? {}, [usage?.links]);
   const billingMessage = billingUnavailableMessage(usage?.hf_account?.error);
   const open = Boolean(anchorEl);

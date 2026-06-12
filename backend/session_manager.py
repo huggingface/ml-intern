@@ -33,6 +33,7 @@ from agent.core.yolo_budget import (
     is_yolo_budget_pending,
     request_yolo_budget_exceeded_approval,
     seed_session_spend,
+    session_spend_usd,
     yolo_budget_pending_to_tool,
 )
 from agent.messaging.gateway import NotificationGateway
@@ -130,13 +131,42 @@ class AgentSession:
     broadcaster: Any = None
     title: str | None = None
     usage_window_started_at: datetime | None = None
-    usage_window_baseline: dict[str, Any] | None = None
+    inference_billing_session_id: str | None = None
     usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
     usage_warning_spend_cache: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.usage_window_started_at is None:
             self.usage_window_started_at = self.created_at
+        if not self.inference_billing_session_id or not _is_uuid(
+            self.inference_billing_session_id
+        ):
+            self.inference_billing_session_id = new_inference_billing_session_id(
+                self.session_id,
+                self.usage_window_started_at,
+            )
+        try:
+            self.session.inference_billing_session_id = (
+                self.inference_billing_session_id
+            )
+        except AttributeError:
+            pass
+
+
+def new_inference_billing_session_id(
+    session_id: str,  # noqa: ARG001 - kept for a stable call signature.
+    started_at: datetime | None = None,  # noqa: ARG001 - kept for a stable call signature.
+) -> str:
+    """Return a Router billing session ID scoped to one visible usage window."""
+    return str(uuid.uuid4())
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 class SessionCapacityError(Exception):
@@ -453,6 +483,19 @@ class SessionManager:
         agent_session.session.yolo_budget_checker = _checker
 
     @staticmethod
+    def _set_inference_billing_session_id(
+        agent_session: AgentSession,
+        inference_billing_session_id: str,
+    ) -> None:
+        agent_session.inference_billing_session_id = inference_billing_session_id
+        try:
+            agent_session.session.inference_billing_session_id = (
+                inference_billing_session_id
+            )
+        except AttributeError:
+            pass
+
+    @staticmethod
     def _usage_spend_from_response(response: dict[str, Any]) -> tuple[float, str]:
         def coerce_spend(value: Any) -> float | None:
             if isinstance(value, bool) or value is None:
@@ -464,17 +507,22 @@ class SessionManager:
 
         hf_account = response.get("hf_account")
         session_bucket = response.get("session")
-        sandbox_spend = 0.0
-        if isinstance(session_bucket, dict):
-            sandbox_spend = (
-                coerce_spend(session_bucket.get("sandbox_estimated_usd")) or 0.0
-            )
         if isinstance(hf_account, dict):
             current_session = hf_account.get("current_session")
             if isinstance(current_session, dict):
-                spend = coerce_spend(current_session.get("total_usd"))
+                spend = coerce_spend(
+                    current_session.get("inference_providers_usd")
+                    if "inference_providers_usd" in current_session
+                    else current_session.get("total_usd")
+                )
                 if spend is not None:
-                    return spend + sandbox_spend, "hf_billing_current_session"
+                    if isinstance(session_bucket, dict):
+                        for key in (
+                            "hf_jobs_estimated_usd",
+                            "sandbox_estimated_usd",
+                        ):
+                            spend += coerce_spend(session_bucket.get(key)) or 0.0
+                    return spend, "hf_billing_current_session"
 
         if isinstance(session_bucket, dict):
             spend = coerce_spend(session_bucket.get("total_usd"))
@@ -642,7 +690,9 @@ class SessionManager:
             use_cache=False,
         )
         seed_session_spend(session, current_spend)
-        if current_spend < cap_usd:
+        ledger_spend = session_spend_usd(session)
+        effective_spend = max(current_spend, ledger_spend)
+        if effective_spend < cap_usd:
             return False
 
         spend_kind = str(payload.get("spend_kind") or "session usage")
@@ -650,7 +700,7 @@ class SessionManager:
         created = await request_yolo_budget_exceeded_approval(
             session,
             spend_kind=spend_kind,
-            current_spend_usd=current_spend,
+            current_spend_usd=effective_spend,
             cap_usd=cap_usd,
             billing_source=billing_source,
             continuation=payload.get("continuation"),
@@ -658,7 +708,7 @@ class SessionManager:
             history_size=payload.get("history_size"),
             reason=(
                 "YOLO cap paused session usage after "
-                f"{spend_kind}: current session spend ${current_spend:.2f} "
+                f"{spend_kind}: current session spend ${effective_spend:.2f} "
                 f"has reached the ${cap_usd:.2f} cap."
             ),
         )
@@ -883,7 +933,9 @@ class SessionManager:
                 ),
                 created_at=agent_session.created_at,
                 usage_window_started_at=agent_session.usage_window_started_at,
-                usage_window_baseline=agent_session.usage_window_baseline,
+                inference_billing_session_id=(
+                    agent_session.inference_billing_session_id
+                ),
                 notification_destinations=list(
                     agent_session.session.notification_destinations
                 ),
@@ -1064,9 +1116,14 @@ class SessionManager:
         usage_window_started_at = meta.get("usage_window_started_at")
         if not isinstance(usage_window_started_at, datetime):
             usage_window_started_at = created_at
-        usage_window_baseline = meta.get("usage_window_baseline")
-        if not isinstance(usage_window_baseline, dict):
-            usage_window_baseline = None
+        inference_billing_session_id = meta.get("inference_billing_session_id")
+        if not isinstance(inference_billing_session_id, str) or not _is_uuid(
+            inference_billing_session_id
+        ):
+            inference_billing_session_id = new_inference_billing_session_id(
+                session_id,
+                usage_window_started_at,
+            )
 
         agent_session = AgentSession(
             session_id=session_id,
@@ -1079,7 +1136,7 @@ class SessionManager:
             user_plan=user_plan,
             created_at=created_at,
             usage_window_started_at=usage_window_started_at,
-            usage_window_baseline=usage_window_baseline,
+            inference_billing_session_id=inference_billing_session_id,
             usage_warning_next_threshold_usd=session.usage_warning_next_threshold_usd,
             is_active=True,
             is_processing=False,
@@ -1841,7 +1898,6 @@ class SessionManager:
         session_id: str,
         *,
         started_at: datetime | None = None,
-        baseline: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Reset the account-billing window used for the visible usage meter."""
         agent_session = self.sessions.get(session_id)
@@ -1850,7 +1906,9 @@ class SessionManager:
 
         window_start = started_at or datetime.utcnow()
         agent_session.usage_window_started_at = window_start
-        agent_session.usage_window_baseline = baseline
+        billing_session_id = new_inference_billing_session_id(session_id, window_start)
+        self._set_inference_billing_session_id(agent_session, billing_session_id)
+        agent_session.usage_warning_spend_cache = {}
         self._touch(agent_session)
 
         store = self._store()
@@ -1858,7 +1916,7 @@ class SessionManager:
             await store.update_session_fields(
                 session_id,
                 usage_window_started_at=window_start,
-                usage_window_baseline=baseline,
+                inference_billing_session_id=billing_session_id,
                 last_active_at=agent_session.last_active_at,
             )
         return self.get_session_info(session_id)

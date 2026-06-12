@@ -12,11 +12,14 @@ if str(_BACKEND_DIR) not in sys.path:
 from usage import (  # noqa: E402
     USAGE_EVENT_TYPES,
     _account_bucket_from_billing_usage,
+    _session_bucket_from_inference_session_usage,
     aggregate_usage_events,
     build_usage_response,
     resolve_usage_windows,
 )
 from agent.core import session_persistence  # noqa: E402
+
+BILLING_SESSION_ID = "00000000-0000-4000-8000-000000000001"
 
 
 def _event(event_type, data=None, created_at="2026-06-01T12:00:00+00:00"):
@@ -204,6 +207,60 @@ def test_account_bucket_from_hf_billing_usage_v2():
     assert usage["hf_jobs_minutes"] == 3.5
 
 
+def test_session_bucket_from_inference_session_usage_sums_periods():
+    usage = _session_bucket_from_inference_session_usage(
+        {
+            "currency": "USD",
+            "periods": [
+                {
+                    "period": "2026-06-01T00:00:00.000Z",
+                    "sessions": [
+                        {"id": "s1", "requestCount": 2, "costCents": 123.4},
+                        {"id": "s2", "requestCount": 20, "costCents": 999},
+                    ],
+                },
+                {
+                    "period": "2026-07-01T00:00:00.000Z",
+                    "sessions": [
+                        {"id": "s1", "requestCount": 3, "costCents": 76.6},
+                    ],
+                },
+            ],
+        },
+        session_id="s1",
+        window_start=datetime(2026, 6, 5, 12, 0, tzinfo=UTC),
+        window_end=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+        timezone="UTC",
+    )
+
+    assert usage["inference_providers_usd"] == 2.0
+    assert usage["inference_provider_requests"] == 5
+    assert usage["hf_jobs_usd"] == 0.0
+    assert usage["total_usd"] == 2.0
+
+
+def test_session_bucket_from_inference_session_usage_handles_no_matching_session():
+    usage = _session_bucket_from_inference_session_usage(
+        {
+            "currency": "USD",
+            "periods": [
+                {
+                    "period": "2026-06-01T00:00:00.000Z",
+                    "sessions": [{"id": "other", "requestCount": 1, "costCents": 50}],
+                },
+            ],
+        },
+        session_id="s1",
+        window_start=datetime(2026, 6, 5, 12, 0, tzinfo=UTC),
+        window_end=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+        timezone="UTC",
+    )
+
+    assert usage["inference_providers_usd"] == 0.0
+    assert usage["inference_provider_requests"] == 0
+    assert usage["total_usd"] == 0.0
+
+
 def test_usage_windows_respect_browser_timezone():
     windows = resolve_usage_windows(
         "America/Los_Angeles",
@@ -255,6 +312,7 @@ def _agent_session(session_id, user_id, events):
     return SimpleNamespace(
         session_id=session_id,
         user_id=user_id,
+        inference_billing_session_id=BILLING_SESSION_ID,
         session=SimpleNamespace(logged_events=events),
     )
 
@@ -315,6 +373,54 @@ async def test_runtime_usage_includes_requested_session_total():
 
     assert usage["session"]["session_id"] == "s1"
     assert usage["session"]["inference_usd"] == 0.25
+
+
+@pytest.mark.asyncio
+async def test_runtime_usage_clips_requested_session_to_usage_window():
+    usage_window_started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
+    manager = _Manager(
+        {
+            "s1": SimpleNamespace(
+                session_id="s1",
+                user_id="owner",
+                usage_window_started_at=usage_window_started_at,
+                session=SimpleNamespace(
+                    logged_events=[
+                        _event(
+                            "llm_call",
+                            {"cost_usd": 99.0},
+                            created_at="2026-06-05T12:00:00+00:00",
+                        ),
+                        _event(
+                            "llm_call",
+                            {"cost_usd": 0.25},
+                            created_at="2026-06-05T12:45:00+00:00",
+                        ),
+                        _event(
+                            "hf_job_complete",
+                            {
+                                "estimated_cost_usd": 1.5,
+                                "billable_seconds_estimate": 1800,
+                            },
+                            created_at="2026-06-05T12:50:00+00:00",
+                        ),
+                    ]
+                ),
+            )
+        }
+    )
+
+    usage = await build_usage_response(
+        manager,
+        user_id="owner",
+        session_id="s1",
+        timezone_name="UTC",
+        now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+    )
+
+    assert usage["session"]["inference_usd"] == 0.25
+    assert usage["session"]["hf_jobs_estimated_usd"] == 1.5
+    assert usage["session"]["total_usd"] == 1.75
 
 
 @pytest.mark.asyncio
@@ -384,7 +490,9 @@ async def test_hf_account_usage_reports_billing_unavailable_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch):
+async def test_hf_account_usage_uses_session_endpoint_for_current_session(
+    monkeypatch,
+):
     session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
     usage_window_started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
     manager = _Manager(
@@ -394,22 +502,20 @@ async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch)
                 user_id="owner",
                 created_at=session_created_at,
                 usage_window_started_at=usage_window_started_at,
+                inference_billing_session_id=BILLING_SESSION_ID,
                 session=SimpleNamespace(logged_events=[]),
             )
         }
     )
-    calls = []
+    usage_v2_calls = []
+    session_usage_calls = []
 
-    async def fake_fetch(_token, *, start, end):
-        calls.append((start, end))
-        if start == usage_window_started_at:
-            used_nano = 500_000_000
-        else:
-            used_nano = 2_000_000_000
+    async def fake_usage_v2(_token, *, start, end):
+        usage_v2_calls.append((start, end))
         return {
             "usage": {
                 "inferenceProviders": {
-                    "usedNanoUsd": used_nano,
+                    "usedNanoUsd": 2_000_000_000,
                     "includedNanoUsd": 2_000_000_000,
                     "limitNanoUsd": 5_000_000_000,
                     "numRequests": 4,
@@ -418,7 +524,28 @@ async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch)
             }
         }
 
-    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_fetch)
+    async def fake_session_usage(_token, *, start, end):
+        session_usage_calls.append((start, end))
+        return {
+            "currency": "USD",
+            "periods": [
+                {
+                    "period": "2026-06-01T00:00:00.000Z",
+                    "sessions": [
+                        {
+                            "id": BILLING_SESSION_ID,
+                            "requestCount": 3,
+                            "costCents": 125,
+                        },
+                        {"id": "s1", "requestCount": 11, "costCents": 500},
+                        {"id": "other", "requestCount": 9, "costCents": 999},
+                    ],
+                }
+            ],
+        }
+
+    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_usage_v2)
+    monkeypatch.setattr("usage._fetch_hf_inference_session_usage", fake_session_usage)
 
     usage = await build_usage_response(
         manager,
@@ -430,7 +557,8 @@ async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch)
     )
 
     assert usage["hf_account"]["available"] is True
-    assert usage["hf_account"]["current_session"]["inference_providers_usd"] == 0.5
+    assert usage["hf_account"]["current_session"]["inference_providers_usd"] == 1.25
+    assert usage["hf_account"]["current_session"]["inference_provider_requests"] == 3
     assert usage["hf_account"]["month"]["inference_providers_usd"] == 2.0
     assert usage["hf_account"]["inference_providers_credits"] == {
         "included_usd": 2.0,
@@ -442,16 +570,22 @@ async def test_hf_account_usage_uses_usage_window_for_current_delta(monkeypatch)
         "period_start": None,
         "period_end": None,
     }
-    assert {start for start, _ in calls} == {
-        datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
-        usage_window_started_at,
-    }
+    assert usage_v2_calls == [
+        (
+            datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+            datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+        )
+    ]
+    assert session_usage_calls == [
+        (usage_window_started_at, datetime(2026, 6, 5, 13, 0, tzinfo=UTC))
+    ]
 
 
 @pytest.mark.asyncio
-async def test_hf_account_usage_uses_baseline_for_current_delta(monkeypatch):
+async def test_hf_account_usage_keeps_account_available_when_session_endpoint_fails(
+    monkeypatch,
+):
     usage_window_started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
-    month_start = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
     manager = _Manager(
         {
             "s1": SimpleNamespace(
@@ -459,44 +593,28 @@ async def test_hf_account_usage_uses_baseline_for_current_delta(monkeypatch):
                 user_id="owner",
                 created_at=datetime(2026, 6, 5, 12, 0, tzinfo=UTC),
                 usage_window_started_at=usage_window_started_at,
-                usage_window_baseline={
-                    "captured_at": usage_window_started_at,
-                    "month_start": month_start,
-                    "total_usd": 2.5,
-                    "inference_providers_usd": 2.0,
-                    "hf_jobs_usd": 0.5,
-                    "inference_provider_requests": 10,
-                    "hf_jobs_minutes": 4.0,
-                },
+                inference_billing_session_id=BILLING_SESSION_ID,
                 session=SimpleNamespace(logged_events=[]),
             )
         }
     )
-    calls = []
 
-    async def fake_fetch(_token, *, start, end):
-        calls.append((start, end))
-        if start == month_start:
-            return {
-                "usage": {
-                    "inferenceProviders": {
-                        "usedNanoUsd": 2_000_000_000,
-                        "numRequests": 10,
-                    },
-                    "jobs": {"usedMicroUsd": 500_000, "totalMinutes": 4.0},
-                }
-            }
+    async def fake_usage_v2(_token, *, start, end):
         return {
             "usage": {
                 "inferenceProviders": {
-                    "usedNanoUsd": 5_000_000_000,
-                    "numRequests": 99,
+                    "usedNanoUsd": 2_000_000_000,
+                    "numRequests": 10,
                 },
-                "jobs": {"usedMicroUsd": 0, "totalMinutes": 0},
+                "jobs": {"usedMicroUsd": 500_000, "totalMinutes": 4.0},
             }
         }
 
-    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_fetch)
+    async def fake_session_usage(_token, *, start, end):
+        return None
+
+    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_usage_v2)
+    monkeypatch.setattr("usage._fetch_hf_inference_session_usage", fake_session_usage)
 
     usage = await build_usage_response(
         manager,
@@ -507,20 +625,27 @@ async def test_hf_account_usage_uses_baseline_for_current_delta(monkeypatch):
         now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
     )
 
-    assert usage["hf_account"]["current_session"]["total_usd"] == 0.0
-    assert usage["hf_account"]["current_session"]["inference_provider_requests"] == 0
-    assert usage_window_started_at not in {start for start, _ in calls}
+    assert usage["hf_account"]["available"] is True
+    assert usage["hf_account"]["current_session"] is None
+    assert usage["hf_account"]["month"]["inference_providers_usd"] == 2.0
+    assert "error" not in usage["hf_account"]
 
 
 @pytest.mark.asyncio
 async def test_hf_account_usage_falls_back_to_persisted_created_at(monkeypatch):
     session_created_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
-    store = _MetadataStore({"created_at": session_created_at})
+    store = _MetadataStore(
+        {
+            "created_at": session_created_at,
+            "inference_billing_session_id": BILLING_SESSION_ID,
+        }
+    )
     manager = _Manager({}, store=store)
-    calls = []
+    usage_v2_calls = []
+    session_usage_calls = []
 
-    async def fake_fetch(_token, *, start, end):
-        calls.append((start, end))
+    async def fake_usage_v2(_token, *, start, end):
+        usage_v2_calls.append((start, end))
         return {
             "usage": {
                 "inferenceProviders": {
@@ -532,7 +657,12 @@ async def test_hf_account_usage_falls_back_to_persisted_created_at(monkeypatch):
             }
         }
 
-    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_fetch)
+    async def fake_session_usage(_token, *, start, end):
+        session_usage_calls.append((start, end))
+        return {"currency": "USD", "periods": []}
+
+    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_usage_v2)
+    monkeypatch.setattr("usage._fetch_hf_inference_session_usage", fake_session_usage)
 
     usage = await build_usage_response(
         manager,
@@ -546,10 +676,15 @@ async def test_hf_account_usage_falls_back_to_persisted_created_at(monkeypatch):
     assert usage["hf_account"]["current_session"]["window_start"] == (
         "2026-06-05T12:00:00Z"
     )
-    assert {start for start, _ in calls} == {
-        datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
-        session_created_at,
-    }
+    assert usage_v2_calls == [
+        (
+            datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+            datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+        )
+    ]
+    assert session_usage_calls == [
+        (session_created_at, datetime(2026, 6, 5, 13, 0, tzinfo=UTC))
+    ]
 
 
 @pytest.mark.asyncio
@@ -562,15 +697,17 @@ async def test_usage_response_loads_only_session_events(monkeypatch):
                 session_id="s1",
                 user_id="owner",
                 created_at=session_created_at,
+                inference_billing_session_id=BILLING_SESSION_ID,
                 session=SimpleNamespace(logged_events=[]),
             )
         },
         store=store,
     )
-    billing_starts = []
+    usage_v2_starts = []
+    session_usage_starts = []
 
-    async def fake_fetch(_token, *, start, end):
-        billing_starts.append(start)
+    async def fake_usage_v2(_token, *, start, end):
+        usage_v2_starts.append(start)
         return {
             "usage": {
                 "inferenceProviders": {
@@ -582,7 +719,12 @@ async def test_usage_response_loads_only_session_events(monkeypatch):
             }
         }
 
-    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_fetch)
+    async def fake_session_usage(_token, *, start, end):
+        session_usage_starts.append(start)
+        return {"currency": "USD", "periods": []}
+
+    monkeypatch.setattr("usage._fetch_hf_billing_usage_v2", fake_usage_v2)
+    monkeypatch.setattr("usage._fetch_hf_inference_session_usage", fake_session_usage)
 
     usage = await build_usage_response(
         manager,
@@ -593,10 +735,14 @@ async def test_usage_response_loads_only_session_events(monkeypatch):
         now=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
     )
 
-    assert store.calls == [("owner", {"session_id": "s1", "start": None, "end": None})]
-    assert set(billing_starts) == {
-        datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
-        session_created_at,
-    }
-    assert datetime(2026, 6, 5, 0, 0, tzinfo=UTC) not in billing_starts
+    assert store.calls == [
+        (
+            "owner",
+            {"session_id": "s1", "start": session_created_at, "end": None},
+        )
+    ]
+    assert usage_v2_starts == [datetime(2026, 6, 1, 0, 0, tzinfo=UTC)]
+    assert session_usage_starts == [session_created_at]
+    assert datetime(2026, 6, 5, 0, 0, tzinfo=UTC) not in usage_v2_starts
+    assert datetime(2026, 6, 5, 0, 0, tzinfo=UTC) not in session_usage_starts
     assert usage["hf_account"]["month"]["inference_providers_usd"] == 0.0

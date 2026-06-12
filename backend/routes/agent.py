@@ -64,7 +64,8 @@ from agent.core.model_ids import (
     MINIMAX_M27_MODEL_ID,
     strip_huggingface_model_prefix,
 )
-from usage import build_usage_response, capture_hf_account_usage_baseline
+from agent.core.prompt_caching import router_session_id_for, with_prompt_cache_params
+from usage import build_usage_response
 
 logger = logging.getLogger(__name__)
 
@@ -77,17 +78,10 @@ DEFAULT_FREE_MODEL_ID = KIMI_K26_MODEL_ID
 DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
 
 
-async def _reset_usage_window_with_hf_baseline(
-    session_id: str,
-    hf_token: str | None,
-) -> dict[str, Any] | None:
-    baseline = await capture_hf_account_usage_baseline(hf_token)
-    captured_at = baseline.get("captured_at") if baseline else None
-    started_at = captured_at if isinstance(captured_at, datetime) else datetime.utcnow()
+async def _reset_usage_window(session_id: str) -> dict[str, Any] | None:
     return await session_manager.reset_session_usage_window(
         session_id,
-        started_at=started_at,
-        baseline=baseline,
+        started_at=datetime.utcnow(),
     )
 
 
@@ -353,10 +347,15 @@ async def generate_title(
     so the 60-token output budget isn't consumed before the title is written.
     """
     try:
+        agent_session = await _check_session_access(request.session_id, user)
         llm_params = _resolve_llm_params(
             "openai/gpt-oss-120b:cerebras",
             _user_hf_token(user),
             reasoning_effort="low",
+        )
+        llm_params = with_prompt_cache_params(
+            llm_params,
+            session_id=router_session_id_for(agent_session.session),
         )
         response = await acompletion(
             messages=[
@@ -382,7 +381,6 @@ async def generate_title(
         if len(title) > 50:
             title = title[:50].rstrip() + "…"
         try:
-            await _check_session_access(request.session_id, user)
             await session_manager.update_session_title(request.session_id, title)
         except Exception:
             logger.debug(
@@ -448,7 +446,7 @@ async def create_session(
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    await _reset_usage_window_with_hf_baseline(session_id, hf_token)
+    await _reset_usage_window(session_id)
 
     return SessionResponse(
         session_id=session_id,
@@ -492,7 +490,7 @@ async def restore_session_summary(
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    await _reset_usage_window_with_hf_baseline(session_id, hf_token)
+    await _reset_usage_window(session_id)
 
     await _check_session_access(
         session_id,
@@ -537,8 +535,7 @@ async def activate_session(
 ) -> SessionInfo:
     """Mark a session as actively revisited and reset its usage meter window."""
     await _check_session_access(session_id, user, request)
-    hf_token = resolve_hf_request_token(request)
-    info = await _reset_usage_window_with_hf_baseline(session_id, hf_token)
+    info = await _reset_usage_window(session_id)
     if not info:
         raise HTTPException(status_code=404, detail="Session not found")
     return SessionInfo(**info)
