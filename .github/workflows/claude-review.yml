@@ -19,7 +19,7 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           # On pull_request_target, keep checkout on the trusted base-repo ref.
@@ -64,7 +64,7 @@ jobs:
       - name: Prepare Claude Code bin directory
         run: mkdir -p "$HOME/.local/bin"
 
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@v1.0.137
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Bypass the OIDC -> Claude GitHub App token exchange. That exchange
