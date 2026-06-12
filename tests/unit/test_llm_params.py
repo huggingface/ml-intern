@@ -137,6 +137,28 @@ def test_resolve_llamacpp_params_strips_provider_prefix(monkeypatch):
     assert params["api_base"] == "http://localhost:8080/v1"
 
 
+def test_resolve_custom_proxy_params_uses_explicit_endpoint(monkeypatch):
+    monkeypatch.setenv(
+        "CUSTOM_PROXY_BASE_URL",
+        "https://proxy.test/api/v1/",
+    )
+    monkeypatch.setenv("CUSTOM_PROXY_API_KEY", "proxy-secret")
+
+    params = _resolve_llm_params("custom-proxy/Azure AI/gpt-5.5")
+
+    assert params["model"] == "openai/Azure AI/gpt-5.5"
+    assert params["api_base"] == "https://proxy.test/api/v1"
+    assert params["api_key"] == "proxy-secret"
+
+
+def test_resolve_custom_proxy_requires_base_url(monkeypatch):
+    monkeypatch.delenv("CUSTOM_PROXY_BASE_URL", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="CUSTOM_PROXY_BASE_URL"):
+        _resolve_llm_params("custom-proxy/Azure AI/gpt-5.5")
+
+
 def test_local_params_reject_reasoning_effort_in_strict_mode():
     with pytest.raises(UnsupportedEffortError, match="reasoning_effort"):
         _resolve_llm_params("ollama/llama3.1", reasoning_effort="high", strict=True)

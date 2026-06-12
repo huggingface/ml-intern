@@ -11,6 +11,7 @@ def test_local_model_helper_accepts_supported_prefixes():
     assert is_local_model_id("vllm/meta-llama/Llama-3.1-8B-Instruct")
     assert is_local_model_id("lm_studio/google/gemma-3-4b")
     assert is_local_model_id("llamacpp/unsloth/Qwen3.5-2B")
+    assert is_local_model_id("custom-proxy/Azure AI/gpt-5.5")
 
 
 def test_model_switcher_accepts_supported_local_prefixes():
@@ -18,6 +19,7 @@ def test_model_switcher_accepts_supported_local_prefixes():
     assert model_switcher.is_valid_model_id("vllm/meta-llama/Llama-3.1-8B")
     assert model_switcher.is_valid_model_id("lm_studio/google/gemma-3-4b")
     assert model_switcher.is_valid_model_id("llamacpp/llama-3.1-8b")
+    assert model_switcher.is_valid_model_id("custom-proxy/Azure AI/gpt-5.5")
 
 
 def test_model_switcher_rejects_empty_or_whitespace_local_ids():
@@ -25,6 +27,7 @@ def test_model_switcher_rejects_empty_or_whitespace_local_ids():
     assert not model_switcher.is_valid_model_id("vllm/")
     assert not model_switcher.is_valid_model_id("lm_studio/")
     assert not model_switcher.is_valid_model_id("llamacpp/")
+    assert not model_switcher.is_valid_model_id("custom-proxy/")
     assert not model_switcher.is_valid_model_id("ollama/llama 3.1")
 
 

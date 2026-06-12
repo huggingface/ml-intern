@@ -85,10 +85,11 @@ Inside interactive mode, switch with `/model`:
 /model ollama/llama3.1:8b
 /model lm_studio/google/gemma-3-4b
 /model llamacpp/llama-3.1-8b-instruct
+/model custom-proxy/Azure AI/gpt-5.5
 ```
 
-Supported local prefixes are `ollama/`, `vllm/`, `lm_studio/`, and
-`llamacpp/`.
+Supported local/custom prefixes are `ollama/`, `vllm/`, `lm_studio/`,
+`llamacpp/`, and `custom-proxy/`.
 
 ```bash
 LOCAL_LLM_BASE_URL=http://localhost:8000
@@ -99,7 +100,17 @@ Set `LOCAL_LLM_BASE_URL` and optional `LOCAL_LLM_API_KEY` to use one shared
 local endpoint, or override a specific provider with its matching `*_BASE_URL`
 / `*_API_KEY` variable, such as `OLLAMA_BASE_URL` or `VLLM_API_KEY`.
 Provider-specific variables take precedence over the shared local variables.
-Base URLs may include or omit `/v1`.
+Base URLs may include or omit `/v1` for the built-in local providers.
+
+For a custom OpenAI-compatible proxy, set `CUSTOM_PROXY_BASE_URL` to the exact
+OpenAI-compatible base URL and optional `CUSTOM_PROXY_API_KEY`, then use
+`custom-proxy/<model>`:
+
+```bash
+CUSTOM_PROXY_BASE_URL="https://proxy.test/api/v1/"
+CUSTOM_PROXY_API_KEY=<optional-proxy-api-key>
+ml-intern --model "custom-proxy/Azure AI/gpt-5.5" "your prompt"
+```
 
 **CLI tool runtime:**
 

@@ -75,6 +75,11 @@ def _resolve_local_model_params(
         or os.environ.get(LOCAL_MODEL_BASE_URL_ENV)
         or provider["base_url_default"]
     )
+    if not raw_base:
+        raise ValueError(
+            f"Set {provider['base_url_env']} or {LOCAL_MODEL_BASE_URL_ENV} "
+            f"to use {model_name}"
+        )
     api_key = (
         os.environ.get(provider["api_key_env"])
         or os.environ.get(LOCAL_MODEL_API_KEY_ENV)
@@ -82,7 +87,9 @@ def _resolve_local_model_params(
     )
     return {
         "model": f"openai/{local_name}",
-        "api_base": _local_api_base(raw_base),
+        "api_base": _local_api_base(raw_base)
+        if provider.get("base_url_mode") != "exact"
+        else raw_base.strip().rstrip("/"),
         "api_key": api_key,
     }
 
@@ -96,11 +103,11 @@ def _resolve_llm_params(
     """
     Build LiteLLM kwargs for a given model id.
 
-    • ``ollama/<model>``, ``vllm/<model>``, ``lm_studio/<model>``, and
-      ``llamacpp/<model>`` — local OpenAI-compatible endpoints. The id prefix
-      selects a configurable localhost base URL, and the model suffix is sent
-      to LiteLLM as ``openai/<model>``. These endpoints don't receive
-      ``reasoning_effort``.
+    • ``ollama/<model>``, ``vllm/<model>``, ``lm_studio/<model>``,
+      ``llamacpp/<model>``, and ``custom-proxy/<model>`` — local or custom
+      OpenAI-compatible endpoints. The id prefix selects a configurable base
+      URL, and the model suffix is sent to LiteLLM as ``openai/<model>``.
+      These endpoints don't receive ``reasoning_effort``.
 
     • Anything else is treated as an HF Router id. We hit the auto-routing
       OpenAI-compatible endpoint at ``https://router.huggingface.co/v1``.
