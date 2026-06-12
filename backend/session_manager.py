@@ -689,12 +689,19 @@ class SessionManager:
             agent_session,
             use_cache=False,
         )
+        raw_observed_cost = payload.get("observed_cost_usd")
+        observed_cost = (
+            max(0.0, float(raw_observed_cost))
+            if isinstance(raw_observed_cost, (int, float))
+            and not isinstance(raw_observed_cost, bool)
+            else 0.0
+        )
         previous_ledger_spend = session_spend_usd(session)
         seed_session_spend(session, current_spend)
         ledger_spend = session_spend_usd(session)
         effective_spend = max(current_spend, ledger_spend)
         if effective_spend < cap_usd:
-            if ledger_spend != previous_ledger_spend:
+            if ledger_spend != previous_ledger_spend or observed_cost > 0:
                 self._touch(agent_session)
                 await session.send_event(
                     Event(
