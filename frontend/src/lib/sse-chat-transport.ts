@@ -117,6 +117,63 @@ function isRecoverableFetchError(error: unknown): boolean {
   );
 }
 
+function prependChunks(
+  chunks: UIMessageChunk[],
+  stream: ReadableStream<UIMessageChunk>,
+): ReadableStream<UIMessageChunk> {
+  let reader: ReadableStreamDefaultReader<UIMessageChunk> | null = null;
+  return new ReadableStream<UIMessageChunk>({
+    async start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(chunk);
+      }
+
+      reader = stream.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          controller.enqueue(value);
+        }
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      } finally {
+        reader.releaseLock();
+        reader = null;
+      }
+    },
+    cancel(reason) {
+      return reader ? reader.cancel(reason) : stream.cancel(reason);
+    },
+  });
+}
+
+function approvalContinuationPrelude(parts: UIMessage['parts']): UIMessageChunk[] {
+  const chunks: UIMessageChunk[] = [];
+  for (const part of parts) {
+    if (part.type !== 'dynamic-tool' || part.state !== 'approval-responded') {
+      continue;
+    }
+    chunks.push(
+      {
+        type: 'tool-input-start',
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        dynamic: true,
+      },
+      {
+        type: 'tool-input-available',
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        input: part.input,
+        dynamic: true,
+      },
+    );
+  }
+  return chunks;
+}
+
 /** Parse an SSE text stream into AgentEvent objects. */
 function createSSEParserStream(sessionId: string): TransformStream<string, AgentEvent> {
   let buffer = '';
@@ -512,6 +569,7 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
 
     let body: Record<string, unknown>;
     let submittedText: string | undefined;
+    let preludeChunks: UIMessageChunk[] = [];
     if (approvedParts.length > 0) {
       // Approval continuation — extract approval decisions
       const approvals = approvedParts.map((p) => {
@@ -526,6 +584,7 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
           namespace: null,
         };
       }).filter(Boolean);
+      preludeChunks = approvalContinuationPrelude(approvedParts);
       body = { approvals };
     } else {
       // Normal user message
@@ -579,10 +638,11 @@ export class SSEChatTransport implements ChatTransport<UIMessage> {
     }
 
     // Pipe: response bytes → text → SSE events → UIMessageChunks
-    return response.body
+    const stream = response.body
       .pipeThrough(new TextDecoderStream())
       .pipeThrough(createSSEParserStream(sessionId))
       .pipeThrough(createEventToChunkStream(this.sideChannel));
+    return preludeChunks.length > 0 ? prependChunks(preludeChunks, stream) : stream;
   }
 
   async reconnectToStream(): Promise<ReadableStream<UIMessageChunk> | null> {

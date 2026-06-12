@@ -59,7 +59,8 @@ function numberOrNull(value: unknown): number | null {
 function defaultExtendedYoloCap(args: Record<string, unknown> | undefined): number {
   const current = numberOrNull(args?.current_spend_usd) ?? 0;
   const cap = numberOrNull(args?.cap_usd) ?? current;
-  return Math.ceil(Math.max(cap, current) + 5);
+  const estimate = numberOrNull(args?.estimated_next_usd) ?? 0;
+  return Math.ceil(Math.max(cap, current + estimate, current) + 5);
 }
 
 /** Check if a tool part was cancelled (output-error with cancellation message). */
@@ -551,15 +552,41 @@ function InlineApproval({
   const hasEditedScript = !!getEditedScript(toolCallId);
   const isUsageThreshold = toolName === USAGE_THRESHOLD_TOOL_NAME;
   const isYoloBudget = toolName === YOLO_BUDGET_TOOL_NAME;
+  const activeSession = useSessionStore((state) =>
+    state.sessions.find((session) => session.id === state.activeSessionId),
+  );
+  const isYoloCapBlocked = Boolean(autoApproval && activeSession?.autoApprovalEnabled);
+  const yoloCapArgs = useMemo<Record<string, unknown> | undefined>(() => {
+    if (isYoloBudget) return args;
+    if (!isYoloCapBlocked) return undefined;
+    const currentSpend = activeSession?.autoApprovalEstimatedSpendUsd ?? 0;
+    const cap = activeSession?.autoApprovalCostCapUsd ?? currentSpend;
+    return {
+      current_spend_usd: currentSpend,
+      cap_usd: cap,
+      remaining_cap_usd:
+        autoApproval?.remainingCapUsd ?? activeSession?.autoApprovalRemainingUsd ?? null,
+      estimated_next_usd: autoApproval?.estimatedCostUsd ?? null,
+    };
+  }, [
+    activeSession?.autoApprovalCostCapUsd,
+    activeSession?.autoApprovalEstimatedSpendUsd,
+    activeSession?.autoApprovalRemainingUsd,
+    args,
+    autoApproval?.estimatedCostUsd,
+    autoApproval?.remainingCapUsd,
+    isYoloBudget,
+    isYoloCapBlocked,
+  ]);
   const [yoloCapInput, setYoloCapInput] = useState('');
   const [yoloCapBusy, setYoloCapBusy] = useState(false);
   const [yoloCapError, setYoloCapError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isYoloBudget) return;
-    setYoloCapInput(String(defaultExtendedYoloCap(args)));
+    if (!yoloCapArgs) return;
+    setYoloCapInput(String(defaultExtendedYoloCap(yoloCapArgs)));
     setYoloCapError(null);
-  }, [isYoloBudget, args?.cap_usd, args?.current_spend_usd]);
+  }, [yoloCapArgs]);
 
   const handleScriptClick = useCallback(() => {
     if (toolName === 'hf_jobs' && args?.script) {
@@ -580,9 +607,15 @@ function InlineApproval({
       return;
     }
     const nextCap = Number(yoloCapInput);
-    const currentSpend = numberOrNull(args?.current_spend_usd) ?? 0;
+    const currentSpend = numberOrNull(yoloCapArgs?.current_spend_usd) ?? 0;
+    const nextEstimate = numberOrNull(yoloCapArgs?.estimated_next_usd) ?? 0;
+    const requiredCap = currentSpend + nextEstimate;
     if (!Number.isFinite(nextCap) || nextCap < 0) {
       setYoloCapError('Enter a valid dollar amount.');
+      return;
+    }
+    if (nextEstimate > 0 && nextCap < requiredCap) {
+      setYoloCapError('Set the cap to cover the estimated next action.');
       return;
     }
     if (nextCap <= currentSpend) {
@@ -607,7 +640,7 @@ function InlineApproval({
     } finally {
       setYoloCapBusy(false);
     }
-  }, [activeSessionId, args?.current_spend_usd, onResolve, toolCallId, updateSessionYolo, yoloCapInput]);
+  }, [activeSessionId, onResolve, toolCallId, updateSessionYolo, yoloCapArgs, yoloCapInput]);
 
   if (isUsageThreshold) {
     return (
@@ -720,13 +753,13 @@ function InlineApproval({
             Current spend
           </Typography>
           <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
-            {formatApprovalUsd(args?.current_spend_usd)}
+            {formatApprovalUsd(yoloCapArgs?.current_spend_usd)}
           </Typography>
           <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
             Remaining cap
           </Typography>
           <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
-            {formatApprovalUsd(args?.remaining_cap_usd)}
+            {formatApprovalUsd(yoloCapArgs?.remaining_cap_usd)}
           </Typography>
         </Box>
         <TextField
@@ -811,6 +844,54 @@ function InlineApproval({
             YOLO paused: {autoApproval.reason || 'manual approval required.'}
           </Typography>
         </Alert>
+      )}
+
+      {isYoloCapBlocked && yoloCapArgs && (
+        <Box sx={{ mb: 1.5 }}>
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: '1fr auto',
+              gap: 0.75,
+              mb: 1.5,
+            }}
+          >
+            <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+              Current spend
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+              {formatApprovalUsd(yoloCapArgs.current_spend_usd)}
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'var(--muted-text)', fontSize: '0.72rem' }}>
+              Remaining cap
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'var(--text)', fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums' }}>
+              {formatApprovalUsd(yoloCapArgs.remaining_cap_usd)}
+            </Typography>
+          </Box>
+          <TextField
+            label="New YOLO cap (USD)"
+            type="number"
+            size="small"
+            value={yoloCapInput}
+            onChange={(event) => setYoloCapInput(event.target.value)}
+            inputProps={{ min: 0, step: 0.5 }}
+            error={Boolean(yoloCapError)}
+            helperText={yoloCapError || 'Set a cap high enough for this action.'}
+            sx={{
+              width: '100%',
+              '& .MuiInputBase-input': {
+                color: 'var(--text)',
+                fontSize: '0.78rem',
+                fontVariantNumeric: 'tabular-nums',
+              },
+              '& .MuiInputLabel-root, & .MuiFormHelperText-root': {
+                color: 'var(--muted-text)',
+                fontSize: '0.72rem',
+              },
+            }}
+          />
+        </Box>
       )}
 
       {toolName === 'sandbox_create' && args && (() => {
@@ -968,7 +1049,8 @@ function InlineApproval({
         </Button>
         <Button
           size="small"
-          onClick={() => onResolve(toolCallId, true)}
+          onClick={isYoloCapBlocked ? handleExtendYoloCap : () => onResolve(toolCallId, true)}
+          disabled={isYoloCapBlocked && yoloCapBusy}
           sx={{
             flex: 1,
             textTransform: 'none',
@@ -981,7 +1063,11 @@ function InlineApproval({
             '&:hover': { bgcolor: 'rgba(47,204,113,0.05)', borderColor: 'var(--accent-green)' },
           }}
         >
-          {hasEditedScript ? 'Approve (edited)' : 'Approve'}
+          {isYoloCapBlocked
+            ? 'Extend cap and approve'
+            : hasEditedScript
+              ? 'Approve (edited)'
+              : 'Approve'}
         </Button>
       </Box>
     </Box>
@@ -1021,22 +1107,31 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submittingRef = useRef(false);
 
-  // Track which toolCallIds we've already submitted so we can detect new approval rounds
-  const submittedIdsRef = useRef<Set<string>>(new Set());
+  const pendingSignatureRef = useRef('');
 
   // ── Panel lock state (for auto-follow vs user-selected) ───────────
   const [lockedToolId, setLockedToolId] = useState<string | null>(null);
 
-  // Reset submission state when new (unseen) pending tools arrive — e.g. second approval round
+  const pendingSignature = useMemo(
+    () => pendingTools.map(t => t.toolCallId).join('|'),
+    [pendingTools],
+  );
+
+  // Reset submission state when an approval-requested round appears. This also
+  // covers a repeated backend block for the same tool id after the user tried
+  // to approve without raising the YOLO cap.
   useEffect(() => {
-    if (!isSubmitting || pendingTools.length === 0) return;
-    const hasNewPending = pendingTools.some(t => !submittedIdsRef.current.has(t.toolCallId));
-    if (hasNewPending) {
+    if (!pendingSignature) {
+      pendingSignatureRef.current = '';
+      return;
+    }
+    if (pendingSignatureRef.current !== pendingSignature) {
+      pendingSignatureRef.current = pendingSignature;
       submittingRef.current = false;
       setIsSubmitting(false);
       setDecisions({});
     }
-  }, [pendingTools, isSubmitting]);
+  }, [pendingSignature]);
 
   // Clean up stale decisions for tools that are no longer pending
   useEffect(() => {
@@ -1121,8 +1216,6 @@ export default function ToolCallGroup({ tools, approveTools }: ToolCallGroupProp
 
       const ok = await approveTools(approvals);
       if (ok) {
-        // Track which tool IDs were submitted so we can detect new approval rounds
-        for (const a of approvals) submittedIdsRef.current.add(a.tool_call_id);
         lockPanel();
       } else {
         logger.error('Batch approval failed');
