@@ -176,12 +176,16 @@ function CreditsSection({ credits }: { credits: HfInferenceProvidersCredits | nu
 
 export default function UsageMeter() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
+  const activeSessionYoloSpend = useSessionStore((state) => {
+    const active = state.sessions.find((session) => session.id === state.activeSessionId);
+    return active?.autoApprovalEstimatedSpendUsd ?? null;
+  });
   const { usage, isLoading, error, fetchUsage } = useUsageStore();
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
     void fetchUsage(activeSessionId);
-  }, [activeSessionId, fetchUsage]);
+  }, [activeSessionId, activeSessionYoloSpend, fetchUsage]);
 
   const accountSessionInference =
     usage?.hf_account?.current_session?.inference_providers_usd;
