@@ -20,7 +20,7 @@ from agent.core.agent_loop import (
     _call_llm_streaming,
 )
 from agent.core.llm_params import _resolve_llm_params
-from agent.core.model_ids import DEFAULT_MODEL_ID
+from agent.core.model_ids import CLAUDE_OPUS_48_MODEL_ID
 
 
 if env_file := os.environ.get("ML_INTERN_LIVE_ENV_FILE"):
@@ -77,9 +77,9 @@ async def test_live_default_router_model_does_not_replay_reasoning_metadata():
     _skip_without_live_flag()
     _skip_without_hf_token()
 
-    session = _session(DEFAULT_MODEL_ID)
+    session = _session(CLAUDE_OPUS_48_MODEL_ID)
     llm_params = _resolve_llm_params(
-        DEFAULT_MODEL_ID,
+        CLAUDE_OPUS_48_MODEL_ID,
         os.environ["HF_TOKEN"],
         reasoning_effort="low",
     )

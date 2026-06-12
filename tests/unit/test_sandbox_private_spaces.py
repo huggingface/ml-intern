@@ -332,31 +332,6 @@ def test_sandbox_tool_forces_private_spaces(monkeypatch):
     assert "Visibility: private" in out
 
 
-def test_orphan_sweep_preserves_spaces_without_last_modified():
-    deleted: list[str] = []
-    logs: list[str] = []
-
-    class FakeApi:
-        def list_spaces(self, **kwargs):
-            assert kwargs["full"] is True
-            return [SimpleNamespace(id="alice/sandbox-12345678")]
-
-        def delete_repo(self, repo_id, repo_type):
-            deleted.append(repo_id)
-
-    count = sandbox_tool._cleanup_user_orphan_sandboxes(
-        FakeApi(),
-        "alice",
-        logs.append,
-    )
-
-    assert count == 0
-    assert deleted == []
-    assert logs == [
-        "orphan sweep: skipping alice/sandbox-12345678; missing lastModified"
-    ]
-
-
 def test_ensure_sandbox_overrides_private_argument(monkeypatch):
     captured_kwargs = {}
     persisted: list[dict] = []
@@ -398,7 +373,6 @@ def test_ensure_sandbox_overrides_private_argument(monkeypatch):
         pass
 
     monkeypatch.setattr(sandbox_tool, "HfApi", FakeApi)
-    monkeypatch.setattr(sandbox_tool, "_cleanup_user_orphan_sandboxes", lambda *args: 0)
     monkeypatch.setattr(Sandbox, "create", staticmethod(fake_create))
     monkeypatch.setattr(telemetry, "record_sandbox_create", fake_record_sandbox_create)
     monkeypatch.setattr("huggingface_hub.metadata_update", _fail_metadata_update)
@@ -524,7 +498,6 @@ def test_sandbox_creation_is_serialized_per_owner(monkeypatch):
         pass
 
     monkeypatch.setattr(sandbox_tool, "HfApi", FakeApi)
-    monkeypatch.setattr(sandbox_tool, "_cleanup_user_orphan_sandboxes", lambda *args: 0)
     monkeypatch.setattr(Sandbox, "create", staticmethod(fake_create))
     monkeypatch.setattr(telemetry, "record_sandbox_create", fake_record_sandbox_create)
     monkeypatch.setattr("huggingface_hub.metadata_update", _fail_metadata_update)

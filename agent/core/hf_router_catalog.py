@@ -7,7 +7,6 @@ pricing, context length, and tool-use support. We use it to:
   • Validate ``/model`` switches with live data instead of a hard-coded allowlist.
   • Show the user which providers serve a model, at what price, and whether they
     support tool calls.
-  • Derive a reasonable context-window limit for any routed model.
 
 The listing is cached in-memory for a few minutes so repeated lookups during a
 session are free. On fetch failure we return stale data if we have it, or an
@@ -42,7 +41,6 @@ class ProviderInfo:
     input_price: Optional[float]
     output_price: Optional[float]
     supports_tools: bool
-    supports_structured_output: bool
 
 
 @dataclass
@@ -53,11 +51,6 @@ class ModelInfo:
     @property
     def live_providers(self) -> list[ProviderInfo]:
         return [p for p in self.providers if p.status == "live"]
-
-    @property
-    def max_context_length(self) -> Optional[int]:
-        lengths = [p.context_length for p in self.live_providers if p.context_length]
-        return max(lengths) if lengths else None
 
     @property
     def any_supports_tools(self) -> bool:
@@ -97,9 +90,6 @@ def _parse_entry(entry: dict) -> ModelInfo:
                 input_price=pricing.get("input"),
                 output_price=pricing.get("output"),
                 supports_tools=bool(p.get("supports_tools", False)),
-                supports_structured_output=bool(
-                    p.get("supports_structured_output", False)
-                ),
             )
         )
     return ModelInfo(id=entry.get("id", ""), providers=providers)
@@ -117,10 +107,6 @@ def lookup(model_id: str) -> Optional[ModelInfo]:
         if entry.get("id") == bare:
             return _parse_entry(entry)
     return None
-
-
-def last_fetch_error() -> Optional[str]:
-    return _last_fetch_error
 
 
 def fuzzy_suggest(model_id: str, limit: int = 3) -> list[str]:

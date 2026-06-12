@@ -326,30 +326,6 @@ async def record_feedback(
         logger.debug("record_feedback failed (non-fatal): %s", e)
 
 
-async def record_jobs_access_blocked(
-    session: Any,
-    *,
-    tool_call_ids: list[str],
-    plan: str,
-    eligible_namespaces: list[str],
-) -> None:
-    from agent.core.session import Event
-
-    try:
-        await session.send_event(
-            Event(
-                event_type="jobs_access_blocked",
-                data={
-                    "tool_call_ids": tool_call_ids,
-                    "plan": plan,
-                    "eligible_namespaces": eligible_namespaces,
-                },
-            )
-        )
-    except Exception as e:
-        logger.debug("record_jobs_access_blocked failed (non-fatal): %s", e)
-
-
 async def record_pro_cta_click(
     session: Any,
     *,

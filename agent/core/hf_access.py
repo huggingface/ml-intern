@@ -21,7 +21,6 @@ HF_BILLING_URL = "https://huggingface.co/settings/billing"
 HF_PRO_SUBSCRIBE_URL = "https://huggingface.co/subscribe/pro"
 
 HfUserPlan = Literal["free", "pro"]
-HfUserPlanStatus = Literal["free", "pro", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -32,7 +31,6 @@ class JobsAccess:
     org_names: list[str]
     eligible_namespaces: list[str]
     default_namespace: str | None
-    access_known: bool = True
 
 
 class JobsAccessError(Exception):
@@ -124,17 +122,6 @@ async def fetch_whoami_v2(token: str, timeout: float = 5.0) -> dict[str, Any] | 
             return payload if isinstance(payload, dict) else None
         except (httpx.HTTPError, ValueError):
             return None
-
-
-async def fetch_hf_user_plan(
-    token: str | None,
-    timeout: float = 5.0,
-) -> HfUserPlanStatus:
-    """Return the token owner's HF plan, or ``unknown`` if lookup fails."""
-    if not token:
-        return "unknown"
-    whoami = await fetch_whoami_v2(token, timeout=timeout)
-    return normalize_hf_user_plan(whoami) or "unknown"
 
 
 async def get_jobs_access(token: str) -> JobsAccess | None:

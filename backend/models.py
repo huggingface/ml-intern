@@ -11,7 +11,6 @@ class OpType(str, Enum):
 
     USER_INPUT = "user_input"
     EXEC_APPROVAL = "exec_approval"
-    INTERRUPT = "interrupt"
     UNDO = "undo"
     COMPACT = "compact"
     SHUTDOWN = "shutdown"

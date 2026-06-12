@@ -324,17 +324,6 @@ def _base_needs_approval(
     return False
 
 
-def _needs_approval(
-    tool_name: str, tool_args: dict, config: Config | None = None
-) -> bool:
-    """Legacy sync approval predicate used by tests and CLI display helpers."""
-    if _is_scheduled_hf_job_run(tool_name, tool_args):
-        return True
-    if config and config.yolo_mode:
-        return False
-    return _base_needs_approval(tool_name, tool_args, config)
-
-
 def _session_auto_approval_enabled(session: Session | None) -> bool:
     return bool(session and getattr(session, "auto_approval_enabled", False))
 

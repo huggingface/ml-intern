@@ -120,19 +120,6 @@ async def _s2_get_json(
     return None
 
 
-async def _s2_get_paper(
-    client: httpx.AsyncClient,
-    arxiv_id: str,
-    fields: str,
-) -> dict | None:
-    """Fetch a single paper from S2 by arxiv ID. Returns None on failure."""
-    return await _s2_get_json(
-        client,
-        f"/graph/v1/paper/{_s2_paper_id(arxiv_id)}",
-        {"fields": fields},
-    )
-
-
 # ---------------------------------------------------------------------------
 # HTML paper parsing
 # ---------------------------------------------------------------------------

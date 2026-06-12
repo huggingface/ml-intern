@@ -518,10 +518,3 @@ def get_session_store() -> NoopSessionStore | MongoSessionStore:
         db_name = os.environ.get("MONGODB_DB", "ml-intern")
         _store = MongoSessionStore(uri, db_name) if uri else NoopSessionStore()
     return _store
-
-
-def _reset_store_for_tests(
-    store: NoopSessionStore | MongoSessionStore | None = None,
-) -> None:
-    global _store
-    _store = store

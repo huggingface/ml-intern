@@ -1884,27 +1884,6 @@ class SessionManager:
             self._touch(agent_session)
         return self._auto_approval_summary(session)
 
-    def get_session_owner(self, session_id: str) -> str | None:
-        """Get the user_id that owns a session, or None if session doesn't exist."""
-        agent_session = self.sessions.get(session_id)
-        if not agent_session:
-            return None
-        return agent_session.user_id
-
-    def verify_session_access(self, session_id: str, user_id: str) -> bool:
-        """Check if a user has access to a session.
-
-        Returns True if:
-        - The session exists AND the user owns it
-        - The user_id is "dev" (dev mode bypass)
-        """
-        owner = self.get_session_owner(session_id)
-        if owner is None:
-            return False
-        if user_id == "dev" or owner == "dev":
-            return True
-        return owner == user_id
-
     def get_session_info(self, session_id: str) -> dict[str, Any] | None:
         """Get information about a session."""
         agent_session = self.sessions.get(session_id)

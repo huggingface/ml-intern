@@ -74,9 +74,6 @@ async def test_scheduled_hf_jobs_always_require_manual_approval(operation):
     assert decision.requires_approval is True
     assert decision.auto_approval_blocked is True
     assert "Scheduled HF jobs" in decision.block_reason
-    assert agent_loop._needs_approval(
-        "hf_jobs", {"operation": operation}, session.config
-    )
 
 
 @pytest.mark.asyncio

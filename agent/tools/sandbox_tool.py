@@ -18,7 +18,7 @@ import threading
 import uuid
 import weakref
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from huggingface_hub import HfApi, SpaceHardware
@@ -41,11 +41,6 @@ DEFAULT_CPU_SANDBOX_HARDWARE = "cpu-basic"
 # Used to identify orphan sandboxes from prior sessions safely (won't match
 # user-renamed lookalikes).
 SANDBOX_SPACE_NAME_RE = re.compile(r"^sandbox-[a-f0-9]{8}$")
-
-# How stale a sandbox must be before we treat it as definitely orphan.
-# Anything more recent could be tied to a still-live session in another tab,
-# so we leave it alone.
-_ORPHAN_STALE_AFTER = timedelta(hours=1)
 
 # HF Space duplication/build APIs can behave poorly when multiple private
 # sandboxes are created concurrently for the same namespace. Keep session
@@ -342,64 +337,6 @@ async def _clear_persisted_sandbox(session: Any) -> None:
 
 
 # ── Tool name mapping (short agent names → Sandbox client names) ──────
-
-
-def _cleanup_user_orphan_sandboxes(
-    api: HfApi,
-    owner: str,
-    log: Any,
-) -> int:
-    """Delete stale ``sandbox-<8hex>`` Spaces in ``owner``'s account.
-
-    "Stale" = not modified in the last hour. The naming pattern + staleness
-    filter together make this safe:
-
-    * Naming: only matches ``sandbox-<exactly 8 lowercase hex>``, the
-      pattern Sandbox.create produces. Won't touch user-renamed Spaces.
-    * Staleness: anything modified in the last hour might still be tied
-      to a live session in another tab/replica, so we leave it alone.
-
-    Runs blocking — call via ``asyncio.to_thread``. Best-effort: failures
-    are logged but never raised, so a flaky HF API never blocks creation.
-    """
-    cutoff = datetime.now(timezone.utc) - _ORPHAN_STALE_AFTER
-    deleted = 0
-    try:
-        spaces = list(api.list_spaces(author=owner, limit=200, full=True))
-    except Exception as e:
-        log(f"orphan sweep: list_spaces failed: {e}")
-        return 0
-
-    for space in spaces:
-        space_name = space.id.rsplit("/", 1)[-1]
-        if not SANDBOX_SPACE_NAME_RE.match(space_name):
-            continue
-
-        last_mod = getattr(space, "lastModified", None) or getattr(
-            space, "last_modified", None
-        )
-        if isinstance(last_mod, str):
-            try:
-                last_mod = datetime.fromisoformat(last_mod.replace("Z", "+00:00"))
-            except ValueError:
-                last_mod = None
-        if last_mod is None:
-            log(f"orphan sweep: skipping {space.id}; missing lastModified")
-            continue
-        if last_mod and last_mod > cutoff:
-            # Recent — could be a concurrent live session. Skip.
-            continue
-
-        try:
-            api.delete_repo(repo_id=space.id, repo_type="space")
-            deleted += 1
-            log(f"orphan sweep: deleted {space.id}")
-        except Exception as e:
-            log(f"orphan sweep: failed to delete {space.id}: {e}")
-
-    if deleted:
-        log(f"orphan sweep: cleaned up {deleted} stale sandbox(es) before create")
-    return deleted
 
 
 async def _ensure_sandbox(

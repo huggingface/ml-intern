@@ -69,7 +69,6 @@ from huggingface_hub import HfApi
 from huggingface_hub.utils import HfHubHTTPError
 
 SANDBOX_NAME_RE = re.compile(r"^[^/]+/sandbox-[a-f0-9]{8}$")
-TEMPLATE_REPO = "burtenshaw/sandbox"
 
 
 def log(record: dict) -> None:

@@ -80,7 +80,6 @@ def _get_max_tokens_safe(model_name: str) -> int:
 class OpType(Enum):
     USER_INPUT = "user_input"
     EXEC_APPROVAL = "exec_approval"
-    INTERRUPT = "interrupt"
     UNDO = "undo"
     COMPACT = "compact"
     NEW = "new"
@@ -613,26 +612,6 @@ class Session:
         except Exception as e:
             logger.error(f"Failed to save session locally: {e}")
             return None
-
-    def update_local_save_status(
-        self, filepath: str, upload_status: str, dataset_url: Optional[str] = None
-    ) -> bool:
-        """Update the upload status of an existing local save file"""
-        try:
-            with open(filepath, "r") as f:
-                data = json.load(f)
-
-            data["upload_status"] = upload_status
-            data["upload_url"] = dataset_url
-            data["last_save_time"] = datetime.now().isoformat()
-
-            with open(filepath, "w") as f:
-                json.dump(data, f, indent=2)
-
-            return True
-        except Exception as e:
-            logger.error(f"Failed to update local save status: {e}")
-            return False
 
     def _personal_trace_repo_id(self) -> Optional[str]:
         """Resolve the per-user trace repo id from config + HF username.

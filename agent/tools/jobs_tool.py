@@ -10,7 +10,7 @@ import http.client
 import logging
 import re
 import shlex
-from typing import Any, Awaitable, Callable, Dict, Literal, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 import httpx
 from huggingface_hub import HfApi
@@ -63,24 +63,6 @@ GPU_FLAVORS_DESC = (
     "l4x1(8vCPU/30GB/GPU 24GB), l4x4(48vCPU/186GB/GPU 96GB), "
     "l40sx1(8vCPU/62GB/GPU 48GB), l40sx4(48vCPU/382GB/GPU 192GB), l40sx8(192vCPU/1534GB/GPU 384GB)"
 )
-SPECIALIZED_FLAVORS = ["inf2x6"]
-ALL_FLAVORS = CPU_FLAVORS + GPU_FLAVORS + SPECIALIZED_FLAVORS
-
-# Operation names
-OperationType = Literal[
-    "run",
-    "ps",
-    "logs",
-    "inspect",
-    "cancel",
-    "scheduled run",
-    "scheduled ps",
-    "scheduled inspect",
-    "scheduled delete",
-    "scheduled suspend",
-    "scheduled resume",
-]
-
 # Constants
 UV_DEFAULT_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm"
 
