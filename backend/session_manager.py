@@ -1864,6 +1864,26 @@ class SessionManager:
         await self.persist_session_snapshot(agent_session)
         return self._auto_approval_summary(session)
 
+    async def reconcile_session_auto_approval_from_usage(
+        self,
+        session_id: str,
+        usage_response: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        agent_session = self.sessions.get(session_id)
+        if not agent_session or not agent_session.is_active:
+            return None
+
+        session = agent_session.session
+        if not bool(getattr(session, "auto_approval_enabled", False)):
+            return self._auto_approval_summary(session)
+
+        current_spend, _ = self._usage_spend_from_response(usage_response)
+        previous_spend = session_spend_usd(session)
+        seed_session_spend(session, current_spend)
+        if session_spend_usd(session) != previous_spend:
+            self._touch(agent_session)
+        return self._auto_approval_summary(session)
+
     def get_session_owner(self, session_id: str) -> str | None:
         """Get the user_id that owns a session, or None if session doesn't exist."""
         agent_session = self.sessions.get(session_id)

@@ -722,7 +722,7 @@ async def get_usage(
             request,
             preload_sandbox=False,
         )
-    return await build_usage_response(
+    usage = await build_usage_response(
         session_manager,
         user_id=user["user_id"],
         hf_token=(
@@ -733,6 +733,16 @@ async def get_usage(
         session_id=session_id,
         timezone_name=tz,
     )
+    if session_id:
+        auto_approval = (
+            await session_manager.reconcile_session_auto_approval_from_usage(
+                session_id,
+                usage,
+            )
+        )
+        if auto_approval is not None:
+            usage["auto_approval"] = auto_approval
+    return usage
 
 
 @router.get("/sessions", response_model=list[SessionInfo])

@@ -584,6 +584,39 @@ async def test_yolo_budget_checker_emits_session_update_for_observed_spend(
 
 
 @pytest.mark.asyncio
+async def test_usage_fetch_reconciles_yolo_ledger_from_hf_billing():
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.auto_approval_enabled = True
+    agent_session.session.auto_approval_cost_cap_usd = 1.0
+    agent_session.session.auto_approval_estimated_spend_usd = 0.03
+    manager.sessions["s1"] = agent_session
+
+    summary = await manager.reconcile_session_auto_approval_from_usage(
+        "s1",
+        {
+            "session": {
+                "hf_jobs_estimated_usd": 0.0,
+                "sandbox_estimated_usd": 0.0,
+            },
+            "hf_account": {
+                "current_session": {
+                    "inference_providers_usd": 0.16,
+                }
+            },
+        },
+    )
+
+    assert summary == {
+        "enabled": True,
+        "cost_cap_usd": 1.0,
+        "estimated_spend_usd": 0.16,
+        "remaining_usd": 0.84,
+    }
+    assert agent_session.session.auto_approval_estimated_spend_usd == 0.16
+
+
+@pytest.mark.asyncio
 async def test_yolo_budget_checker_uses_local_ledger_when_billing_lags(monkeypatch):
     manager = _manager_with_store(NoopSessionStore())
     agent_session = _runtime_agent_session("s1")

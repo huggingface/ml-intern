@@ -187,6 +187,7 @@ class UsageResponse(BaseModel):
     timezone: str
     session: UsageBucket | None = None
     hf_account: HfAccountUsage | None = None
+    auto_approval: SessionAutoApprovalInfo | None = None
     links: dict[str, str] = Field(default_factory=dict)
 
 
