@@ -161,6 +161,8 @@ class Session:
         self.usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
         self.usage_threshold_checker: Any | None = None
         self.yolo_budget_checker: Any | None = None
+        self.usage_hf_billing_snapshot: dict[str, Any] | None = None
+        self.usage_metrics: dict[str, Any] | None = None
 
         # Session trajectory logging
         self.logged_events: list[dict] = []
@@ -466,6 +468,8 @@ class Session:
         self.pending_approval = None
         self.auto_approval_estimated_spend_usd = 0.0
         self._yolo_budget_reservations = {}
+        self.usage_hf_billing_snapshot = None
+        self.usage_metrics = None
         self.reset_cancel()
 
         # Previous-session metadata is intentionally included for event
@@ -534,6 +538,18 @@ class Session:
             for e in self.logged_events
             if e.get("event_type") == "llm_call"
         )
+        try:
+            from agent.core.usage_metrics import summarize_usage_events
+
+            usage_metrics = summarize_usage_events(
+                self.logged_events,
+                session_id=self.session_id,
+                hf_billing_snapshot=self.usage_hf_billing_snapshot,
+            )
+            self.usage_metrics = usage_metrics
+        except Exception as e:
+            logger.debug("Usage metrics summary failed for %s: %s", self.session_id, e)
+            usage_metrics = self.usage_metrics or {}
         return {
             "session_id": self.session_id,
             "user_id": self.user_id,
@@ -542,6 +558,7 @@ class Session:
             "session_end_time": datetime.now().isoformat(),
             "model_name": self.config.model_name,
             "total_cost_usd": total_cost_usd,
+            "usage_metrics": usage_metrics,
             "messages": [msg.model_dump() for msg in self.context_manager.items],
             "events": self.logged_events,
             "tools": tools,

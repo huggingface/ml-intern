@@ -70,7 +70,7 @@ from usage import build_usage_response
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["agent"])
-_background_teardown_tasks: set[asyncio.Task] = set()
+_background_route_tasks: set[asyncio.Task] = set()
 
 DEFAULT_OPUS_MODEL_ID = CLAUDE_OPUS_48_MODEL_ID
 DEFAULT_GPT_MODEL_ID = GPT_55_MODEL_ID
@@ -83,6 +83,38 @@ async def _reset_usage_window(session_id: str) -> dict[str, Any] | None:
         session_id,
         started_at=datetime.utcnow(),
     )
+
+
+async def _refresh_usage_and_upload(
+    agent_session: AgentSession,
+    *,
+    error_code: str,
+) -> None:
+    session = agent_session.session
+    try:
+        await session_manager.refresh_session_usage_metrics(
+            agent_session,
+            error_code=error_code,
+        )
+        session.save_and_upload_detached(session.config.session_dataset_repo)
+    except Exception as e:
+        logger.warning(
+            "Background usage refresh/upload failed for %s: %s",
+            agent_session.session_id,
+            e,
+        )
+
+
+def _schedule_usage_refresh_and_upload(
+    agent_session: AgentSession,
+    *,
+    error_code: str,
+) -> None:
+    task = asyncio.create_task(
+        _refresh_usage_and_upload(agent_session, error_code=error_code)
+    )
+    _background_route_tasks.add(task)
+    task.add_done_callback(_background_route_tasks.discard)
 
 
 def _available_models() -> list[dict[str, Any]]:
@@ -759,8 +791,8 @@ async def teardown_session_sandbox(
     """Best-effort sandbox teardown that preserves durable chat history."""
     await _check_session_access(session_id, user, preload_sandbox=False)
     task = asyncio.create_task(session_manager.teardown_sandbox(session_id))
-    _background_teardown_tasks.add(task)
-    task.add_done_callback(_background_teardown_tasks.discard)
+    _background_route_tasks.add(task)
+    task.add_done_callback(_background_route_tasks.discard)
     return {"status": "teardown_requested", "session_id": session_id}
 
 
@@ -910,8 +942,9 @@ async def record_pro_click(
         target=str(body.get("target") or "pro_pricing"),
     )
     if agent_session.session.config.save_sessions:
-        agent_session.session.save_and_upload_detached(
-            agent_session.session.config.session_dataset_repo
+        _schedule_usage_refresh_and_upload(
+            agent_session,
+            error_code="pro_click_billing_snapshot_error",
         )
     return {"status": "ok"}
 
@@ -1154,7 +1187,8 @@ async def submit_feedback(
     # Fire-and-forget save so feedback reaches the dataset even if the user
     # closes the tab right after clicking.
     if agent_session.session.config.save_sessions:
-        agent_session.session.save_and_upload_detached(
-            agent_session.session.config.session_dataset_repo
+        _schedule_usage_refresh_and_upload(
+            agent_session,
+            error_code="feedback_billing_snapshot_error",
         )
     return {"status": "ok"}
