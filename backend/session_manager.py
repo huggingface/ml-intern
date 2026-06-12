@@ -568,6 +568,57 @@ class SessionManager:
         return spend, billing_source
 
     @staticmethod
+    def _fallback_hf_billing_snapshot(error: str) -> dict[str, Any]:
+        return {
+            "billing_scope": "account_window_delta",
+            "hf_billing": {
+                "source": "hf_billing_usage_v2",
+                "available": False,
+                "error": error,
+                "current_session": None,
+            },
+        }
+
+    async def refresh_session_usage_metrics(
+        self,
+        agent_session: AgentSession,
+        *,
+        error_code: str = "billing_snapshot_error",
+    ) -> dict[str, Any]:
+        """Refresh the dataset usage snapshot stored on the runtime session."""
+        from agent.core.usage_metrics import (
+            normalize_hf_billing_snapshot,
+            summarize_usage_events,
+        )
+        from usage import build_hf_billing_snapshot
+
+        session = agent_session.session
+        try:
+            hf_billing_snapshot = await build_hf_billing_snapshot(
+                self,
+                hf_token=agent_session.hf_token or getattr(session, "hf_token", None),
+                session_id=agent_session.session_id,
+                timezone_name="UTC",
+            )
+        except Exception as e:
+            logger.debug(
+                "HF billing snapshot refresh failed for %s: %s",
+                agent_session.session_id,
+                e,
+            )
+            hf_billing_snapshot = self._fallback_hf_billing_snapshot(error_code)
+
+        hf_billing_snapshot = normalize_hf_billing_snapshot(hf_billing_snapshot)
+        session.usage_hf_billing_snapshot = hf_billing_snapshot
+        metrics = summarize_usage_events(
+            getattr(session, "logged_events", []) or [],
+            session_id=agent_session.session_id,
+            hf_billing_snapshot=hf_billing_snapshot,
+        )
+        session.usage_metrics = metrics
+        return metrics
+
+    @staticmethod
     def _runtime_session_usage_spend(agent_session: AgentSession) -> float:
         from usage import aggregate_usage_events, event_created_at
 
@@ -1634,6 +1685,8 @@ class SessionManager:
                             # than the idle window would otherwise be reaped the
                             # instant it completes.
                             self._touch(agent_session)
+                            if session.config.save_sessions:
+                                await self.refresh_session_usage_metrics(agent_session)
                             await self.persist_session_snapshot(agent_session)
                         if not should_continue:
                             break
@@ -1662,6 +1715,10 @@ class SessionManager:
             # Idempotent via session_id key; detached subprocess.
             if session.config.save_sessions:
                 try:
+                    await self.refresh_session_usage_metrics(
+                        agent_session,
+                        error_code="final_billing_snapshot_error",
+                    )
                     session.save_and_upload_detached(
                         session.config.session_dataset_repo
                     )

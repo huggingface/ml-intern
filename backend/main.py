@@ -56,6 +56,10 @@ async def lifespan(app: FastAPI):
             sess = agent_session.session
             if sess.config.save_sessions:
                 try:
+                    await session_manager.refresh_session_usage_metrics(
+                        agent_session,
+                        error_code="lifespan_billing_snapshot_error",
+                    )
                     sess.save_and_upload_detached(sess.config.session_dataset_repo)
                     logger.info("Flushed session %s on shutdown", sid)
                 except Exception as e:

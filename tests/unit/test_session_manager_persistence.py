@@ -325,6 +325,144 @@ def test_usage_spend_falls_back_when_hf_total_is_unavailable():
 
 
 @pytest.mark.asyncio
+async def test_refresh_usage_metrics_uses_hf_billing_plus_sandbox(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token="owner-token")
+    agent_session.session.logged_events = [
+        {
+            "timestamp": "2026-06-01T12:00:00+00:00",
+            "event_type": "llm_call",
+            "data": {"cost_usd": 0.5, "total_tokens": 42},
+        },
+        {
+            "timestamp": "2026-06-01T12:05:00+00:00",
+            "event_type": "hf_job_complete",
+            "data": {"estimated_cost_usd": 1.0},
+        },
+        {
+            "timestamp": "2026-06-01T12:10:00+00:00",
+            "event_type": "sandbox_create",
+            "data": {"sandbox_id": "owner/sandbox-1", "hardware": "t4-small"},
+        },
+        {
+            "timestamp": "2026-06-01T12:40:00+00:00",
+            "event_type": "sandbox_destroy",
+            "data": {"sandbox_id": "owner/sandbox-1", "lifetime_s": 1800},
+        },
+    ]
+
+    async def fake_billing_snapshot(_manager, *, hf_token, session_id, timezone_name):
+        assert hf_token == "owner-token"
+        assert session_id == "s1"
+        assert timezone_name == "UTC"
+        return {
+            "billing_scope": "account_window_delta",
+            "hf_billing": {
+                "source": "hf_billing_usage_v2",
+                "available": True,
+                "current_session": {
+                    "window_start": "2026-06-01T12:00:00Z",
+                    "window_end": "2026-06-01T12:40:00Z",
+                    "timezone": "UTC",
+                    "total_usd": 4.0,
+                    "inference_providers_usd": 3.0,
+                    "hf_jobs_usd": 1.0,
+                    "inference_provider_requests": 6,
+                    "hf_jobs_minutes": 2.0,
+                    "access_token": "must-not-persist",
+                },
+            },
+            "month": {"total_usd": 999},
+            "inference_providers_credits": {"limit_usd": 999},
+        }
+
+    monkeypatch.setattr("usage.build_hf_billing_snapshot", fake_billing_snapshot)
+
+    metrics = await manager.refresh_session_usage_metrics(agent_session)
+
+    assert metrics["total_usd"] == 4.3
+    assert metrics["total_usd_source"] == "hf_billing_plus_sandbox_estimate"
+    assert metrics["app_total_usd"] == 1.8
+    assert metrics["hf_billing_total_usd"] == 4.0
+    assert agent_session.session.usage_metrics == metrics
+    assert agent_session.session.usage_hf_billing_snapshot == {
+        "billing_scope": "account_window_delta",
+        "hf_billing": {
+            "source": "hf_billing_usage_v2",
+            "available": True,
+            "error": None,
+            "current_session": {
+                "window_start": "2026-06-01T12:00:00Z",
+                "window_end": "2026-06-01T12:40:00Z",
+                "timezone": "UTC",
+                "total_usd": 4.0,
+                "inference_providers_usd": 3.0,
+                "hf_jobs_usd": 1.0,
+                "inference_provider_requests": 6,
+                "hf_jobs_minutes": 2.0,
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_usage_metrics_missing_token_falls_back_to_app_telemetry():
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token=None)
+    agent_session.session.hf_token = None
+    agent_session.session.logged_events = [
+        {
+            "timestamp": "2026-06-01T12:00:00+00:00",
+            "event_type": "llm_call",
+            "data": {"cost_usd": 2.0, "total_tokens": 10},
+        }
+    ]
+
+    metrics = await manager.refresh_session_usage_metrics(agent_session)
+
+    assert metrics["total_usd"] == 2.0
+    assert metrics["total_usd_source"] == "app_telemetry_fallback"
+    assert metrics["hf_billing"] == {
+        "source": "hf_billing_usage_v2",
+        "available": False,
+        "error": "missing_hf_token",
+        "current_session": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_usage_metrics_failure_records_error_code(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token="owner-token")
+    agent_session.session.logged_events = [
+        {
+            "timestamp": "2026-06-01T12:00:00+00:00",
+            "event_type": "llm_call",
+            "data": {"cost_usd": 2.0, "total_tokens": 10},
+        }
+    ]
+
+    async def fail_billing_snapshot(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("usage.build_hf_billing_snapshot", fail_billing_snapshot)
+
+    metrics = await manager.refresh_session_usage_metrics(
+        agent_session,
+        error_code="unit_billing_error",
+    )
+
+    assert metrics["total_usd"] == 2.0
+    assert metrics["total_usd_source"] == "app_telemetry_fallback"
+    assert metrics["hf_billing"] == {
+        "source": "hf_billing_usage_v2",
+        "available": False,
+        "error": "unit_billing_error",
+        "current_session": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_usage_threshold_checker_creates_synthetic_pending_approval(monkeypatch):
     manager = _manager_with_store(NoopSessionStore())
     agent_session = _runtime_agent_session("s1")

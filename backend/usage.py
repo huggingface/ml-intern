@@ -628,6 +628,69 @@ async def _build_hf_account_usage(
     return account_usage
 
 
+async def build_hf_billing_snapshot(
+    manager: Any,
+    *,
+    hf_token: str | None,
+    session_id: str | None,
+    timezone_name: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return a dataset-safe HF billing rollup for the session window.
+
+    This intentionally omits monthly account totals and credit-limit details.
+    The snapshot is an account-window delta, not per-call attribution.
+    """
+    windows = resolve_usage_windows(timezone_name, now=now)
+    timezone = str(windows["timezone"])
+    now_utc = windows["now_utc"]
+    snapshot: dict[str, Any] = {
+        "billing_scope": "account_window_delta",
+        "hf_billing": {
+            "source": "hf_billing_usage_v2",
+            "available": False,
+            "error": None,
+            "current_session": None,
+        },
+    }
+    hf_billing = snapshot["hf_billing"]
+
+    if not hf_token:
+        hf_billing["error"] = "missing_hf_token"
+        return snapshot
+    if not session_id:
+        hf_billing["error"] = "missing_session_id"
+        return snapshot
+
+    session_start = _session_usage_window_started_at(manager, session_id)
+    if session_start is None:
+        session_start, _ = await _load_persisted_session_usage_window_metadata(
+            manager,
+            session_id,
+        )
+    if session_start is None:
+        hf_billing["error"] = "missing_session_window"
+        return snapshot
+
+    payload = await _fetch_hf_billing_usage_v2(
+        hf_token,
+        start=session_start,
+        end=now_utc,
+    )
+    if not isinstance(payload, dict):
+        hf_billing["error"] = "billing_usage_unavailable"
+        return snapshot
+
+    hf_billing["available"] = True
+    hf_billing["current_session"] = _account_bucket_from_billing_usage(
+        payload,
+        window_start=session_start,
+        window_end=now_utc,
+        timezone=timezone,
+    )
+    return snapshot
+
+
 def _event_in_window(
     event: dict[str, Any],
     *,
