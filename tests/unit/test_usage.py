@@ -17,6 +17,7 @@ from usage import (  # noqa: E402
     resolve_usage_windows,
 )
 from agent.core import session_persistence  # noqa: E402
+from agent.core.usage_metrics import summarize_usage_events  # noqa: E402
 
 
 def _event(event_type, data=None, created_at="2026-06-01T12:00:00+00:00"):
@@ -171,11 +172,224 @@ def test_aggregate_usage_events_falls_back_to_sandbox_timestamps():
 
 
 def test_usage_event_type_allowlists_include_sandbox_lifecycle():
-    assert set(USAGE_EVENT_TYPES) >= {"sandbox_create", "sandbox_destroy"}
-    assert set(session_persistence.USAGE_EVENT_TYPES) >= {
+    assert set(USAGE_EVENT_TYPES) >= {
+        "hf_job_submit",
         "sandbox_create",
         "sandbox_destroy",
     }
+    assert set(session_persistence.USAGE_EVENT_TYPES) >= {
+        "hf_job_submit",
+        "sandbox_create",
+        "sandbox_destroy",
+    }
+
+
+def test_summarize_usage_events_aggregates_llm_turns_and_quality():
+    usage = summarize_usage_events(
+        [
+            _event(
+                "llm_call",
+                {
+                    "kind": "main",
+                    "model": "moonshotai/Kimi-K2.6",
+                    "cost_usd": 0.125,
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "cache_read_tokens": 25,
+                    "cache_creation_tokens": 5,
+                    "total_tokens": 180,
+                },
+            ),
+            _event(
+                "llm_call",
+                {
+                    "kind": "research",
+                    "model": "anthropic/claude-opus-4.8",
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                },
+            ),
+            {
+                "event_type": "llm_call",
+                "data": {
+                    "kind": "main",
+                    "model": "moonshotai/Kimi-K2.6",
+                    "cost_usd": 0,
+                },
+            },
+            _event("turn_complete"),
+            _event("assistant_stream_end"),
+        ],
+        session_id="s1",
+    )
+
+    assert usage["version"] == 1
+    assert usage["session_id"] == "s1"
+    assert usage["llm"]["calls"] == 3
+    assert usage["llm"]["calls_by_kind"] == {"main": 2, "research": 1}
+    assert usage["llm"]["calls_by_model"] == {
+        "anthropic/claude-opus-4.8": 1,
+        "moonshotai/Kimi-K2.6": 2,
+    }
+    assert usage["llm"]["prompt_tokens"] == 110
+    assert usage["llm"]["completion_tokens"] == 55
+    assert usage["llm"]["cache_read_tokens"] == 25
+    assert usage["llm"]["cache_creation_tokens"] == 5
+    assert usage["llm"]["total_tokens"] == 195
+    assert usage["turns"] == {
+        "turn_complete_count": 1,
+        "assistant_stream_end_count": 1,
+    }
+    assert usage["data_quality"]["events_without_timestamp"] == 1
+    assert usage["data_quality"]["llm_calls_with_cost_field"] == 2
+    assert usage["data_quality"]["llm_calls_with_nonzero_cost"] == 1
+
+
+def test_summarize_usage_events_aggregates_jobs_and_sandbox_lifecycle():
+    usage = summarize_usage_events(
+        [
+            _event("hf_job_submit", {"flavor": "t4-small"}),
+            _event(
+                "hf_job_complete",
+                {
+                    "flavor": "t4-small",
+                    "final_status": "success",
+                    "estimated_cost_usd": 0.4,
+                    "billable_seconds_estimate": 120,
+                },
+            ),
+            _event(
+                "hf_job_complete",
+                {
+                    "flavor": "cpu-basic",
+                    "final_status": "failed",
+                    "wall_time_s": 30,
+                },
+            ),
+            _event(
+                "sandbox_create",
+                {
+                    "sandbox_id": "alice/sandbox-paid",
+                    "hardware": "t4-small",
+                },
+                created_at="2026-06-01T12:00:00+00:00",
+            ),
+            _event(
+                "sandbox_destroy",
+                {
+                    "sandbox_id": "alice/sandbox-paid",
+                    "lifetime_s": 1800,
+                },
+                created_at="2026-06-01T12:30:00+00:00",
+            ),
+            _event(
+                "sandbox_create",
+                {
+                    "sandbox_id": "alice/sandbox-active",
+                    "hardware": "a100-large",
+                },
+            ),
+            _event("sandbox_destroy", {"sandbox_id": "alice/sandbox-missing"}),
+        ]
+    )
+
+    assert usage["hf_jobs"]["submits"] == 1
+    assert usage["hf_jobs"]["status_snapshots"] == 2
+    assert usage["hf_jobs"]["statuses"] == {"failed": 1, "success": 1}
+    assert usage["hf_jobs"]["flavors"] == {"t4-small": 1}
+    assert usage["hf_jobs"]["submit_flavors"] == {"t4-small": 1}
+    assert usage["hf_jobs"]["status_snapshot_flavors"] == {
+        "cpu-basic": 1,
+        "t4-small": 1,
+    }
+    assert usage["hf_jobs"]["estimated_usd"] == 0.4
+    assert usage["hf_jobs"]["billable_seconds_estimate"] == 150
+    assert usage["hf_jobs"]["snapshots_with_estimated_cost"] == 1
+    assert usage["hf_jobs"]["snapshots_with_nonzero_estimated_cost"] == 1
+    assert usage["sandboxes"]["creates"] == 2
+    assert usage["sandboxes"]["destroys"] == 2
+    assert usage["sandboxes"]["matched_pairs"] == 1
+    assert usage["sandboxes"]["unpaired_creates"] == 1
+    assert usage["sandboxes"]["unpaired_destroys"] == 1
+    assert usage["sandboxes"]["hardware"] == {"a100-large": 1, "t4-small": 1}
+    assert usage["sandboxes"]["estimated_usd"] == 0.3
+    assert usage["sandboxes"]["billable_seconds_estimate"] == 1800
+    assert usage["data_quality"]["job_snapshots_with_estimated_cost"] == 1
+    assert usage["data_quality"]["job_snapshots_missing_estimated_cost"] == 1
+
+
+def test_summarize_usage_events_uses_hf_billing_plus_sandbox_when_available():
+    usage = summarize_usage_events(
+        [
+            _event("llm_call", {"cost_usd": 0.25, "total_tokens": 42}),
+            _event("hf_job_complete", {"estimated_cost_usd": 0.5}),
+            _event(
+                "sandbox_create",
+                {
+                    "sandbox_id": "alice/sandbox-paid",
+                    "hardware": "t4-small",
+                },
+            ),
+            _event(
+                "sandbox_destroy",
+                {
+                    "sandbox_id": "alice/sandbox-paid",
+                    "lifetime_s": 3600,
+                },
+            ),
+        ],
+        hf_billing_snapshot={
+            "hf_billing": {
+                "available": True,
+                "source": "hf_billing_usage_v2",
+                "current_session": {
+                    "window_start": "2026-06-01T12:00:00Z",
+                    "window_end": "2026-06-01T13:00:00Z",
+                    "timezone": "UTC",
+                    "total_usd": 2.5,
+                    "inference_providers_usd": 2.0,
+                    "hf_jobs_usd": 0.5,
+                    "inference_provider_requests": 3,
+                    "hf_jobs_minutes": 12.5,
+                    "monthly_total_usd": 99,
+                },
+                "month": {"total_usd": 99},
+                "inference_providers_credits": {"limit_usd": 100},
+            }
+        },
+    )
+
+    assert usage["app_total_usd"] == 1.35
+    assert usage["hf_billing_total_usd"] == 2.5
+    assert usage["total_usd"] == 3.1
+    assert usage["total_usd_source"] == "hf_billing_plus_sandbox_estimate"
+    assert usage["hf_billing"]["current_session"]["total_usd"] == 2.5
+    assert "month" not in usage["hf_billing"]
+    assert "inference_providers_credits" not in usage["hf_billing"]
+    assert "monthly_total_usd" not in usage["hf_billing"]["current_session"]
+
+
+def test_summarize_usage_events_falls_back_to_app_telemetry_without_hf_billing():
+    usage = summarize_usage_events(
+        [
+            _event("llm_call", {"cost_usd": 0.25, "total_tokens": 42}),
+            _event("hf_job_complete", {"estimated_cost_usd": 0.5}),
+        ],
+        hf_billing_snapshot={
+            "hf_billing": {
+                "available": False,
+                "error": "missing_hf_token",
+                "current_session": None,
+            }
+        },
+    )
+
+    assert usage["total_usd"] == 0.75
+    assert usage["app_total_usd"] == 0.75
+    assert usage["hf_billing_total_usd"] is None
+    assert usage["total_usd_source"] == "app_telemetry_fallback"
+    assert usage["hf_billing"]["available"] is False
+    assert usage["hf_billing"]["error"] == "missing_hf_token"
 
 
 def test_account_bucket_from_hf_billing_usage_v2():

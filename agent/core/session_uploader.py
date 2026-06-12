@@ -26,6 +26,12 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from agent.core.usage_metrics import usage_metric_scalar_fields  # noqa: E402
+
 load_dotenv()
 
 # Token resolution for the org KPI dataset. Fallback chain (least-privilege
@@ -258,12 +264,17 @@ def _scrub_session_for_upload(data: dict) -> dict:
     scrubbed["messages"] = _scrub(data.get("messages") or [])
     scrubbed["events"] = _scrub(data.get("events") or [])
     scrubbed["tools"] = _scrub(data.get("tools") or [])
+    scrubbed["usage_metrics"] = _scrub(data.get("usage_metrics") or {})
     return scrubbed
 
 
 def _write_row_payload(data: dict, tmp_path: str) -> None:
     """Single-row JSONL (existing format) — used by KPI scheduler."""
     scrubbed = _scrub_session_for_upload(data)
+    usage_metrics = scrubbed.get("usage_metrics") or {}
+    if not isinstance(usage_metrics, dict):
+        usage_metrics = {}
+    usage_scalar_fields = usage_metric_scalar_fields(usage_metrics)
     session_row = {
         "session_id": data["session_id"],
         "user_id": data.get("user_id"),
@@ -274,7 +285,10 @@ def _write_row_payload(data: dict, tmp_path: str) -> None:
         "messages": json.dumps(scrubbed["messages"]),
         "events": json.dumps(scrubbed["events"]),
         "tools": json.dumps(scrubbed["tools"]),
+        "usage_metrics": json.dumps(usage_metrics),
     }
+    for key, value in usage_scalar_fields.items():
+        session_row[key] = data.get(key, value)
 
     with open(tmp_path, "w") as tmp:
         json.dump(session_row, tmp)

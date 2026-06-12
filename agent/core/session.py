@@ -21,6 +21,7 @@ from agent.core.usage_thresholds import (
     USAGE_THRESHOLD_TOOL_NAME,
     USAGE_WARNING_FIRST_THRESHOLD_USD,
 )
+from agent.core.usage_metrics import summarize_usage_events, usage_metric_scalar_fields
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +160,7 @@ class Session:
         self.auto_approval_estimated_spend_usd: float = 0.0
         self.usage_warning_next_threshold_usd: float = USAGE_WARNING_FIRST_THRESHOLD_USD
         self.usage_threshold_checker: Any | None = None
+        self.usage_billing_snapshot: dict[str, Any] | None = None
 
         # Session trajectory logging
         self.logged_events: list[dict] = []
@@ -384,6 +386,9 @@ class Session:
             self.auto_approval_estimated_spend_usd + float(amount_usd), 4
         )
 
+    def set_usage_billing_snapshot(self, snapshot: dict[str, Any] | None) -> None:
+        self.usage_billing_snapshot = snapshot
+
     @property
     def auto_approval_remaining_usd(self) -> float | None:
         if self.auto_approval_cost_cap_usd is None:
@@ -462,6 +467,7 @@ class Session:
         self._last_heartbeat_ts = None
         self.pending_approval = None
         self.auto_approval_estimated_spend_usd = 0.0
+        self.usage_billing_snapshot = None
         self.reset_cancel()
 
         # Previous-session metadata is intentionally included for event
@@ -530,6 +536,12 @@ class Session:
             for e in self.logged_events
             if e.get("event_type") == "llm_call"
         )
+        usage_metrics = summarize_usage_events(
+            self.logged_events,
+            session_id=self.session_id,
+            hf_billing_snapshot=self.usage_billing_snapshot,
+        )
+        usage_scalar_fields = usage_metric_scalar_fields(usage_metrics)
         return {
             "session_id": self.session_id,
             "user_id": self.user_id,
@@ -538,6 +550,8 @@ class Session:
             "session_end_time": datetime.now().isoformat(),
             "model_name": self.config.model_name,
             "total_cost_usd": total_cost_usd,
+            **usage_scalar_fields,
+            "usage_metrics": usage_metrics,
             "messages": [msg.model_dump() for msg in self.context_manager.items],
             "events": self.logged_events,
             "tools": tools,

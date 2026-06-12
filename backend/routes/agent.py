@@ -906,6 +906,7 @@ async def record_pro_click(
         target=str(body.get("target") or "pro_pricing"),
     )
     if agent_session.session.config.save_sessions:
+        await session_manager.refresh_session_usage_metrics_snapshot(agent_session)
         agent_session.session.save_and_upload_detached(
             agent_session.session.config.session_dataset_repo
         )
@@ -1150,6 +1151,7 @@ async def submit_feedback(
     # Fire-and-forget save so feedback reaches the dataset even if the user
     # closes the tab right after clicking.
     if agent_session.session.config.save_sessions:
+        await session_manager.refresh_session_usage_metrics_snapshot(agent_session)
         agent_session.session.save_and_upload_detached(
             agent_session.session.config.session_dataset_repo
         )

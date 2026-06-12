@@ -9,9 +9,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from agent.core.cost_estimation import SPACE_PRICE_USD_PER_HOUR
+from agent.core.usage_metrics import summarize_usage_events
 
 USAGE_EVENT_TYPES = (
     "llm_call",
+    "hf_job_submit",
     "hf_job_complete",
     "sandbox_create",
     "sandbox_destroy",
@@ -181,55 +183,7 @@ def aggregate_usage_events(
     *,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    bucket = _empty_bucket(session_id=session_id)
-    for event in events:
-        event_type = event.get("event_type")
-        data = event.get("data") or {}
-        if event_type == "llm_call":
-            bucket["llm_calls"] += 1
-            bucket["inference_usd"] += _coerce_float(data.get("cost_usd"))
-            prompt_tokens = _coerce_int(data.get("prompt_tokens"))
-            completion_tokens = _coerce_int(data.get("completion_tokens"))
-            cache_read_tokens = _coerce_int(data.get("cache_read_tokens"))
-            cache_creation_tokens = _coerce_int(data.get("cache_creation_tokens"))
-            total_tokens = _coerce_int(data.get("total_tokens")) or (
-                prompt_tokens
-                + completion_tokens
-                + cache_read_tokens
-                + cache_creation_tokens
-            )
-            bucket["prompt_tokens"] += prompt_tokens
-            bucket["completion_tokens"] += completion_tokens
-            bucket["cache_read_tokens"] += cache_read_tokens
-            bucket["cache_creation_tokens"] += cache_creation_tokens
-            bucket["total_tokens"] += total_tokens
-        elif event_type == "hf_job_complete":
-            bucket["hf_jobs_count"] += 1
-            bucket["hf_jobs_estimated_usd"] += _coerce_float(
-                data.get("estimated_cost_usd")
-            )
-            bucket["hf_jobs_billable_seconds_estimate"] += _coerce_int(
-                data.get("billable_seconds_estimate") or data.get("wall_time_s")
-            )
-        elif event_type == "sandbox_destroy":
-            # Sandbox costs are paired and added after the main pass so the
-            # create event can provide hardware pricing metadata.
-            continue
-
-    _aggregate_sandbox_usage(events, bucket)
-
-    bucket["inference_usd"] = round(bucket["inference_usd"], 6)
-    bucket["hf_jobs_estimated_usd"] = round(bucket["hf_jobs_estimated_usd"], 6)
-    bucket["sandbox_estimated_usd"] = round(bucket["sandbox_estimated_usd"], 6)
-    bucket["total_usd"] = round(
-        (
-            bucket["inference_usd"]
-            + bucket["hf_jobs_estimated_usd"]
-            + bucket["sandbox_estimated_usd"]
-        ),
-        6,
-    )
-    return bucket
+    return summarize_usage_events(events, session_id=session_id)["app_telemetry"]
 
 
 def _event_sort_key(

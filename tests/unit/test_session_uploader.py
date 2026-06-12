@@ -145,6 +145,27 @@ def test_row_payload_scrubs_messages_events_and_tools(tmp_path):
         "messages": [{"role": "user", "content": f"token {HF_SECRET}"}],
         "events": [{"type": "debug", "content": f"key {PROVIDER_SECRET}"}],
         "tools": [{"name": "bash", "env": f"GITHUB_TOKEN={GITHUB_SECRET}"}],
+        "usage_total_usd": 3.1,
+        "usage_total_usd_source": "hf_billing_plus_sandbox_estimate",
+        "usage_app_total_usd": 1.35,
+        "usage_hf_billing_total_usd": 2.5,
+        "usage_llm_calls": 2,
+        "usage_total_tokens": 420,
+        "usage_hf_job_submits": 1,
+        "usage_hf_job_status_snapshots": 1,
+        "usage_sandbox_creates": 1,
+        "usage_sandbox_pairs": 1,
+        "usage_metrics": {
+            "version": 1,
+            "total_usd": 3.1,
+            "total_usd_source": "hf_billing_plus_sandbox_estimate",
+            "app_total_usd": 1.35,
+            "hf_billing_total_usd": 2.5,
+            "app_telemetry": {"llm_calls": 2},
+            "llm": {"total_tokens": 420},
+            "hf_jobs": {"submits": 1, "status_snapshots": 1},
+            "sandboxes": {"creates": 1, "matched_pairs": 1},
+        },
     }
 
     _write_row_payload(data, str(tmp_file))
@@ -156,6 +177,21 @@ def test_row_payload_scrubs_messages_events_and_tools(tmp_path):
     assert "[REDACTED_HF_TOKEN]" in payload
     assert "[REDACTED_PROVIDER_API_KEY]" in payload
     assert "GITHUB_TOKEN=[REDACTED]" in payload
+
+    row = json.loads(payload)
+    assert row["session_id"] == "session-123"
+    assert row["total_cost_usd"] == 0.01
+    assert row["usage_total_usd"] == 3.1
+    assert row["usage_total_usd_source"] == "hf_billing_plus_sandbox_estimate"
+    assert row["usage_app_total_usd"] == 1.35
+    assert row["usage_hf_billing_total_usd"] == 2.5
+    assert row["usage_llm_calls"] == 2
+    assert row["usage_total_tokens"] == 420
+    assert row["usage_hf_job_submits"] == 1
+    assert row["usage_hf_job_status_snapshots"] == 1
+    assert row["usage_sandbox_creates"] == 1
+    assert row["usage_sandbox_pairs"] == 1
+    assert json.loads(row["usage_metrics"])["version"] == 1
 
 
 def test_claude_code_payload_scrubs_messages_before_conversion(tmp_path):
@@ -191,6 +227,11 @@ def test_claude_code_payload_scrubs_messages_before_conversion(tmp_path):
                 "timestamp": "2026-01-01T00:00:03",
             },
         ],
+        "usage_metrics": {
+            "version": 1,
+            "total_usd": 3.1,
+            "total_usd_source": "hf_billing_plus_sandbox_estimate",
+        },
     }
 
     _write_claude_code_payload(data, str(tmp_file))
@@ -202,3 +243,5 @@ def test_claude_code_payload_scrubs_messages_before_conversion(tmp_path):
     assert "[REDACTED_HF_TOKEN]" in payload
     assert "[REDACTED_PROVIDER_API_KEY]" in payload
     assert "GITHUB_TOKEN=[REDACTED]" in payload
+    assert "usage_metrics" not in payload
+    assert "hf_billing_plus_sandbox_estimate" not in payload

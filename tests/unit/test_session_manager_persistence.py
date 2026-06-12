@@ -42,6 +42,7 @@ class FakeRuntimeSession:
         self.auto_approval_estimated_spend_usd = 0.0
         self.usage_warning_next_threshold_usd = 5.0
         self.usage_threshold_checker = None
+        self.usage_billing_snapshot = None
         self.logged_events = []
         self.sandbox = None
         self.sandbox_hardware = None
@@ -70,6 +71,9 @@ class FakeRuntimeSession:
     def set_auto_approval_policy(self, *, enabled, cost_cap_usd):
         self.auto_approval_enabled = enabled
         self.auto_approval_cost_cap_usd = cost_cap_usd
+
+    def set_usage_billing_snapshot(self, snapshot):
+        self.usage_billing_snapshot = snapshot
 
 
 class RestoreStore(NoopSessionStore):
@@ -260,6 +264,125 @@ def test_usage_spend_falls_back_when_hf_total_is_unavailable():
 
     assert spend == 3.5
     assert source == "app_telemetry_session"
+
+
+@pytest.mark.asyncio
+async def test_refresh_usage_metrics_snapshot_stores_safe_hf_current_session(
+    monkeypatch,
+):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+
+    async def fake_build_usage_response(
+        _manager,
+        *,
+        user_id,
+        hf_token,
+        session_id,
+        timezone_name,
+    ):
+        assert user_id == "owner"
+        assert hf_token == "owner-token"
+        assert session_id == "s1"
+        assert timezone_name == "UTC"
+        return {
+            "session": {"total_usd": 1.25},
+            "hf_account": {
+                "available": True,
+                "current_session": {
+                    "window_start": "2026-06-05T12:00:00Z",
+                    "window_end": "2026-06-05T13:00:00Z",
+                    "timezone": "UTC",
+                    "total_usd": 2.5,
+                    "inference_providers_usd": 2.0,
+                    "hf_jobs_usd": 0.5,
+                    "inference_provider_requests": 4,
+                    "hf_jobs_minutes": 12.5,
+                    "credit_limit_usd": 100,
+                },
+                "month": {"total_usd": 99},
+                "inference_providers_credits": {"limit_usd": 100},
+                "token": "hf_should_not_be_saved",
+            },
+        }
+
+    monkeypatch.setattr("usage.build_usage_response", fake_build_usage_response)
+
+    snapshot = await manager.refresh_session_usage_metrics_snapshot(agent_session)
+
+    assert agent_session.session.usage_billing_snapshot == snapshot
+    assert snapshot["billing_scope"] == "account_window_delta"
+    hf_billing = snapshot["hf_billing"]
+    assert hf_billing["available"] is True
+    assert hf_billing["error"] is None
+    assert hf_billing["current_session"] == {
+        "window_start": "2026-06-05T12:00:00Z",
+        "window_end": "2026-06-05T13:00:00Z",
+        "timezone": "UTC",
+        "total_usd": 2.5,
+        "inference_providers_usd": 2.0,
+        "hf_jobs_usd": 0.5,
+        "inference_provider_requests": 4,
+        "hf_jobs_minutes": 12.5,
+    }
+    assert "month" not in hf_billing
+    assert "inference_providers_credits" not in hf_billing
+    assert "token" not in hf_billing
+    assert "credit_limit_usd" not in hf_billing["current_session"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_usage_metrics_snapshot_records_missing_token(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token=None)
+
+    async def fake_build_usage_response(
+        _manager,
+        *,
+        user_id,
+        hf_token,
+        session_id,
+        timezone_name,
+    ):
+        assert user_id == "owner"
+        assert hf_token is None
+        assert session_id == "s1"
+        assert timezone_name == "UTC"
+        return {
+            "hf_account": {
+                "available": False,
+                "error": "missing_hf_token",
+                "current_session": None,
+                "month": {"total_usd": 99},
+            }
+        }
+
+    monkeypatch.setattr("usage.build_usage_response", fake_build_usage_response)
+
+    snapshot = await manager.refresh_session_usage_metrics_snapshot(agent_session)
+
+    assert snapshot["hf_billing"]["available"] is False
+    assert snapshot["hf_billing"]["error"] == "missing_hf_token"
+    assert snapshot["hf_billing"]["current_session"] is None
+    assert "month" not in snapshot["hf_billing"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_usage_metrics_snapshot_records_refresh_failure(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+
+    async def fake_build_usage_response(*_args, **_kwargs):
+        raise RuntimeError("billing unavailable")
+
+    monkeypatch.setattr("usage.build_usage_response", fake_build_usage_response)
+
+    snapshot = await manager.refresh_session_usage_metrics_snapshot(agent_session)
+
+    assert snapshot["hf_billing"]["available"] is False
+    assert snapshot["hf_billing"]["error"] == "snapshot_refresh_failed"
+    assert snapshot["hf_billing"]["current_session"] is None
+    assert agent_session.session.usage_billing_snapshot == snapshot
 
 
 @pytest.mark.asyncio

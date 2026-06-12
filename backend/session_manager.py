@@ -28,6 +28,7 @@ from agent.core.usage_thresholds import (
     normalize_usage_threshold,
     usage_threshold_pending_to_tool,
 )
+from agent.core.usage_metrics import BILLING_SCOPE_ACCOUNT_WINDOW_DELTA
 from agent.messaging.gateway import NotificationGateway
 
 # Get project root (parent of backend directory)
@@ -409,6 +410,86 @@ class SessionManager:
             "estimated_spend_usd": round(estimated, 4),
             "remaining_usd": remaining,
         }
+
+    @staticmethod
+    def _usage_billing_snapshot_from_response(
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        hf_account = response.get("hf_account") if isinstance(response, dict) else {}
+        hf_account = hf_account if isinstance(hf_account, dict) else {}
+        current_session = hf_account.get("current_session")
+        current_session = current_session if isinstance(current_session, dict) else None
+        available = bool(hf_account.get("available") and current_session is not None)
+        safe_current_session = None
+        if available and current_session is not None:
+            safe_current_session = {
+                "window_start": current_session.get("window_start"),
+                "window_end": current_session.get("window_end"),
+                "timezone": current_session.get("timezone"),
+                "total_usd": current_session.get("total_usd"),
+                "inference_providers_usd": current_session.get(
+                    "inference_providers_usd"
+                ),
+                "hf_jobs_usd": current_session.get("hf_jobs_usd"),
+                "inference_provider_requests": current_session.get(
+                    "inference_provider_requests"
+                ),
+                "hf_jobs_minutes": current_session.get("hf_jobs_minutes"),
+            }
+        return {
+            "billing_scope": BILLING_SCOPE_ACCOUNT_WINDOW_DELTA,
+            "hf_billing": {
+                "source": "hf_billing_usage_v2",
+                "available": available,
+                "error": (
+                    None
+                    if available
+                    else hf_account.get("error")
+                    or "current_session_billing_unavailable"
+                ),
+                "current_session": safe_current_session,
+            },
+        }
+
+    async def refresh_session_usage_metrics_snapshot(
+        self,
+        agent_session: AgentSession,
+    ) -> dict[str, Any]:
+        """Refresh the safe billing rollup used by dataset usage snapshots."""
+        from usage import build_usage_response
+
+        try:
+            response = await build_usage_response(
+                self,
+                user_id=agent_session.user_id,
+                hf_token=agent_session.hf_token
+                or getattr(agent_session.session, "hf_token", None),
+                session_id=agent_session.session_id,
+                timezone_name="UTC",
+            )
+            snapshot = self._usage_billing_snapshot_from_response(response)
+        except Exception as e:
+            logger.debug(
+                "Usage billing snapshot refresh failed for %s: %s",
+                agent_session.session_id,
+                e,
+            )
+            snapshot = {
+                "billing_scope": BILLING_SCOPE_ACCOUNT_WINDOW_DELTA,
+                "hf_billing": {
+                    "source": "hf_billing_usage_v2",
+                    "available": False,
+                    "error": "snapshot_refresh_failed",
+                    "current_session": None,
+                },
+            }
+
+        setter = getattr(agent_session.session, "set_usage_billing_snapshot", None)
+        if callable(setter):
+            setter(snapshot)
+        else:
+            agent_session.session.usage_billing_snapshot = snapshot
+        return snapshot
 
     def _install_usage_threshold_checker(self, agent_session: AgentSession) -> None:
         threshold = normalize_usage_threshold(
@@ -1470,6 +1551,9 @@ class SessionManager:
                             # than the idle window would otherwise be reaped the
                             # instant it completes.
                             self._touch(agent_session)
+                            await self.refresh_session_usage_metrics_snapshot(
+                                agent_session
+                            )
                             await self.persist_session_snapshot(agent_session)
                         if not should_continue:
                             break
@@ -1498,6 +1582,7 @@ class SessionManager:
             # Idempotent via session_id key; detached subprocess.
             if session.config.save_sessions:
                 try:
+                    await self.refresh_session_usage_metrics_snapshot(agent_session)
                     session.save_and_upload_detached(
                         session.config.session_dataset_repo
                     )
