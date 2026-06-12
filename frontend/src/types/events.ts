@@ -17,6 +17,7 @@ export type EventType =
   | 'hf_job_complete'
   | 'sandbox_create'
   | 'sandbox_destroy'
+  | 'session_update'
   | 'turn_complete'
   | 'compacted'
   | 'error'

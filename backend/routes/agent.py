@@ -64,7 +64,7 @@ from agent.core.model_ids import (
     MINIMAX_M27_MODEL_ID,
     strip_huggingface_model_prefix,
 )
-from agent.core.prompt_caching import router_session_id_for, with_prompt_cache_params
+from agent.core.prompt_caching import with_prompt_cache_params
 from usage import build_usage_response
 
 logger = logging.getLogger(__name__)
@@ -347,16 +347,13 @@ async def generate_title(
     so the 60-token output budget isn't consumed before the title is written.
     """
     try:
-        agent_session = await _check_session_access(request.session_id, user)
+        await _check_session_access(request.session_id, user)
         llm_params = _resolve_llm_params(
             "openai/gpt-oss-120b:cerebras",
             _user_hf_token(user),
             reasoning_effort="low",
         )
-        llm_params = with_prompt_cache_params(
-            llm_params,
-            session_id=router_session_id_for(agent_session.session),
-        )
+        llm_params = with_prompt_cache_params(llm_params)
         response = await acompletion(
             messages=[
                 {

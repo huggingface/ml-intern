@@ -106,7 +106,7 @@ async def test_llm_health_skips_router_probe_without_token(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_title_sends_session_id_to_hf_router(monkeypatch):
+async def test_generate_title_omits_session_id_from_hf_router(monkeypatch):
     completions = []
     titles = []
 
@@ -162,9 +162,7 @@ async def test_generate_title_sends_session_id_to_hf_router(monkeypatch):
 
     assert response == {"title": "Clean title"}
     assert completions[0]["extra_body"] == {"reasoning_effort": "low"}
-    assert completions[0]["extra_headers"] == {
-        HF_ROUTER_SESSION_ID_HEADER: BILLING_SESSION_ID
-    }
+    assert HF_ROUTER_SESSION_ID_HEADER not in completions[0].get("extra_headers", {})
     assert titles == [("session-1", "Clean title")]
 
 

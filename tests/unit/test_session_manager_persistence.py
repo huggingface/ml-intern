@@ -503,6 +503,46 @@ async def test_yolo_budget_checker_pauses_after_fresh_session_spend_crosses_cap(
 
 
 @pytest.mark.asyncio
+async def test_yolo_budget_checker_emits_session_update_under_cap(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.auto_approval_enabled = True
+    agent_session.session.auto_approval_cost_cap_usd = 1.0
+    agent_session.session.auto_approval_estimated_spend_usd = 0.0
+    manager.sessions["s1"] = agent_session
+
+    async def fake_current_session_usage_spend(_agent_session, **kwargs):
+        assert kwargs["use_cache"] is False
+        return 0.25, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_yolo_budget_checker(agent_session)
+
+    paused = await agent_session.session.yolo_budget_checker(
+        {"spend_kind": "llm_call", "history_size": 4}
+    )
+
+    assert paused is False
+    assert agent_session.session.auto_approval_estimated_spend_usd == 0.25
+    assert agent_session.session.pending_approval is None
+    event = agent_session.session.events[-1]
+    assert event.event_type == "session_update"
+    assert event.data == {
+        "session_id": "s1",
+        "auto_approval": {
+            "enabled": True,
+            "cost_cap_usd": 1.0,
+            "estimated_spend_usd": 0.25,
+            "remaining_usd": 0.75,
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_yolo_budget_checker_uses_local_ledger_when_billing_lags(monkeypatch):
     manager = _manager_with_store(NoopSessionStore())
     agent_session = _runtime_agent_session("s1")

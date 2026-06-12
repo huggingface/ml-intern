@@ -756,6 +756,16 @@ export function useAgentChat({ sessionId, isActive, isProcessing = false, onRead
             if (state === 'running' && toolName) sideChannel.onToolRunning(toolName);
           } else if (et === 'llm_call' || et === 'hf_job_complete' || et === 'sandbox_destroy') {
             sideChannel.onUsageEvent(et, (event.data || {}) as Record<string, unknown>);
+          } else if (et === 'session_update') {
+            const autoApproval = event.data?.auto_approval;
+            if (autoApproval && typeof autoApproval === 'object') {
+              updateSessionYolo(sessionId, autoApproval as {
+                enabled: boolean;
+                cost_cap_usd?: number | null;
+                estimated_spend_usd?: number;
+                remaining_usd?: number | null;
+              });
+            }
           } else if (et === 'turn_complete' || et === 'error' || et === 'interrupted') {
             sideChannel.onProcessingDone();
             stopReconnect();

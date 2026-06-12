@@ -689,10 +689,22 @@ class SessionManager:
             agent_session,
             use_cache=False,
         )
+        previous_ledger_spend = session_spend_usd(session)
         seed_session_spend(session, current_spend)
         ledger_spend = session_spend_usd(session)
         effective_spend = max(current_spend, ledger_spend)
         if effective_spend < cap_usd:
+            if ledger_spend != previous_ledger_spend:
+                self._touch(agent_session)
+                await session.send_event(
+                    Event(
+                        event_type="session_update",
+                        data={
+                            "session_id": session_id,
+                            "auto_approval": self._auto_approval_summary(session),
+                        },
+                    )
+                )
             return False
 
         spend_kind = str(payload.get("spend_kind") or "session usage")
