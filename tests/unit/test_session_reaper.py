@@ -32,7 +32,7 @@ from session_manager import (  # noqa: E402
     SessionCapacityError,
     SessionManager,
 )
-from agent.core.session import Event, OpType  # noqa: E402
+from agent.core.session import OpType  # noqa: E402
 
 
 def test_reaper_idle_default_is_fifteen_minutes():
@@ -43,8 +43,6 @@ def test_reaper_idle_default_is_fifteen_minutes():
 def test_reaper_window_defaults():
     assert sm.REAPER_TOOL_APPROVAL_IDLE_MINUTES == 60
     assert sm.REAPER_TOOL_APPROVAL_IDLE == timedelta(minutes=60)
-    assert sm.REAPER_STALLED_MINUTES == 15
-    assert sm.REAPER_STALLED == timedelta(minutes=15)
 
 
 class RecordingStore(NoopSessionStore):
@@ -62,6 +60,14 @@ class RecordingStore(NoopSessionStore):
         return [s for s in self.snapshots if s.get("session_id") == session_id]
 
 
+class FakeContextManager:
+    def __init__(self) -> None:
+        self.items: list[Any] = []
+
+    def add_message(self, message: Any, token_count: int | None = None) -> None:
+        self.items.append(message)
+
+
 class FakeSession:
     """Minimal Session stand-in supporting both persistence and _run_session."""
 
@@ -73,7 +79,7 @@ class FakeSession:
     ) -> None:
         self.hf_token = hf_token
         self.user_plan = user_plan
-        self.context_manager = SimpleNamespace(items=[])
+        self.context_manager = FakeContextManager()
         self.pending_approval: Any = None
         self.turn_count = 0
         self.config = SimpleNamespace(model_name="test-model", save_sessions=False)
@@ -83,9 +89,10 @@ class FakeSession:
         self.auto_approval_estimated_spend_usd = 0.0
         self.is_running = True
         self.cancel_called = False
+        self.events: list[Any] = []
 
     async def send_event(self, event: Any) -> None:
-        return None
+        self.events.append(event)
 
     def cancel(self) -> None:
         self.cancel_called = True
@@ -116,7 +123,6 @@ def _make_agent_session(
     *,
     user_id: str = "owner",
     last_active_at: datetime | None = None,
-    last_event_at: datetime | None = None,
     is_processing: bool = False,
     pending_approval: Any = None,
 ) -> AgentSession:
@@ -133,8 +139,6 @@ def _make_agent_session(
     agent_session.is_processing = is_processing
     if last_active_at is not None:
         agent_session.last_active_at = last_active_at
-    if last_event_at is not None:
-        agent_session.last_event_at = last_event_at
     return agent_session
 
 
@@ -234,8 +238,7 @@ async def test_reaper_evicts_idle_session_as_resumable():
     [
         # Fresh: touched just now.
         {"last_active_at": None},
-        # Processing with recent events: a healthy long turn (last_event_at
-        # defaults to now even though the turn started hours ago).
+        # Processing work is never reaped while in flight.
         {
             "last_active_at": datetime.utcnow() - timedelta(hours=5),
             "is_processing": True,
@@ -322,11 +325,13 @@ async def test_turn_finish_restamps_activity(monkeypatch):
     agent_session = await _start_real_run_session(
         manager, "longturn", last_active_at=datetime.utcnow()
     )
+    process_started = asyncio.Event()
 
     async def fake_process(session: Any, submission: Any) -> bool:
         # Simulate a turn that has been running far longer than the idle
         # window before it completes.
         agent_session.last_active_at = datetime.utcnow() - timedelta(hours=3)
+        process_started.set()
         return True
 
     monkeypatch.setattr(sm, "process_submission", fake_process)
@@ -335,12 +340,17 @@ async def test_turn_finish_restamps_activity(monkeypatch):
         sm.Submission(id="s1", operation=Operation(op_type=OpType.USER_INPUT, data={}))
     )
 
+    await asyncio.wait_for(process_started.wait(), timeout=2.0)
     # Wait for the turn-finish stamp to land.
     for _ in range(200):
         await asyncio.sleep(0.01)
-        if datetime.utcnow() - agent_session.last_active_at < timedelta(minutes=1):
+        if (
+            not agent_session.is_processing
+            and datetime.utcnow() - agent_session.last_active_at < timedelta(minutes=1)
+        ):
             break
 
+    assert not agent_session.is_processing
     assert datetime.utcnow() - agent_session.last_active_at < timedelta(minutes=1)
 
     await _cancel_tasks(manager)
@@ -413,9 +423,14 @@ async def test_per_user_cap_frees_up_after_slot_reclaimed():
         message = str(exc.value)
         assert f"maximum of {sm.MAX_SESSIONS_PER_USER} live sessions" in message
         assert "Close an existing session" in message
-        assert f"wait {sm.REAPER_IDLE_MINUTES:g} minutes" in message
-        assert "after your last activity" in message
-        assert "idle session to be released" in message
+        assert (
+            f"wait {sm.REAPER_IDLE_MINUTES:g} minutes for idle or usage/cost "
+            "prompt sessions"
+        ) in message
+        assert (
+            f"{sm.REAPER_TOOL_APPROVAL_IDLE_MINUTES:g} minutes for unanswered "
+            "tool approvals"
+        ) in message
 
         # Reclaiming a slot (the reaper evicts an idle session) frees capacity.
         manager.sessions.pop("owner-0")
@@ -632,90 +647,74 @@ async def test_reaper_evicts_pending_ack_after_idle_window(kind):
     assert all(s["status"] == "active" for s in snapshots)
     assert snapshots[-1]["runtime_state"] == "waiting_approval"
     assert snapshots[-1]["pending_approval"] == [pending]
+    restored = FakeSession()
+    manager._restore_pending_approval(restored, snapshots[-1]["pending_approval"])
+    assert restored.pending_approval == pending
 
 
 @pytest.mark.asyncio
 async def test_reaper_evicts_tool_approval_after_long_window():
-    """Real tool-permission prompts get a longer grace window, not an
-    indefinite one."""
+    """Real tool-permission prompts expire before reaping.
+
+    They must not remain actionable after their sandbox is torn down.
+    """
     manager = _manager()
 
     async def fake_cleanup(session: Any) -> None:
         return None
 
     manager._cleanup_sandbox = fake_cleanup  # type: ignore[method-assign]
+    from litellm import ChatCompletionMessageToolCall as ToolCall
 
     agent_session = await _start_real_run_session(
         manager,
         "tool-approval",
         last_active_at=datetime.utcnow() - timedelta(hours=2),
     )
-    agent_session.session.pending_approval = {"tool_calls": [{"id": "tc-1"}]}
+    tool_call = ToolCall(
+        id="tc-1",
+        type="function",
+        function={"name": "create_file", "arguments": '{"path":"app.py"}'},
+    )
+    agent_session.session.pending_approval = {"tool_calls": [tool_call]}
+    serialized = manager._serialize_pending_approval(agent_session.session)
+    restored = FakeSession()
+    manager._restore_pending_approval(restored, serialized)
+    restored_tool_calls = restored.pending_approval["tool_calls"]
+    assert restored_tool_calls[0].id == "tc-1"
+    assert restored_tool_calls[0].function.name == "create_file"
 
     await manager._reap_idle_sessions()
 
     assert "tool-approval" not in manager.sessions
+    assert agent_session.session.pending_approval is None
     snapshots = manager.persistence_store.snapshots_for("tool-approval")
     assert snapshots
     assert all(s["status"] == "active" for s in snapshots)
-    assert snapshots[-1]["runtime_state"] == "waiting_approval"
-    assert snapshots[-1]["pending_approval"] == [{"id": "tc-1"}]
-
-
-# ── Stalled-turn eviction ────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_reaper_evicts_stalled_turn(monkeypatch):
-    """A processing turn that has emitted no event for the stalled window is
-    hung: evict it (resumable, never "ended") and cancel its task."""
-    manager = _manager()
-
-    async def fake_cleanup(session: Any) -> None:
-        return None
-
-    manager._cleanup_sandbox = fake_cleanup  # type: ignore[method-assign]
-
-    hang = asyncio.Event()
-
-    async def hung_process(session: Any, submission: Any) -> bool:
-        await hang.wait()
-        return True
-
-    monkeypatch.setattr(sm, "process_submission", hung_process)
-
-    agent_session = await _start_real_run_session(manager, "stalled")
-    agent_session.submission_queue.put_nowait(
-        sm.Submission(id="s1", operation=Operation(op_type=OpType.USER_INPUT, data={}))
-    )
-    for _ in range(200):
-        await asyncio.sleep(0.01)
-        if agent_session.is_processing:
-            break
-    assert agent_session.is_processing
-
-    agent_session.last_event_at = datetime.utcnow() - timedelta(minutes=20)
-
-    await manager._reap_idle_sessions()
-
-    assert "stalled" not in manager.sessions
-    assert agent_session.session.cancel_called
-    assert agent_session.task is not None and agent_session.task.done()
-    snapshots = manager.persistence_store.snapshots_for("stalled")
-    assert snapshots
-    assert all(s["status"] == "active" for s in snapshots)
-    assert not any(s["status"] == "ended" for s in snapshots)
+    assert snapshots[-1]["runtime_state"] == "idle"
+    assert snapshots[-1]["pending_approval"] == []
+    [expired_msg] = agent_session.session.context_manager.items
+    assert expired_msg.role == "tool"
+    assert expired_msg.tool_call_id == "tc-1"
+    assert expired_msg.name == "create_file"
+    assert "expired after inactivity" in expired_msg.content
+    [event] = [
+        event
+        for event in agent_session.session.events
+        if event.event_type == "tool_state_change"
+    ]
+    assert event.event_type == "tool_state_change"
+    assert event.data["state"] == "abandoned"
+    assert event.data["reason"] == "expired_inactive"
 
 
 @pytest.mark.asyncio
-async def test_reaper_spares_healthy_long_turn():
-    """A turn that started hours ago but is still emitting events is a
-    legitimate long run, not a hung one."""
+async def test_reaper_spares_quiet_processing_session():
+    """Processing work is preserved even if it has been quiet for a long time."""
     manager = _manager()
     agent_session = _make_agent_session(
         "busy",
         last_active_at=datetime.utcnow() - timedelta(hours=5),
-        last_event_at=datetime.utcnow() - timedelta(minutes=1),
         is_processing=True,
     )
     manager.sessions["busy"] = agent_session
@@ -727,9 +726,8 @@ async def test_reaper_spares_healthy_long_turn():
 
 
 @pytest.mark.asyncio
-async def test_stalled_eviction_ignores_queued_messages():
-    """A hung turn never drains its queue, so queued submissions must not
-    protect it from eviction (unlike idle reaps, which abort)."""
+async def test_reaper_spares_quiet_processing_session_with_queued_messages():
+    """Accepted queued submissions are not dropped by processing-session reaps."""
     manager = _manager()
 
     async def fake_cleanup(session: Any) -> None:
@@ -738,73 +736,20 @@ async def test_stalled_eviction_ignores_queued_messages():
     manager._cleanup_sandbox = fake_cleanup  # type: ignore[method-assign]
 
     agent_session = _make_agent_session(
-        "stalled-queued",
-        last_event_at=datetime.utcnow() - timedelta(minutes=20),
+        "busy-queued",
+        last_active_at=datetime.utcnow() - timedelta(hours=5),
         is_processing=True,
     )
-    manager.sessions["stalled-queued"] = agent_session
+    manager.sessions["busy-queued"] = agent_session
     agent_session.submission_queue.put_nowait(object())
 
     await manager._reap_idle_sessions()
 
-    assert "stalled-queued" not in manager.sessions
-    assert agent_session.session.cancel_called
-
-
-# ── last_event_at stamping ───────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_event_broadcast_stamps_last_event_at():
-    manager = _manager()
-    agent_session = await _start_real_run_session(manager, "events")
-    agent_session.last_event_at = datetime.utcnow() - timedelta(hours=1)
-
-    agent_session.broadcaster._source.put_nowait(Event(event_type="tool_log", data={}))
-    for _ in range(200):
-        await asyncio.sleep(0.01)
-        if datetime.utcnow() - agent_session.last_event_at < timedelta(minutes=1):
-            break
-
-    assert datetime.utcnow() - agent_session.last_event_at < timedelta(minutes=1)
-
-    await _cancel_tasks(manager)
-
-
-@pytest.mark.asyncio
-async def test_turn_start_stamps_last_event_at(monkeypatch):
-    """A session parked on an approval for 40 minutes must not be classified
-    stalled before its first event arrives: turn start resets the clock."""
-    manager = _manager()
-
-    async def fake_cleanup(session: Any) -> None:
-        return None
-
-    manager._cleanup_sandbox = fake_cleanup  # type: ignore[method-assign]
-
-    agent_session = await _start_real_run_session(manager, "turnstart")
-    agent_session.last_event_at = datetime.utcnow() - timedelta(minutes=40)
-
-    stamps: list[datetime] = []
-
-    async def fake_process(session: Any, submission: Any) -> bool:
-        stamps.append(agent_session.last_event_at)
-        return True
-
-    monkeypatch.setattr(sm, "process_submission", fake_process)
-
-    agent_session.submission_queue.put_nowait(
-        sm.Submission(id="s1", operation=Operation(op_type=OpType.USER_INPUT, data={}))
-    )
-    for _ in range(200):
-        await asyncio.sleep(0.01)
-        if stamps:
-            break
-
-    assert stamps
-    assert datetime.utcnow() - stamps[0] < timedelta(minutes=1)
-
-    await _cancel_tasks(manager)
+    assert "busy-queued" in manager.sessions
+    assert agent_session.submission_queue.qsize() == 1
+    assert agent_session.is_reaping is False
+    assert agent_session.session.cancel_called is False
+    assert manager.persistence_store.snapshots_for("busy-queued") == []
 
 
 # ── Verdict re-check ─────────────────────────────────────────────────────
@@ -928,11 +873,8 @@ async def test_capacity_error_message_breaks_down_held_slots():
     message = str(exc.value)
     assert f"maximum of {sm.MAX_SESSIONS_PER_USER} live sessions" in message
     assert "Close an existing session" in message
-    assert "idle session to be released" in message
-    assert (
-        "Currently held: 5 awaiting your approval, 1 still processing, 4 idle."
-        in message
-    )
+    assert "Currently held: 3 awaiting tool approval, 2 usage/cost prompts" in message
+    assert "1 still processing, 4 idle." in message
 
 
 # ── Sweep observability ──────────────────────────────────────────────────
@@ -941,10 +883,12 @@ async def test_capacity_error_message_breaks_down_held_slots():
 @pytest.mark.asyncio
 async def test_sweep_log_emitted_only_when_nonzero(caplog):
     manager = _manager()
+    manager.sessions["busy-only"] = _make_agent_session("busy-only", is_processing=True)
 
     with caplog.at_level(logging.INFO):
         await manager._reap_idle_sessions()
     assert "Reaper sweep:" not in caplog.text
+    manager.sessions.clear()
 
     async def fake_cleanup(session: Any) -> None:
         return None

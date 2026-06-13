@@ -252,6 +252,34 @@ def test_usage_threshold_pending_approval_serializes_and_restores():
     assert restored.pending_approval == pending
 
 
+def test_malformed_pending_approval_docs_are_dropped_for_api_and_restore():
+    manager = _manager_with_store(NoopSessionStore())
+
+    assert manager._pending_docs_for_api({"not": "a-list"}) is None
+    assert manager._pending_docs_for_api([None, {"function": "not-a-dict"}]) is None
+    assert manager._pending_docs_for_api(
+        [
+            object(),
+            {
+                "tool": "bash",
+                "tool_call_id": "tc-1",
+                "arguments": {"command": "echo hi"},
+            },
+        ]
+    ) == [
+        {
+            "tool": "bash",
+            "tool_call_id": "tc-1",
+            "arguments": {"command": "echo hi"},
+        }
+    ]
+
+    restored = FakeRuntimeSession()
+    manager._restore_pending_approval(restored, {"not": "a-list"})
+
+    assert restored.pending_approval is None
+
+
 def test_usage_spend_prefers_hf_current_session_over_telemetry():
     spend, source = SessionManager._usage_spend_from_response(
         {
@@ -1330,6 +1358,31 @@ async def test_lazy_restore_preserves_pending_approval_tool_calls():
 
 
 @pytest.mark.asyncio
+async def test_lazy_restore_drops_malformed_pending_approval():
+    store = RestoreStore(
+        metadata={
+            "session_id": "bad-approval-session",
+            "user_id": "owner",
+            "model": "test-model",
+            "pending_approval": {"not": "a-list"},
+        }
+    )
+    manager = _manager_with_store(store)
+    stop = _install_fake_runtime(manager)
+
+    try:
+        restored = await manager.ensure_session_loaded(
+            "bad-approval-session", user_id="owner"
+        )
+
+        assert restored is not None
+        assert restored.session.pending_approval is None
+    finally:
+        stop.set()
+        await _cancel_runtime_tasks(manager)
+
+
+@pytest.mark.asyncio
 async def test_lazy_restore_preserves_auto_approval_policy():
     store = RestoreStore(
         metadata={
@@ -1496,6 +1549,7 @@ async def test_list_sessions_dev_uses_store_dev_visibility():
                         "user_id": "bob",
                         "model": "m",
                         "created_at": datetime.now(UTC),
+                        "pending_approval": {"not": "a-list"},
                     },
                 ]
             return []
@@ -1507,6 +1561,8 @@ async def test_list_sessions_dev_uses_store_dev_visibility():
 
     assert store.seen_user_id == "dev"
     assert {session["session_id"] for session in sessions} == {"s1", "s2"}
+    malformed = next(session for session in sessions if session["session_id"] == "s2")
+    assert malformed["pending_approval"] is None
     yolo = next(session for session in sessions if session["session_id"] == "s1")
     assert yolo["auto_approval"] == {
         "enabled": True,
