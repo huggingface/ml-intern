@@ -25,11 +25,23 @@ jobs:
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
     steps:
+      - name: Check authorization
+        id: auth_check
+        run: |
+          ASSOCIATION="${{ github.event.comment.author_association || github.event.issue.author_association || github.event.review.author_association }}"
+          if [[ "$ASSOCIATION" != "MEMBER" && "$ASSOCIATION" != "OWNER" && "$ASSOCIATION" != "COLLABORATOR" ]]; then
+            echo "Unauthorized: Only members, owners, and collaborators can invoke Claude"
+            exit 1
+          fi
+          echo "Authorized: $ASSOCIATION"
+
       - uses: actions/checkout@v6
+        if: success()
         with:
           fetch-depth: 0
 
       - uses: anthropics/claude-code-action@v1.0.137
+        if: success()
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           track_progress: true
