@@ -44,6 +44,23 @@ async def _flush_session_on_shutdown(sid: str, agent_session, semaphore) -> None
         logger.warning("Failed to flush session %s: %s", sid, e)
 
 
+def _split_env_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _cors_origins() -> list[str]:
+    default_origins = [
+        "http://localhost:5173",  # Vite dev server
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ]
+    configured_origins = _split_env_list(os.environ.get("ML_INTERN_CORS_ORIGINS"))
+    return [*default_origins, *configured_origins]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
@@ -101,12 +118,7 @@ app = FastAPI(
 # CORS middleware for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Vite dev server
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
