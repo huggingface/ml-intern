@@ -52,6 +52,24 @@ def _cap(text: str, max_words: int = MAX_TITLE_WORDS, max_chars: int = MAX_TITLE
     return text
 
 
+_SLUG_MAX_CHARS = 40
+
+
+def slugify(text: str | None) -> str:
+    """Filesystem-safe lowercase slug from a title.
+
+    Strips secret-like tokens, lowercases, collapses any run of non-alphanumeric
+    characters to a single dash, and caps length. Returns an empty string when
+    there's nothing usable (e.g. an all-symbol or empty title), so callers can
+    fall back to the bare filename pattern.
+    """
+    cleaned = _strip_secrets(text or "").lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", cleaned).strip("-")
+    if len(slug) > _SLUG_MAX_CHARS:
+        slug = slug[:_SLUG_MAX_CHARS].rstrip("-")
+    return slug
+
+
 def fallback_title(first_user_text: str | None) -> str:
     """Readable title derived from the first user message, no LLM required.
 

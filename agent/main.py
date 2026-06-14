@@ -1009,6 +1009,8 @@ async def _handle_slash_command(
             return None
         session.session_title = new_title
         session._title_user_set = True
+        # Rename the active log file to reflect the new title immediately.
+        session.apply_title_to_local_file()
         get_console().print(
             f"[green]Renamed session to[/green] [cyan]{new_title}[/cyan]."
         )

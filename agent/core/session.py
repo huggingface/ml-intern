@@ -609,6 +609,59 @@ class Session:
             "tools": tools,
         }
 
+    def _session_log_filename(self, timestamp: str) -> str:
+        """Build the local log filename for this session.
+
+        When a title is set, splice its slug in for human-scannable names:
+        ``session_<slug>_<uuid8>_<timestamp>.json``. The ``session_`` prefix and
+        ``.json`` suffix are kept so the upload-retry glob ('session_*.json')
+        still matches; the uuid8 + timestamp keep titled names collision-free
+        even when two sessions share a title. Falls back to the legacy
+        ``session_<uuid>_<timestamp>.json`` when there's no usable slug.
+        """
+        slug = ""
+        if self.session_title:
+            from agent.core.title import slugify
+
+            slug = slugify(self.session_title)
+        if slug:
+            return f"session_{slug}_{self.session_id[:8]}_{timestamp}.json"
+        return f"session_{self.session_id}_{timestamp}.json"
+
+    def apply_title_to_local_file(self) -> None:
+        """Reflect the current ``session_title`` in the active log filename.
+
+        Called when a title is set (auto-title or ``/rename``). If a log file
+        already exists on disk it is renamed in place so even a single-turn
+        session ends up with a titled filename; otherwise the cached path is
+        cleared so the next save picks up the title. Safe no-op on any error.
+        """
+        old = self._local_save_path
+        if not old:
+            return
+        old_path = Path(old)
+        if not old_path.exists():
+            self._local_save_path = None
+            return
+        # Preserve the original timestamp suffix (last two underscore tokens)
+        # so chronological ordering is stable; regenerate if it doesn't parse.
+        parts = old_path.stem.split("_")
+        tail = "_".join(parts[-2:])
+        timestamp = (
+            tail
+            if len(parts) >= 2 and parts[-2].isdigit() and parts[-1].isdigit()
+            else datetime.now().strftime("%Y%m%d_%H%M%S")
+        )
+        new_path = old_path.with_name(self._session_log_filename(timestamp))
+        if new_path == old_path:
+            return
+        try:
+            old_path.rename(new_path)
+            self._local_save_path = str(new_path)
+        except OSError as e:
+            logger.debug("Could not rename log to titled name: %s", e)
+            self._local_save_path = None
+
     def save_trajectory_local(
         self,
         directory: str | None = None,
@@ -659,11 +712,8 @@ class Session:
             if self._local_save_path and Path(self._local_save_path).parent == log_dir:
                 filepath = Path(self._local_save_path)
             else:
-                filename = (
-                    f"session_{self.session_id}_"
-                    f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                )
-                filepath = log_dir / filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filepath = log_dir / self._session_log_filename(timestamp)
                 self._local_save_path = str(filepath)
 
             # Atomic-ish write: stage to .tmp then rename so a crash mid-write
