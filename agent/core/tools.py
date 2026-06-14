@@ -6,6 +6,7 @@ Provides ToolSpec and ToolRouter for managing both built-in and MCP tools
 import logging
 import warnings
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from typing import Any, Awaitable, Callable, Optional
 
 from fastmcp import Client
@@ -119,6 +120,20 @@ class ToolSpec:
     handler: Optional[Callable[[dict[str, Any]], Awaitable[tuple[str, bool]]]] = None
 
 
+def _is_hf_endpoint(url: str | None) -> bool:
+    """True only for HuggingFace remote MCP endpoints.
+
+    Used to scope the HF bearer token to HuggingFace servers so it is never
+    forwarded to unrelated/third-party MCP servers. Matches ``huggingface.co``
+    and its subdomains via the parsed hostname (not a substring), so lookalike
+    hosts such as ``huggingface.co.evil.com`` do not match.
+    """
+    if not url:
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    return host == "huggingface.co" or host.endswith(".huggingface.co")
+
+
 class ToolRouter:
     """
     Routes tool calls to appropriate handlers.
@@ -142,7 +157,13 @@ class ToolRouter:
             mcp_servers_payload = {}
             for name, server in mcp_servers.items():
                 data = server.model_dump()
-                if hf_token:
+                # Only attach the HF bearer to HuggingFace endpoints. Injecting
+                # it into every configured MCP server leaks the token to
+                # unrelated/third-party servers and makes auth-enforcing
+                # gateways (e.g. a local data-gateway) reject the request with
+                # "invalid_token" instead of falling back to their default
+                # identity.
+                if hf_token and _is_hf_endpoint(data.get("url")):
                     data.setdefault("headers", {})["Authorization"] = (
                         f"Bearer {hf_token}"
                     )
