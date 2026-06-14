@@ -117,6 +117,7 @@ class Session:
         hf_username: str | None = None,
         user_plan: str | None = None,
         persistence_store: Any | None = None,
+        session_title: str | None = None,
     ):
         self.hf_token: Optional[str] = hf_token
         self.user_id: Optional[str] = user_id
@@ -139,6 +140,12 @@ class Session:
         )
         self.event_queue = event_queue
         self.session_id = session_id or str(uuid.uuid4())
+        # Human-readable conversation title (auto-generated after the first
+        # turn, or set explicitly via ``/rename``). Surfaces in ``/resume`` and
+        # the saved filename. ``_title_user_set`` records an explicit rename so
+        # auto-titling never clobbers a name the user chose.
+        self.session_title: str | None = session_title
+        self._title_user_set: bool = session_title is not None
         self.inference_billing_session_id: str | None = None
         self.config = config
         self.is_running = True
@@ -458,6 +465,8 @@ class Session:
         self.context_manager.running_context_usage = 0
 
         self.session_id = str(uuid.uuid4())
+        self.session_title = None
+        self._title_user_set = False
         self.inference_billing_session_id = None
         self.session_start_time = datetime.now().astimezone().isoformat()
         self.turn_count = 0
@@ -552,6 +561,7 @@ class Session:
             usage_metrics = self.usage_metrics or {}
         return {
             "session_id": self.session_id,
+            "session_title": self.session_title,
             "user_id": self.user_id,
             "hf_username": self.hf_username,
             "session_start_time": self.session_start_time,

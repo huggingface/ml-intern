@@ -459,6 +459,7 @@ HELP_ROWS: tuple[tuple[str, str, str], ...] = (
     ("/undo", "", "Undo last turn"),
     ("/compact", "", "Compact context window"),
     ("/resume", "[index|id|path]", "Pick up from ./session_logs"),
+    ("/rename", "<name>", "Rename the current session"),
     ("/model", "[id]", "Show available models or switch"),
     (
         "/effort",

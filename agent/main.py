@@ -455,6 +455,10 @@ async def event_listener(
                 else:
                     console.print("[dim]Started new chat.[/dim]")
                 turn_complete_event.set()
+            elif event.event_type == "conversation_title":
+                title = (event.data or {}).get("title")
+                if title:
+                    console.print(f"[dim]Titled this session:[/dim] [cyan]{title}[/cyan]")
             elif event.event_type == "resume_complete":
                 data = event.data or {}
                 path = data.get("path", "?")
@@ -990,6 +994,24 @@ async def _handle_slash_command(
                 op_type=OpType.RESUME, data={"path": str(selected_path)}
             ),
         )
+
+    if command == "/rename":
+        session = session_holder[0] if session_holder else None
+        if session is None:
+            get_console().print("[bold red]No active session to rename.[/bold red]")
+            return None
+        new_title = arg.strip()
+        if not new_title:
+            get_console().print(
+                "[dim]Usage: /rename <name> — give the current session a title.[/dim]"
+            )
+            return None
+        session.session_title = new_title
+        session._title_user_set = True
+        get_console().print(
+            f"[green]Renamed session to[/green] [cyan]{new_title}[/cyan]."
+        )
+        return None
 
     if command == "/model":
         console = get_console()

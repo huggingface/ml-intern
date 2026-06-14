@@ -1171,6 +1171,41 @@ async def _call_llm_non_streaming(
     )
 
 
+async def _generate_and_set_title(session: "Session", final_response: str | None) -> None:
+    """Generate a conversation title and attach it to the session.
+
+    Runs as a fire-and-forget task after the first turn. Any failure is
+    swallowed so it can never break the turn that spawned it.
+    """
+    try:
+        from agent.core.title import (
+            extract_first_user_text,
+            generate_conversation_title,
+        )
+
+        first_user_text = extract_first_user_text(session.context_manager.items)
+        if not first_user_text:
+            return
+        title = await generate_conversation_title(
+            session.config.model_name,
+            session.hf_token,
+            first_user_text,
+            final_response,
+        )
+        # The user may have renamed (or a /new fired) while we were awaiting.
+        if not title or session._title_user_set or session.session_title:
+            return
+        session.session_title = title
+        await session.send_event(
+            Event(
+                event_type="conversation_title",
+                data={"title": title, "session_id": session.session_id},
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Auto-title task failed: %s", e)
+
+
 class Handlers:
     """Handler functions for each operation type"""
 
@@ -1879,6 +1914,21 @@ class Handlers:
                     },
                 )
             )
+
+            # Auto-title the conversation once, after the very first completed
+            # turn, unless the user already named it via /rename. Fire-and-forget
+            # so a slow or failing title never delays the turn.
+            if (
+                session.turn_count == 0
+                and not session.session_title
+                and not session._title_user_set
+            ):
+                asyncio.create_task(
+                    _generate_and_set_title(
+                        session,
+                        final_response if isinstance(final_response, str) else None,
+                    )
+                )
 
         # Increment turn counter and check for auto-save
         session.increment_turn()
