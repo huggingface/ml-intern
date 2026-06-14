@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { apiFetch } from '@/utils/api';
+import { useSessionStore } from '@/store/sessionStore';
 
 export interface UsageBucket {
   session_id?: string | null;
@@ -42,12 +43,19 @@ export interface HfInferenceProvidersCredits {
 }
 
 export interface HfAccountUsage {
-  source: 'hf_billing_usage_v2';
+  source: 'hf_billing';
   available: boolean;
   error?: string | null;
   current_session: HfAccountUsageBucket | null;
   month: HfAccountUsageBucket | null;
   inference_providers_credits: HfInferenceProvidersCredits | null;
+}
+
+export interface SessionAutoApprovalUsage {
+  enabled: boolean;
+  cost_cap_usd?: number | null;
+  estimated_spend_usd?: number;
+  remaining_usd?: number | null;
 }
 
 export interface UsageResponse {
@@ -57,6 +65,7 @@ export interface UsageResponse {
   timezone: string;
   session: UsageBucket | null;
   hf_account?: HfAccountUsage | null;
+  auto_approval?: SessionAutoApprovalUsage | null;
   links: Record<string, string>;
 }
 
@@ -156,6 +165,9 @@ export const useUsageStore = create<UsageStore>()((set, get) => ({
       }
       const usage = (await response.json()) as UsageResponse;
       set({ usage, isLoading: false, error: null });
+      if (sessionId && usage.auto_approval) {
+        useSessionStore.getState().updateSessionYolo(sessionId, usage.auto_approval);
+      }
     } catch (error) {
       set({
         isLoading: false,

@@ -1,12 +1,10 @@
 """Helpers for session usage-threshold approval warnings."""
 
-from typing import Any, Literal
+from typing import Any
 
 USAGE_THRESHOLD_TOOL_NAME = "usage_threshold"
 USAGE_WARNING_FIRST_THRESHOLD_USD = 5.0
 USAGE_WARNING_MULTIPLIER = 2.0
-
-UsageApprovalContinuation = Literal["continue_agent", "complete_turn"]
 
 
 def normalize_usage_threshold(value: Any) -> float:

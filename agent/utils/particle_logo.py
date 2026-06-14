@@ -59,10 +59,6 @@ class Particle:
         self.x += self.vx
         self.y += self.vy
 
-    @property
-    def at_target(self) -> bool:
-        return abs(self.x - self.target_x) < 1.5 and abs(self.y - self.target_y) < 1.5
-
 
 def run_particle_logo(console: Console, hold_seconds: float = 1.5) -> None:
     """Run the particle coalesce effect."""

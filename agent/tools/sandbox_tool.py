@@ -15,13 +15,19 @@ import asyncio
 import logging
 import re
 import threading
+import uuid
 import weakref
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from huggingface_hub import HfApi, SpaceHardware
 
+from agent.core.cost_estimation import (
+    DEFAULT_SANDBOX_RESERVATION_HOURS,
+    SPACE_PRICE_USD_PER_HOUR,
+    CostEstimate,
+)
 from agent.core.hub_artifacts import wrap_shell_command_with_hub_artifact_bootstrap
 from agent.core.session import Event
 from agent.tools.sandbox_client import Sandbox
@@ -36,17 +42,13 @@ DEFAULT_CPU_SANDBOX_HARDWARE = "cpu-basic"
 # user-renamed lookalikes).
 SANDBOX_SPACE_NAME_RE = re.compile(r"^sandbox-[a-f0-9]{8}$")
 
-# How stale a sandbox must be before we treat it as definitely orphan.
-# Anything more recent could be tied to a still-live session in another tab,
-# so we leave it alone.
-_ORPHAN_STALE_AFTER = timedelta(hours=1)
-
 # HF Space duplication/build APIs can behave poorly when multiple private
 # sandboxes are created concurrently for the same namespace. Keep session
 # creation non-blocking, but serialize the actual Hub create path per owner.
 _SANDBOX_CREATE_LOCKS: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
 ] = weakref.WeakKeyDictionary()
+_SANDBOX_YOLO_RENEWAL_FRACTION = 0.95
 
 
 def _get_sandbox_create_lock(owner: str) -> asyncio.Lock:
@@ -57,6 +59,151 @@ def _get_sandbox_create_lock(owner: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         locks[owner] = lock
     return lock
+
+
+def _sandbox_window_cost_usd(hardware: str) -> float | None:
+    price = SPACE_PRICE_USD_PER_HOUR.get(str(hardware))
+    if price is None:
+        return None
+    return round(float(price) * DEFAULT_SANDBOX_RESERVATION_HOURS, 4)
+
+
+def _sandbox_window_estimate(hardware: str) -> CostEstimate:
+    cost = _sandbox_window_cost_usd(hardware)
+    if cost is None:
+        return CostEstimate(
+            estimated_cost_usd=None,
+            billable=True,
+            block_reason=f"No price is available for sandbox hardware '{hardware}'.",
+            label=hardware,
+        )
+    return CostEstimate(
+        estimated_cost_usd=cost,
+        billable=cost > 0,
+        label=hardware,
+    )
+
+
+def _sandbox_yolo_renewal_delay_s() -> float:
+    return max(
+        1.0,
+        DEFAULT_SANDBOX_RESERVATION_HOURS * 3600 * _SANDBOX_YOLO_RENEWAL_FRACTION,
+    )
+
+
+def _sandbox_yolo_finalized_cost_usd(session: Any) -> float:
+    return max(0.0, float(getattr(session, "_sandbox_yolo_finalized_cost_usd", 0.0)))
+
+
+def _add_sandbox_yolo_finalized_cost(session: Any, amount_usd: float | None) -> None:
+    if amount_usd is None or amount_usd <= 0:
+        return
+    session._sandbox_yolo_finalized_cost_usd = round(
+        _sandbox_yolo_finalized_cost_usd(session) + float(amount_usd),
+        4,
+    )
+
+
+def _cancel_sandbox_yolo_renewal(session: Any) -> None:
+    task = getattr(session, "_sandbox_yolo_renewal_task", None)
+    if task and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+    session._sandbox_yolo_renewal_task = None
+
+
+def _start_sandbox_yolo_renewal(
+    session: Any,
+    *,
+    hardware: str,
+    reservation_id: str,
+) -> None:
+    if hardware == DEFAULT_CPU_SANDBOX_HARDWARE:
+        return
+    _cancel_sandbox_yolo_renewal(session)
+    task = asyncio.create_task(
+        _sandbox_yolo_renewal_loop(
+            session,
+            hardware=hardware,
+            reservation_id=reservation_id,
+        )
+    )
+    session._sandbox_yolo_renewal_task = task
+
+    def _log_task_error(done: asyncio.Task) -> None:
+        if done.cancelled():
+            return
+        try:
+            done.result()
+        except Exception as e:
+            logger.warning("Sandbox YOLO renewal task failed: %s", e)
+
+    task.add_done_callback(_log_task_error)
+
+
+async def _sandbox_yolo_renewal_loop(
+    session: Any,
+    *,
+    hardware: str,
+    reservation_id: str,
+) -> None:
+    from agent.core.yolo_budget import (
+        reconcile_budget_reservation,
+        reserve_session_budget,
+        session_yolo_enabled,
+    )
+
+    active_reservation_id = reservation_id
+    while True:
+        await asyncio.sleep(_sandbox_yolo_renewal_delay_s())
+        if (
+            getattr(session, "_sandbox_yolo_reservation_id", None)
+            != active_reservation_id
+        ):
+            return
+        if not getattr(session, "sandbox", None):
+            return
+        if getattr(session, "sandbox_hardware", None) != hardware:
+            return
+
+        window_cost = _sandbox_window_cost_usd(hardware)
+        reconcile_budget_reservation(session, active_reservation_id, window_cost)
+        _add_sandbox_yolo_finalized_cost(session, window_cost)
+
+        if not session_yolo_enabled(session):
+            session._sandbox_yolo_reservation_id = None
+            return
+
+        estimate = _sandbox_window_estimate(hardware)
+        next_reservation_id = f"sandbox-renew-{uuid.uuid4().hex[:10]}"
+        decision = reserve_session_budget(
+            session,
+            estimate,
+            spend_kind="sandbox",
+            reservation_id=next_reservation_id,
+        )
+        if not decision.allowed:
+            session._sandbox_yolo_reservation_id = None
+            await session.send_event(
+                Event(
+                    event_type="tool_log",
+                    data={
+                        "tool": "sandbox",
+                        "log": (
+                            "YOLO usage cap reached for the active sandbox; "
+                            "tearing it down before the reserved budget expires."
+                        ),
+                    },
+                )
+            )
+            await teardown_session_sandbox(session)
+            return
+
+        active_reservation_id = (
+            decision.reservation.reservation_id
+            if decision.reservation
+            else next_reservation_id
+        )
+        session._sandbox_yolo_reservation_id = active_reservation_id
 
 
 def _session_tool_logger(
@@ -190,64 +337,6 @@ async def _clear_persisted_sandbox(session: Any) -> None:
 
 
 # ── Tool name mapping (short agent names → Sandbox client names) ──────
-
-
-def _cleanup_user_orphan_sandboxes(
-    api: HfApi,
-    owner: str,
-    log: Any,
-) -> int:
-    """Delete stale ``sandbox-<8hex>`` Spaces in ``owner``'s account.
-
-    "Stale" = not modified in the last hour. The naming pattern + staleness
-    filter together make this safe:
-
-    * Naming: only matches ``sandbox-<exactly 8 lowercase hex>``, the
-      pattern Sandbox.create produces. Won't touch user-renamed Spaces.
-    * Staleness: anything modified in the last hour might still be tied
-      to a live session in another tab/replica, so we leave it alone.
-
-    Runs blocking — call via ``asyncio.to_thread``. Best-effort: failures
-    are logged but never raised, so a flaky HF API never blocks creation.
-    """
-    cutoff = datetime.now(timezone.utc) - _ORPHAN_STALE_AFTER
-    deleted = 0
-    try:
-        spaces = list(api.list_spaces(author=owner, limit=200, full=True))
-    except Exception as e:
-        log(f"orphan sweep: list_spaces failed: {e}")
-        return 0
-
-    for space in spaces:
-        space_name = space.id.rsplit("/", 1)[-1]
-        if not SANDBOX_SPACE_NAME_RE.match(space_name):
-            continue
-
-        last_mod = getattr(space, "lastModified", None) or getattr(
-            space, "last_modified", None
-        )
-        if isinstance(last_mod, str):
-            try:
-                last_mod = datetime.fromisoformat(last_mod.replace("Z", "+00:00"))
-            except ValueError:
-                last_mod = None
-        if last_mod is None:
-            log(f"orphan sweep: skipping {space.id}; missing lastModified")
-            continue
-        if last_mod and last_mod > cutoff:
-            # Recent — could be a concurrent live session. Skip.
-            continue
-
-        try:
-            api.delete_repo(repo_id=space.id, repo_type="space")
-            deleted += 1
-            log(f"orphan sweep: deleted {space.id}")
-        except Exception as e:
-            log(f"orphan sweep: failed to delete {space.id}: {e}")
-
-    if deleted:
-        log(f"orphan sweep: cleaned up {deleted} stale sandbox(es) before create")
-    return deleted
 
 
 async def _ensure_sandbox(
@@ -503,12 +592,13 @@ async def teardown_session_sandbox(session: Any) -> None:
         return
 
     await cancel_sandbox_preload(session)
+    _cancel_sandbox_yolo_renewal(session)
 
     sandbox = getattr(session, "sandbox", None)
     session.sandbox = None
-    session.sandbox_hardware = None
 
     if not sandbox:
+        session.sandbox_hardware = None
         return
 
     try:
@@ -528,7 +618,32 @@ async def teardown_session_sandbox(session: Any) -> None:
                 await asyncio.to_thread(sandbox.delete, log=delete_log)
                 from agent.core import telemetry
 
-                await telemetry.record_sandbox_destroy(session, sandbox)
+                usage = await telemetry.record_sandbox_destroy(session, sandbox)
+                from agent.core.yolo_budget import (
+                    adjust_session_spend,
+                    reconcile_budget_reservation,
+                )
+
+                actual_total = (
+                    usage.get("estimated_cost_usd") if isinstance(usage, dict) else None
+                )
+                finalized = _sandbox_yolo_finalized_cost_usd(session)
+                active_reservation_id = getattr(
+                    session, "_sandbox_yolo_reservation_id", None
+                )
+                actual_unfinalized = None
+                if actual_total is not None:
+                    actual_unfinalized = max(0.0, float(actual_total) - finalized)
+                reconcile_budget_reservation(
+                    session,
+                    active_reservation_id,
+                    actual_unfinalized,
+                    allow_zero_actual=True,
+                )
+                if active_reservation_id is None and actual_unfinalized:
+                    adjust_session_spend(session, actual_unfinalized)
+                session._sandbox_yolo_reservation_id = None
+                session._sandbox_yolo_finalized_cost_usd = 0.0
                 return
             except Exception as e:
                 last_err = e
@@ -541,6 +656,7 @@ async def teardown_session_sandbox(session: Any) -> None:
             last_err,
         )
     finally:
+        session.sandbox_hardware = None
         await _clear_persisted_sandbox(session)
 
 
@@ -715,6 +831,15 @@ async def sandbox_create_handler(
 
     if error:
         return error, False
+
+    if session and tool_call_id and hardware != DEFAULT_CPU_SANDBOX_HARDWARE:
+        session._sandbox_yolo_reservation_id = tool_call_id
+        session._sandbox_yolo_finalized_cost_usd = 0.0
+        _start_sandbox_yolo_renewal(
+            session,
+            hardware=hardware,
+            reservation_id=tool_call_id,
+        )
 
     await _emit_trackio_state(sb)
 

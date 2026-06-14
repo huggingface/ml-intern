@@ -150,8 +150,8 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
             disabled={!isConnected || activityStatus.type === 'waiting-approval'}
             placeholder={
               activityStatus.type === 'waiting-approval'
-                ? activityStatus.approvalKind === 'usage'
-                  ? 'Review the usage warning to continue...'
+	                ? activityStatus.approvalKind === 'usage'
+	                  ? 'Review the usage pause to continue...'
                   : 'Approve or reject pending tools first...'
                 : undefined
             }

@@ -6,7 +6,7 @@ import pytest
 
 from agent.config import Config
 from agent.core import agent_loop
-from agent.core.agent_loop import _needs_approval
+from agent.core.agent_loop import _base_needs_approval
 from agent.core.session import OpType
 from agent.core.tools import create_builtin_tools
 from agent.tools.jobs_tool import HF_JOBS_TOOL_SPEC
@@ -16,17 +16,23 @@ from agent.tools.sandbox_tool import get_sandbox_tools
 def test_default_cpu_sandbox_create_does_not_require_approval():
     config = SimpleNamespace(yolo_mode=False)
 
-    assert _needs_approval("sandbox_create", {}, config) is False
-    assert _needs_approval("sandbox_create", {"hardware": "cpu-basic"}, config) is False
+    assert _base_needs_approval("sandbox_create", {}, config) is False
+    assert (
+        _base_needs_approval("sandbox_create", {"hardware": "cpu-basic"}, config)
+        is False
+    )
 
 
 def test_non_default_sandbox_create_still_requires_approval():
     config = SimpleNamespace(yolo_mode=False)
 
     assert (
-        _needs_approval("sandbox_create", {"hardware": "cpu-upgrade"}, config) is True
+        _base_needs_approval("sandbox_create", {"hardware": "cpu-upgrade"}, config)
+        is True
     )
-    assert _needs_approval("sandbox_create", {"hardware": "t4-small"}, config) is True
+    assert (
+        _base_needs_approval("sandbox_create", {"hardware": "t4-small"}, config) is True
+    )
 
 
 def test_prompt_and_tool_specs_do_not_require_cpu_sandbox_create():

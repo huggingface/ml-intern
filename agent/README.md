@@ -7,7 +7,7 @@ Async agent loop with LiteLLM.
 **Queue-based async system:**
 - Submissions in (user input) → Agent Loop → Events output for possible UI updates
 - Session maintains state (context + tools) for possible future Context Engineering
-- Handlers operations like (USER_INPUT, INTERRUPT, COMPACT, UNDO, SHUTDOWN) for possible UI control
+- Handlers operations like (USER_INPUT, COMPACT, UNDO, SHUTDOWN) for possible UI control
 
 ## Components
 

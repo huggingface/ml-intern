@@ -36,13 +36,6 @@ export interface SessionMeta {
   autoApprovalRemainingUsd?: number | null;
 }
 
-export interface ToolApproval {
-  tool_call_id: string;
-  approved: boolean;
-  feedback?: string | null;
-  namespace?: string | null;
-}
-
 export interface User {
   authenticated: boolean;
   username?: string;

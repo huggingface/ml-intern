@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
-from agent.core.cost_estimation import SPACE_PRICE_USD_PER_HOUR
+from agent.core.usage_metrics import summarize_sandbox_lifecycle
 
 USAGE_EVENT_TYPES = (
     "llm_call",
@@ -20,6 +20,9 @@ USAGE_EVENT_TYPES = (
 logger = logging.getLogger(__name__)
 
 HF_BILLING_USAGE_V2_URL = "https://huggingface.co/api/settings/billing/usage-v2"
+HF_BILLING_USAGE_BY_INFERENCE_SESSION_URL = (
+    "https://huggingface.co/api/settings/billing/usage-by-inference-session"
+)
 HF_BILLING_URL = "https://huggingface.co/settings/billing"
 HF_INFERENCE_PROVIDERS_PRICING_URL = (
     "https://huggingface.co/docs/inference-providers/en/pricing"
@@ -63,6 +66,10 @@ def _nano_usd_to_usd(value: Any) -> float:
 
 def _micro_usd_to_usd(value: Any) -> float:
     return _coerce_float(value) / 1_000_000
+
+
+def _cents_to_usd(value: Any) -> float:
+    return _coerce_float(value) / 100
 
 
 def _coerce_timezone(timezone_name: str | None) -> ZoneInfo | None:
@@ -232,47 +239,6 @@ def aggregate_usage_events(
     return bucket
 
 
-def _event_sort_key(
-    indexed_event: tuple[int, dict[str, Any]],
-) -> tuple[bool, datetime, int]:
-    index, event = indexed_event
-    created_at = event_created_at(event)
-    return (
-        created_at is None,
-        created_at or datetime.min.replace(tzinfo=UTC),
-        index,
-    )
-
-
-def _sandbox_id(event: dict[str, Any]) -> str | None:
-    data = event.get("data") or {}
-    sandbox_id = data.get("sandbox_id")
-    return sandbox_id if isinstance(sandbox_id, str) and sandbox_id else None
-
-
-def _sandbox_duration_seconds(
-    create_event: dict[str, Any],
-    destroy_event: dict[str, Any],
-) -> int:
-    create_data = create_event.get("data") or {}
-    destroy_data = destroy_event.get("data") or {}
-    lifetime_s = _coerce_int(destroy_data.get("lifetime_s"))
-
-    if lifetime_s > 0:
-        # Telemetry starts the lifetime clock before create latency elapses.
-        return lifetime_s
-
-    create_at = event_created_at(create_event)
-    destroy_at = event_created_at(destroy_event)
-    if create_at is None or destroy_at is None:
-        return 0
-    create_latency_s = max(0, _coerce_int(create_data.get("create_latency_s")))
-    interval_start = create_at - timedelta(seconds=create_latency_s)
-    if destroy_at <= interval_start:
-        return 0
-    return int((destroy_at - interval_start).total_seconds())
-
-
 def _aggregate_sandbox_usage(
     events: list[dict[str, Any]],
     bucket: dict[str, Any],
@@ -282,41 +248,10 @@ def _aggregate_sandbox_usage(
         for index, event in enumerate(events)
         if event.get("event_type") in {"sandbox_create", "sandbox_destroy"}
     ]
-    ordered_events = [
-        event
-        for _, event in sorted(
-            lifecycle_events,
-            key=_event_sort_key,
-        )
-    ]
-    active_creates: dict[str, dict[str, Any]] = {}
-
-    for event in ordered_events:
-        event_type = event.get("event_type")
-        sandbox_id = _sandbox_id(event)
-        if sandbox_id is None:
-            continue
-
-        if event_type == "sandbox_create":
-            active_creates[sandbox_id] = event
-            continue
-
-        if event_type != "sandbox_destroy":
-            continue
-
-        create_event = active_creates.pop(sandbox_id, None)
-        if create_event is None:
-            continue
-
-        create_data = create_event.get("data") or {}
-        hardware = str(create_data.get("hardware") or "cpu-basic")
-        price_usd_per_hour = SPACE_PRICE_USD_PER_HOUR.get(hardware, 0.0)
-        seconds = _sandbox_duration_seconds(create_event, event)
-
-        bucket["sandbox_count"] += 1
-        if price_usd_per_hour > 0:
-            bucket["sandbox_billable_seconds_estimate"] += seconds
-        bucket["sandbox_estimated_usd"] += price_usd_per_hour * (seconds / 3600)
+    sandbox = summarize_sandbox_lifecycle(lifecycle_events)
+    bucket["sandbox_count"] += sandbox["matched_pairs"]
+    bucket["sandbox_billable_seconds_estimate"] += sandbox["billable_seconds_estimate"]
+    bucket["sandbox_estimated_usd"] += sandbox["estimated_usd"]
 
 
 def _account_bucket_from_billing_usage(
@@ -356,88 +291,41 @@ def _account_bucket_from_billing_usage(
     return bucket
 
 
-def _baseline_from_account_bucket(
-    bucket: dict[str, Any],
+def _session_bucket_from_inference_session_usage(
+    payload: dict[str, Any] | None,
     *,
-    captured_at: datetime,
-    month_start: datetime,
-) -> dict[str, Any]:
-    return {
-        "captured_at": _utc(captured_at),
-        "month_start": _utc(month_start),
-        "total_usd": bucket.get("total_usd", 0.0),
-        "inference_providers_usd": bucket.get("inference_providers_usd", 0.0),
-        "hf_jobs_usd": bucket.get("hf_jobs_usd", 0.0),
-        "inference_provider_requests": bucket.get("inference_provider_requests", 0),
-        "hf_jobs_minutes": bucket.get("hf_jobs_minutes", 0.0),
-    }
-
-
-def _baseline_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return _utc(value)
-    parsed = _parse_timestamp(value)
-    return _utc(parsed) if parsed is not None else None
-
-
-def _baseline_delta_bucket(
-    bucket: dict[str, Any],
-    baseline: dict[str, Any],
-    *,
+    session_id: str,
     window_start: datetime,
     window_end: datetime,
     timezone: str,
 ) -> dict[str, Any]:
-    delta = _empty_hf_account_bucket(
+    bucket = _empty_hf_account_bucket(
         window_start=window_start,
         window_end=window_end,
         timezone=timezone,
     )
-    for key in ("inference_providers_usd", "hf_jobs_usd", "hf_jobs_minutes"):
-        delta[key] = round(
-            max(0.0, _coerce_float(bucket.get(key)) - _coerce_float(baseline.get(key))),
-            6 if key != "hf_jobs_minutes" else 3,
-        )
-    delta["inference_provider_requests"] = max(
-        0,
-        _coerce_int(bucket.get("inference_provider_requests"))
-        - _coerce_int(baseline.get("inference_provider_requests")),
-    )
-    delta["total_usd"] = round(
-        delta["inference_providers_usd"] + delta["hf_jobs_usd"],
-        6,
-    )
-    return delta
+    periods = payload.get("periods") if isinstance(payload, dict) else []
+    if not isinstance(periods, list):
+        return bucket
 
+    cost_cents = 0.0
+    request_count = 0
+    for period in periods:
+        if not isinstance(period, dict):
+            continue
+        sessions = period.get("sessions")
+        if not isinstance(sessions, list):
+            continue
+        for session in sessions:
+            if not isinstance(session, dict) or session.get("id") != session_id:
+                continue
+            cost_cents += _coerce_float(session.get("costCents"))
+            request_count += _coerce_int(session.get("requestCount"))
 
-async def capture_hf_account_usage_baseline(
-    hf_token: str | None,
-    *,
-    now: datetime | None = None,
-) -> dict[str, Any] | None:
-    if not hf_token:
-        return None
-    windows = resolve_usage_windows("UTC", now=now)
-    now_utc = windows["now_utc"]
-    month_start = windows["month_start_utc"]
-    payload = await _fetch_hf_billing_usage_v2(
-        hf_token,
-        start=month_start,
-        end=now_utc,
-    )
-    if payload is None:
-        return None
-    bucket = _account_bucket_from_billing_usage(
-        payload,
-        window_start=month_start,
-        window_end=now_utc,
-        timezone="UTC",
-    )
-    return _baseline_from_account_bucket(
-        bucket,
-        captured_at=now_utc,
-        month_start=month_start,
-    )
+    bucket["inference_providers_usd"] = round(_cents_to_usd(cost_cents), 6)
+    bucket["inference_provider_requests"] = request_count
+    bucket["total_usd"] = bucket["inference_providers_usd"]
+    return bucket
 
 
 def _inference_credits_from_billing_usage(
@@ -494,6 +382,35 @@ async def _fetch_hf_billing_usage_v2(
         return None
 
 
+async def _fetch_hf_inference_session_usage(
+    hf_token: str,
+    *,
+    start: datetime,
+    end: datetime,
+) -> dict[str, Any] | None:
+    start_ts = _iso(start)
+    end_ts = _iso(max(_utc(end), _utc(start) + timedelta(seconds=1)))
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                HF_BILLING_USAGE_BY_INFERENCE_SESSION_URL,
+                params={"startDate": start_ts, "endDate": end_ts},
+                headers={"Authorization": f"Bearer {hf_token}"},
+            )
+            if response.status_code != 200:
+                logger.debug(
+                    "HF inference session usage failed: status=%s body=%s",
+                    response.status_code,
+                    response.text[:200],
+                )
+                return None
+            payload = response.json()
+            return payload if isinstance(payload, dict) else None
+    except (httpx.HTTPError, ValueError) as e:
+        logger.debug("HF inference session usage failed: %s", e)
+        return None
+
+
 def _session_usage_window_started_at(
     manager: Any, session_id: str | None
 ) -> datetime | None:
@@ -509,54 +426,46 @@ def _session_usage_window_started_at(
     return None
 
 
-def _session_usage_window_baseline(
-    manager: Any,
-    session_id: str | None,
-) -> dict[str, Any] | None:
+def _session_inference_billing_session_id(
+    manager: Any, session_id: str | None
+) -> str | None:
     if not session_id:
         return None
     agent_session = getattr(manager, "sessions", {}).get(session_id)
-    baseline = getattr(agent_session, "usage_window_baseline", None)
-    return baseline if isinstance(baseline, dict) else None
+    billing_session_id = getattr(agent_session, "inference_billing_session_id", None)
+    if isinstance(billing_session_id, str) and billing_session_id:
+        return billing_session_id
+    runtime_session = getattr(agent_session, "session", None)
+    billing_session_id = getattr(runtime_session, "inference_billing_session_id", None)
+    if isinstance(billing_session_id, str) and billing_session_id:
+        return billing_session_id
+    return None
 
 
-async def _load_persisted_session_usage_window_started_at(
+async def _load_persisted_session_usage_window_metadata(
     manager: Any,
     session_id: str | None,
-) -> datetime | None:
+) -> tuple[datetime | None, str | None]:
     if not session_id:
-        return None
+        return None, None
     store = manager._store()
     if not getattr(store, "enabled", False) or not hasattr(store, "load_session"):
-        return None
+        return None, None
     loaded = await store.load_session(session_id)
     metadata = loaded.get("metadata") if isinstance(loaded, dict) else None
     started_at = None
+    billing_session_id = None
     if isinstance(metadata, dict):
         started_at = metadata.get("usage_window_started_at") or metadata.get(
             "created_at"
         )
+        raw_billing_session_id = metadata.get("inference_billing_session_id")
+        if isinstance(raw_billing_session_id, str) and raw_billing_session_id:
+            billing_session_id = raw_billing_session_id
     if isinstance(started_at, datetime):
-        return _utc(started_at)
+        return _utc(started_at), billing_session_id
     parsed = _parse_timestamp(started_at)
-    return _utc(parsed) if parsed is not None else None
-
-
-async def _load_persisted_session_usage_window_baseline(
-    manager: Any,
-    session_id: str | None,
-) -> dict[str, Any] | None:
-    if not session_id:
-        return None
-    store = manager._store()
-    if not getattr(store, "enabled", False) or not hasattr(store, "load_session"):
-        return None
-    loaded = await store.load_session(session_id)
-    metadata = loaded.get("metadata") if isinstance(loaded, dict) else None
-    if not isinstance(metadata, dict):
-        return None
-    baseline = metadata.get("usage_window_baseline")
-    return baseline if isinstance(baseline, dict) else None
+    return (_utc(parsed) if parsed is not None else None), billing_session_id
 
 
 async def _build_hf_account_usage(
@@ -569,7 +478,7 @@ async def _build_hf_account_usage(
     month_start: datetime,
 ) -> dict[str, Any]:
     account_usage: dict[str, Any] = {
-        "source": "hf_billing_usage_v2",
+        "source": "hf_billing",
         "available": False,
         "current_session": None,
         "month": None,
@@ -580,19 +489,16 @@ async def _build_hf_account_usage(
         return account_usage
 
     session_start = _session_usage_window_started_at(manager, session_id)
-    if session_start is None:
-        session_start = await _load_persisted_session_usage_window_started_at(
-            manager, session_id
-        )
-    session_baseline = _session_usage_window_baseline(manager, session_id)
-    if session_baseline is None:
-        session_baseline = await _load_persisted_session_usage_window_baseline(
-            manager,
-            session_id,
-        )
-    baseline_month_start = None
-    if session_baseline is not None:
-        baseline_month_start = _baseline_datetime(session_baseline.get("month_start"))
+    billing_session_id = _session_inference_billing_session_id(manager, session_id)
+    if session_start is None or billing_session_id is None:
+        (
+            persisted_start,
+            persisted_billing_session_id,
+        ) = await _load_persisted_session_usage_window_metadata(manager, session_id)
+        if session_start is None:
+            session_start = persisted_start
+        if billing_session_id is None:
+            billing_session_id = persisted_billing_session_id
 
     window_tasks: dict[str, tuple[datetime, asyncio.Task[dict[str, Any] | None]]] = {
         "month": (
@@ -602,29 +508,17 @@ async def _build_hf_account_usage(
             ),
         ),
     }
-    if session_start is not None:
-        if baseline_month_start is not None:
-            window_tasks["current_session_baseline"] = (
-                baseline_month_start,
-                asyncio.create_task(
-                    _fetch_hf_billing_usage_v2(
-                        hf_token,
-                        start=baseline_month_start,
-                        end=now_utc,
-                    )
-                ),
-            )
-        else:
-            window_tasks["current_session"] = (
-                session_start,
-                asyncio.create_task(
-                    _fetch_hf_billing_usage_v2(
-                        hf_token,
-                        start=session_start,
-                        end=now_utc,
-                    )
-                ),
-            )
+    if billing_session_id is not None and session_start is not None:
+        window_tasks["current_session"] = (
+            session_start,
+            asyncio.create_task(
+                _fetch_hf_inference_session_usage(
+                    hf_token,
+                    start=session_start,
+                    end=now_utc,
+                )
+            ),
+        )
 
     payloads: dict[str, dict[str, Any] | None] = {}
     for name, (_, task) in window_tasks.items():
@@ -637,42 +531,92 @@ async def _build_hf_account_usage(
         return account_usage
 
     for name, (start, _) in window_tasks.items():
-        if name == "current_session_baseline":
-            continue
         payload = payloads.get(name)
         if payload is None:
             continue
-        account_usage[name] = _account_bucket_from_billing_usage(
-            payload,
-            window_start=start,
-            window_end=now_utc,
-            timezone=timezone,
-        )
-
-    if (
-        session_start is not None
-        and session_baseline is not None
-        and baseline_month_start is not None
-        and payloads.get("current_session_baseline") is not None
-    ):
-        baseline_bucket = _account_bucket_from_billing_usage(
-            payloads.get("current_session_baseline"),
-            window_start=baseline_month_start,
-            window_end=now_utc,
-            timezone=timezone,
-        )
-        account_usage["current_session"] = _baseline_delta_bucket(
-            baseline_bucket,
-            session_baseline,
-            window_start=session_start,
-            window_end=now_utc,
-            timezone=timezone,
-        )
+        if name == "current_session" and billing_session_id is not None:
+            account_usage[name] = _session_bucket_from_inference_session_usage(
+                payload,
+                session_id=billing_session_id,
+                window_start=start,
+                window_end=now_utc,
+                timezone=timezone,
+            )
+        else:
+            account_usage[name] = _account_bucket_from_billing_usage(
+                payload,
+                window_start=start,
+                window_end=now_utc,
+                timezone=timezone,
+            )
 
     account_usage["inference_providers_credits"] = (
         _inference_credits_from_billing_usage(payloads.get("month"))
     )
     return account_usage
+
+
+async def build_hf_billing_snapshot(
+    manager: Any,
+    *,
+    hf_token: str | None,
+    session_id: str | None,
+    timezone_name: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return a dataset-safe HF billing rollup for the session window.
+
+    This intentionally omits monthly account totals and credit-limit details.
+    The snapshot is an account-window delta, not per-call attribution.
+    """
+    windows = resolve_usage_windows(timezone_name, now=now)
+    timezone = str(windows["timezone"])
+    now_utc = windows["now_utc"]
+    snapshot: dict[str, Any] = {
+        "billing_scope": "account_window_delta",
+        "hf_billing": {
+            "source": "hf_billing_usage_v2",
+            "available": False,
+            "error": None,
+            "current_session": None,
+        },
+    }
+    hf_billing = snapshot["hf_billing"]
+
+    if not hf_token:
+        hf_billing["error"] = "missing_hf_token"
+        return snapshot
+    if not session_id:
+        hf_billing["error"] = "missing_session_id"
+        return snapshot
+
+    session_start = _session_usage_window_started_at(manager, session_id)
+    if session_start is None:
+        session_start, _ = await _load_persisted_session_usage_window_metadata(
+            manager,
+            session_id,
+        )
+    if session_start is None:
+        hf_billing["error"] = "missing_session_window"
+        return snapshot
+
+    payload = await _fetch_hf_billing_usage_v2(
+        hf_token,
+        start=session_start,
+        end=now_utc,
+    )
+    if not isinstance(payload, dict):
+        hf_billing["error"] = "billing_usage_unavailable"
+        return snapshot
+
+    hf_billing["available"] = True
+    hf_billing["current_session"] = _account_bucket_from_billing_usage(
+        payload,
+        window_start=session_start,
+        window_end=now_utc,
+        timezone=timezone,
+    )
+    return snapshot
 
 
 def _event_in_window(
@@ -766,10 +710,17 @@ async def build_usage_response(
 
     session_events: list[dict[str, Any]] = []
     if session_id:
+        session_start = _session_usage_window_started_at(manager, session_id)
+        if session_start is None:
+            session_start, _ = await _load_persisted_session_usage_window_metadata(
+                manager,
+                session_id,
+            )
         session_events = await _load_usage_events(
             manager,
             user_id=user_id,
             session_id=session_id,
+            start=session_start,
         )
 
     hf_account = await _build_hf_account_usage(

@@ -218,6 +218,3 @@ export const lightTheme = createTheme({
   },
   shape: sharedShape,
 });
-
-// Keep default export for backwards compat
-export default darkTheme;

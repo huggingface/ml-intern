@@ -12,7 +12,6 @@ dependencies = [
     # Agent runtime dependencies
     "requests>=2.33.0",
     "litellm>=1.83.0",
-    "boto3>=1.35.0",
     "huggingface-hub>=1.12.0",
     "fastmcp>=3.2.0",
     "prompt-toolkit>=3.0.0",

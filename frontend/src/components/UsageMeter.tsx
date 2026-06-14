@@ -120,7 +120,7 @@ function AccountUsageSection({
           strong
         />
         <UsageRow
-          label={useJobEstimate ? 'HF Jobs estimated' : 'HF Jobs'}
+          label="HF Jobs"
           value={formatUsd(
             useJobEstimate ? telemetry?.hf_jobs_estimated_usd : account?.hf_jobs_usd,
           )}
@@ -176,18 +176,25 @@ function CreditsSection({ credits }: { credits: HfInferenceProvidersCredits | nu
 
 export default function UsageMeter() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
+  const activeSessionYoloSpend = useSessionStore((state) => {
+    const active = state.sessions.find((session) => session.id === state.activeSessionId);
+    return active?.autoApprovalEstimatedSpendUsd ?? null;
+  });
   const { usage, isLoading, error, fetchUsage } = useUsageStore();
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
     void fetchUsage(activeSessionId);
-  }, [activeSessionId, fetchUsage]);
+  }, [activeSessionId, activeSessionYoloSpend, fetchUsage]);
 
-  const accountSessionTotal = usage?.hf_account?.current_session?.total_usd;
+  const accountSessionInference =
+    usage?.hf_account?.current_session?.inference_providers_usd;
   const sessionTotal =
-    accountSessionTotal == null
+    accountSessionInference == null
       ? usage?.session?.total_usd
-      : accountSessionTotal + (usage?.session?.sandbox_estimated_usd ?? 0);
+      : accountSessionInference +
+        (usage?.session?.hf_jobs_estimated_usd ?? 0) +
+        (usage?.session?.sandbox_estimated_usd ?? 0);
   const links = useMemo(() => usage?.links ?? {}, [usage?.links]);
   const billingMessage = billingUnavailableMessage(usage?.hf_account?.error);
   const open = Boolean(anchorEl);

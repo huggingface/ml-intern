@@ -7,7 +7,6 @@ pricing, context length, and tool-use support. We use it to:
   • Validate ``/model`` switches with live data instead of a hard-coded allowlist.
   • Show the user which providers serve a model, at what price, and whether they
     support tool calls.
-  • Derive a reasonable context-window limit for any routed model.
 
 The listing is cached in-memory for a few minutes so repeated lookups during a
 session are free. On fetch failure we return stale data if we have it, or an
@@ -26,10 +25,12 @@ logger = logging.getLogger(__name__)
 
 _CATALOG_URL = "https://router.huggingface.co/v1/models"
 _CACHE_TTL_SECONDS = 300
+_CACHE_FAILURE_TTL_SECONDS = 15
 _HTTP_TIMEOUT_SECONDS = 5.0
 
 _cache: Optional[dict] = None
 _cache_time: float = 0.0
+_last_fetch_error: Optional[str] = None
 
 
 @dataclass
@@ -40,7 +41,6 @@ class ProviderInfo:
     input_price: Optional[float]
     output_price: Optional[float]
     supports_tools: bool
-    supports_structured_output: bool
 
 
 @dataclass
@@ -53,30 +53,28 @@ class ModelInfo:
         return [p for p in self.providers if p.status == "live"]
 
     @property
-    def max_context_length(self) -> Optional[int]:
-        lengths = [p.context_length for p in self.live_providers if p.context_length]
-        return max(lengths) if lengths else None
-
-    @property
     def any_supports_tools(self) -> bool:
         return any(p.supports_tools for p in self.live_providers)
 
 
 def _fetch_catalog(force: bool = False) -> dict:
-    global _cache, _cache_time
+    global _cache, _cache_time, _last_fetch_error
     now = time.time()
-    if not force and _cache is not None and now - _cache_time < _CACHE_TTL_SECONDS:
+    ttl = _CACHE_FAILURE_TTL_SECONDS if _last_fetch_error else _CACHE_TTL_SECONDS
+    if not force and _cache is not None and now - _cache_time < ttl:
         return _cache
     try:
         resp = httpx.get(_CATALOG_URL, timeout=_HTTP_TIMEOUT_SECONDS)
         resp.raise_for_status()
         _cache = resp.json()
         _cache_time = now
+        _last_fetch_error = None
     except Exception as e:
         logger.warning("Failed to fetch HF router catalog: %s", e)
+        _last_fetch_error = str(e)
         if _cache is None:
             _cache = {"data": []}
-            _cache_time = now
+        _cache_time = now
     return _cache
 
 
@@ -92,9 +90,6 @@ def _parse_entry(entry: dict) -> ModelInfo:
                 input_price=pricing.get("input"),
                 output_price=pricing.get("output"),
                 supports_tools=bool(p.get("supports_tools", False)),
-                supports_structured_output=bool(
-                    p.get("supports_structured_output", False)
-                ),
             )
         )
     return ModelInfo(id=entry.get("id", ""), providers=providers)

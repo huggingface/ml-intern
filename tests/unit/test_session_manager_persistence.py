@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,12 @@ if str(_BACKEND_DIR) not in sys.path:
 from agent.core.model_ids import KIMI_K26_MODEL_ID  # noqa: E402
 from agent.core.session_persistence import NoopSessionStore  # noqa: E402
 from agent.core.usage_thresholds import USAGE_THRESHOLD_TOOL_NAME  # noqa: E402
-from session_manager import AgentSession, SessionManager  # noqa: E402
+from agent.core.yolo_budget import YOLO_BUDGET_TOOL_NAME  # noqa: E402
+from session_manager import (  # noqa: E402
+    AgentSession,
+    SessionManager,
+    new_inference_billing_session_id,
+)
 
 
 class FakeRuntimeSession:
@@ -42,6 +48,7 @@ class FakeRuntimeSession:
         self.auto_approval_estimated_spend_usd = 0.0
         self.usage_warning_next_threshold_usd = 5.0
         self.usage_threshold_checker = None
+        self.yolo_budget_checker = None
         self.logged_events = []
         self.sandbox = None
         self.sandbox_hardware = None
@@ -146,6 +153,33 @@ def _runtime_agent_session(
     )
 
 
+def test_inference_billing_session_id_is_uuid_for_long_agent_session_ids():
+    billing_session_id = new_inference_billing_session_id(
+        "s" * 300,
+        datetime(2026, 6, 5, 12, 30, tzinfo=UTC),
+    )
+
+    assert str(uuid.UUID(billing_session_id)) == billing_session_id
+
+
+def test_agent_session_replaces_non_uuid_inference_billing_session_id():
+    runtime_session = FakeRuntimeSession()
+    agent_session = AgentSession(
+        session_id="s1",
+        session=runtime_session,  # type: ignore[arg-type]
+        tool_router=object(),  # type: ignore[arg-type]
+        submission_queue=asyncio.Queue(),
+        inference_billing_session_id="not-a-uuid",
+    )
+
+    assert str(uuid.UUID(agent_session.inference_billing_session_id)) == (
+        agent_session.inference_billing_session_id
+    )
+    assert runtime_session.inference_billing_session_id == (
+        agent_session.inference_billing_session_id
+    )
+
+
 @pytest.mark.asyncio
 async def test_reset_session_usage_window_updates_runtime_and_store():
     store = RestoreStore()
@@ -153,26 +187,34 @@ async def test_reset_session_usage_window_updates_runtime_and_store():
     agent_session = _runtime_agent_session("s1")
     manager.sessions["s1"] = agent_session
     started_at = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
-    baseline = {"captured_at": started_at, "total_usd": 1.25}
+    original_billing_session_id = agent_session.inference_billing_session_id
+    agent_session.usage_warning_spend_cache = {"spend_usd": 12.0}
 
     info = await manager.reset_session_usage_window(
         "s1",
         started_at=started_at,
-        baseline=baseline,
     )
 
     assert agent_session.usage_window_started_at == started_at
-    assert agent_session.usage_window_baseline == baseline
+    assert agent_session.inference_billing_session_id is not None
+    assert agent_session.inference_billing_session_id != original_billing_session_id
+    assert str(uuid.UUID(agent_session.inference_billing_session_id)) == (
+        agent_session.inference_billing_session_id
+    )
+    assert (
+        agent_session.session.inference_billing_session_id
+        == agent_session.inference_billing_session_id
+    )
+    assert agent_session.usage_warning_spend_cache == {}
     assert info is not None
     assert info["usage_window_started_at"] == started_at.isoformat()
-    assert store.updated_fields[-1] == (
-        "s1",
-        {
-            "usage_window_started_at": started_at,
-            "usage_window_baseline": baseline,
-            "last_active_at": agent_session.last_active_at,
-        },
-    )
+    session_id, fields = store.updated_fields[-1]
+    assert session_id == "s1"
+    assert fields == {
+        "usage_window_started_at": started_at,
+        "inference_billing_session_id": agent_session.inference_billing_session_id,
+        "last_active_at": agent_session.last_active_at,
+    }
 
 
 def test_usage_threshold_pending_approval_serializes_and_restores():
@@ -228,6 +270,26 @@ def test_usage_spend_prefers_hf_current_session_over_telemetry():
     assert source == "hf_billing_current_session"
 
 
+def test_usage_spend_combines_hf_inference_with_telemetry_estimates():
+    spend, source = SessionManager._usage_spend_from_response(
+        {
+            "hf_account": {
+                "current_session": {
+                    "inference_providers_usd": 7.5,
+                },
+            },
+            "session": {
+                "total_usd": 99.0,
+                "hf_jobs_estimated_usd": 1.25,
+                "sandbox_estimated_usd": 0.5,
+            },
+        }
+    )
+
+    assert spend == 9.25
+    assert source == "hf_billing_current_session"
+
+
 def test_usage_spend_falls_back_to_app_telemetry():
     spend, source = SessionManager._usage_spend_from_response(
         {
@@ -260,6 +322,183 @@ def test_usage_spend_falls_back_when_hf_total_is_unavailable():
 
     assert spend == 3.5
     assert source == "app_telemetry_session"
+
+
+@pytest.mark.asyncio
+async def test_refresh_usage_metrics_uses_hf_billing_plus_sandbox(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token="owner-token")
+    agent_session.session.logged_events = [
+        {
+            "timestamp": "2026-06-01T12:00:00+00:00",
+            "event_type": "llm_call",
+            "data": {"cost_usd": 0.5, "total_tokens": 42},
+        },
+        {
+            "timestamp": "2026-06-01T12:05:00+00:00",
+            "event_type": "hf_job_complete",
+            "data": {"estimated_cost_usd": 1.0},
+        },
+        {
+            "timestamp": "2026-06-01T12:10:00+00:00",
+            "event_type": "sandbox_create",
+            "data": {"sandbox_id": "owner/sandbox-1", "hardware": "t4-small"},
+        },
+        {
+            "timestamp": "2026-06-01T12:40:00+00:00",
+            "event_type": "sandbox_destroy",
+            "data": {"sandbox_id": "owner/sandbox-1", "lifetime_s": 1800},
+        },
+    ]
+
+    async def fake_billing_snapshot(_manager, *, hf_token, session_id, timezone_name):
+        assert hf_token == "owner-token"
+        assert session_id == "s1"
+        assert timezone_name == "UTC"
+        return {
+            "billing_scope": "account_window_delta",
+            "hf_billing": {
+                "source": "hf_billing_usage_v2",
+                "available": True,
+                "current_session": {
+                    "window_start": "2026-06-01T12:00:00Z",
+                    "window_end": "2026-06-01T12:40:00Z",
+                    "timezone": "UTC",
+                    "total_usd": 4.0,
+                    "inference_providers_usd": 3.0,
+                    "hf_jobs_usd": 1.0,
+                    "inference_provider_requests": 6,
+                    "hf_jobs_minutes": 2.0,
+                    "access_token": "must-not-persist",
+                },
+            },
+            "month": {"total_usd": 999},
+            "inference_providers_credits": {"limit_usd": 999},
+        }
+
+    monkeypatch.setattr("usage.build_hf_billing_snapshot", fake_billing_snapshot)
+
+    metrics = await manager.refresh_session_usage_metrics(agent_session)
+
+    assert metrics["total_usd"] == 4.3
+    assert metrics["total_usd_source"] == "hf_billing_plus_sandbox_estimate"
+    assert metrics["app_total_usd"] == 1.8
+    assert metrics["hf_billing_total_usd"] == 4.0
+    assert agent_session.session.usage_metrics == metrics
+    assert agent_session.session.usage_hf_billing_snapshot == {
+        "billing_scope": "account_window_delta",
+        "hf_billing": {
+            "source": "hf_billing_usage_v2",
+            "available": True,
+            "error": None,
+            "current_session": {
+                "window_start": "2026-06-01T12:00:00Z",
+                "window_end": "2026-06-01T12:40:00Z",
+                "timezone": "UTC",
+                "total_usd": 4.0,
+                "inference_providers_usd": 3.0,
+                "hf_jobs_usd": 1.0,
+                "inference_provider_requests": 6,
+                "hf_jobs_minutes": 2.0,
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_usage_metrics_missing_token_falls_back_to_app_telemetry():
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token=None)
+    agent_session.session.hf_token = None
+    agent_session.session.logged_events = [
+        {
+            "timestamp": "2026-06-01T12:00:00+00:00",
+            "event_type": "llm_call",
+            "data": {"cost_usd": 2.0, "total_tokens": 10},
+        }
+    ]
+
+    metrics = await manager.refresh_session_usage_metrics(agent_session)
+
+    assert metrics["total_usd"] == 2.0
+    assert metrics["total_usd_source"] == "app_telemetry_fallback"
+    assert metrics["hf_billing"] == {
+        "source": "hf_billing_usage_v2",
+        "available": False,
+        "error": "missing_hf_token",
+        "current_session": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_usage_metrics_failure_records_error_code(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token="owner-token")
+    agent_session.session.logged_events = [
+        {
+            "timestamp": "2026-06-01T12:00:00+00:00",
+            "event_type": "llm_call",
+            "data": {"cost_usd": 2.0, "total_tokens": 10},
+        }
+    ]
+
+    async def fail_billing_snapshot(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("usage.build_hf_billing_snapshot", fail_billing_snapshot)
+
+    metrics = await manager.refresh_session_usage_metrics(
+        agent_session,
+        error_code="unit_billing_error",
+    )
+
+    assert metrics["total_usd"] == 2.0
+    assert metrics["total_usd_source"] == "app_telemetry_fallback"
+    assert metrics["hf_billing"] == {
+        "source": "hf_billing_usage_v2",
+        "available": False,
+        "error": "unit_billing_error",
+        "current_session": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_usage_metrics_timeout_records_error_code(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token="owner-token")
+    agent_session.session.logged_events = [
+        {
+            "timestamp": "2026-06-01T12:00:00+00:00",
+            "event_type": "llm_call",
+            "data": {"cost_usd": 2.0, "total_tokens": 10},
+        }
+    ]
+
+    async def slow_billing_snapshot(*_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        return {
+            "hf_billing": {
+                "available": True,
+                "current_session": {"total_usd": 999},
+            }
+        }
+
+    monkeypatch.setattr("usage.build_hf_billing_snapshot", slow_billing_snapshot)
+
+    metrics = await manager.refresh_session_usage_metrics(
+        agent_session,
+        error_code="unit_billing_timeout",
+        billing_timeout_s=0.001,
+    )
+
+    assert metrics["total_usd"] == 2.0
+    assert metrics["total_usd_source"] == "app_telemetry_fallback"
+    assert metrics["hf_billing"] == {
+        "source": "hf_billing_usage_v2",
+        "available": False,
+        "error": "unit_billing_timeout",
+        "current_session": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -397,6 +636,194 @@ async def test_usage_threshold_checker_uses_cached_spend_after_local_crossing(
     assert first is False
     assert second is False
     assert agent_session.session.pending_approval is None
+
+
+@pytest.mark.asyncio
+async def test_yolo_budget_checker_pauses_after_fresh_session_spend_crosses_cap(
+    monkeypatch,
+):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.auto_approval_enabled = True
+    agent_session.session.auto_approval_cost_cap_usd = 1.0
+    agent_session.session.auto_approval_estimated_spend_usd = 0.5
+    manager.sessions["s1"] = agent_session
+    calls = 0
+
+    async def fake_current_session_usage_spend(_agent_session, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["use_cache"] is False
+        return 1.25, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_yolo_budget_checker(agent_session)
+
+    paused = await agent_session.session.yolo_budget_checker(
+        {"spend_kind": "llm_call", "history_size": 4}
+    )
+
+    assert paused is True
+    assert calls == 1
+    assert agent_session.session.auto_approval_estimated_spend_usd == 1.25
+    pending = agent_session.session.pending_approval
+    assert pending["kind"] == YOLO_BUDGET_TOOL_NAME
+    assert pending["current_spend_usd"] == 1.25
+    assert pending["cap_usd"] == 1.0
+    assert pending["estimated_next_usd"] is None
+    assert pending["billing_source"] == "hf_billing_current_session"
+    assert agent_session.session.events[-1].event_type == "approval_required"
+
+
+@pytest.mark.asyncio
+async def test_yolo_budget_checker_emits_session_update_under_cap(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.auto_approval_enabled = True
+    agent_session.session.auto_approval_cost_cap_usd = 1.0
+    agent_session.session.auto_approval_estimated_spend_usd = 0.0
+    manager.sessions["s1"] = agent_session
+
+    async def fake_current_session_usage_spend(_agent_session, **kwargs):
+        assert kwargs["use_cache"] is False
+        return 0.25, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_yolo_budget_checker(agent_session)
+
+    paused = await agent_session.session.yolo_budget_checker(
+        {"spend_kind": "llm_call", "history_size": 4}
+    )
+
+    assert paused is False
+    assert agent_session.session.auto_approval_estimated_spend_usd == 0.25
+    assert agent_session.session.pending_approval is None
+    event = agent_session.session.events[-1]
+    assert event.event_type == "session_update"
+    assert event.data == {
+        "session_id": "s1",
+        "auto_approval": {
+            "enabled": True,
+            "cost_cap_usd": 1.0,
+            "estimated_spend_usd": 0.25,
+            "remaining_usd": 0.75,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_yolo_budget_checker_emits_session_update_for_observed_spend(
+    monkeypatch,
+):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.auto_approval_enabled = True
+    agent_session.session.auto_approval_cost_cap_usd = 1.0
+    agent_session.session.auto_approval_estimated_spend_usd = 0.03
+    manager.sessions["s1"] = agent_session
+
+    async def fake_current_session_usage_spend(_agent_session, **kwargs):
+        assert kwargs["use_cache"] is False
+        return 0.0, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_yolo_budget_checker(agent_session)
+
+    paused = await agent_session.session.yolo_budget_checker(
+        {
+            "spend_kind": "llm_call",
+            "observed_cost_usd": 0.03,
+            "history_size": 4,
+        }
+    )
+
+    assert paused is False
+    event = agent_session.session.events[-1]
+    assert event.event_type == "session_update"
+    assert event.data["auto_approval"] == {
+        "enabled": True,
+        "cost_cap_usd": 1.0,
+        "estimated_spend_usd": 0.03,
+        "remaining_usd": 0.97,
+    }
+
+
+@pytest.mark.asyncio
+async def test_usage_fetch_reconciles_yolo_ledger_from_hf_billing():
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.auto_approval_enabled = True
+    agent_session.session.auto_approval_cost_cap_usd = 1.0
+    agent_session.session.auto_approval_estimated_spend_usd = 0.03
+    manager.sessions["s1"] = agent_session
+
+    summary = await manager.reconcile_session_auto_approval_from_usage(
+        "s1",
+        {
+            "session": {
+                "hf_jobs_estimated_usd": 0.0,
+                "sandbox_estimated_usd": 0.0,
+            },
+            "hf_account": {
+                "current_session": {
+                    "inference_providers_usd": 0.16,
+                }
+            },
+        },
+    )
+
+    assert summary == {
+        "enabled": True,
+        "cost_cap_usd": 1.0,
+        "estimated_spend_usd": 0.16,
+        "remaining_usd": 0.84,
+    }
+    assert agent_session.session.auto_approval_estimated_spend_usd == 0.16
+
+
+@pytest.mark.asyncio
+async def test_yolo_budget_checker_uses_local_ledger_when_billing_lags(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1")
+    agent_session.session.auto_approval_enabled = True
+    agent_session.session.auto_approval_cost_cap_usd = 1.0
+    agent_session.session.auto_approval_estimated_spend_usd = 1.1
+    manager.sessions["s1"] = agent_session
+
+    async def fake_current_session_usage_spend(_agent_session, **kwargs):
+        assert kwargs["use_cache"] is False
+        return 0.75, "hf_billing_current_session"
+
+    monkeypatch.setattr(
+        manager,
+        "_current_session_usage_spend",
+        fake_current_session_usage_spend,
+    )
+    manager._install_yolo_budget_checker(agent_session)
+
+    paused = await agent_session.session.yolo_budget_checker(
+        {"spend_kind": "llm_call", "history_size": 4}
+    )
+
+    assert paused is True
+    assert agent_session.session.auto_approval_estimated_spend_usd == 1.1
+    pending = agent_session.session.pending_approval
+    assert pending["kind"] == YOLO_BUDGET_TOOL_NAME
+    assert pending["current_spend_usd"] == 1.1
+    assert pending["cap_usd"] == 1.0
+    assert pending["billing_source"] == "hf_billing_current_session"
 
 
 def test_unknown_saved_model_defaults_to_kimi():
@@ -928,6 +1355,38 @@ async def test_lazy_restore_preserves_auto_approval_policy():
     finally:
         stop.set()
         await _cancel_runtime_tasks(manager)
+
+
+@pytest.mark.asyncio
+async def test_update_session_auto_approval_seeds_existing_session_usage(monkeypatch):
+    store = RestoreStore()
+    manager = _manager_with_store(store)
+    agent_session = _runtime_agent_session("seed-yolo")
+    manager.sessions["seed-yolo"] = agent_session
+
+    async def fake_current_spend(*args, **kwargs):
+        assert kwargs["use_cache"] is False
+        return 2.75, "app_telemetry_session"
+
+    async def fake_persist(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "_current_session_usage_spend", fake_current_spend)
+    monkeypatch.setattr(manager, "persist_session_snapshot", fake_persist)
+
+    summary = await manager.update_session_auto_approval(
+        "seed-yolo",
+        enabled=True,
+        cost_cap_usd=None,
+        cap_provided=False,
+    )
+
+    assert summary == {
+        "enabled": True,
+        "cost_cap_usd": 5.0,
+        "estimated_spend_usd": 2.75,
+        "remaining_usd": 2.25,
+    }
 
 
 @pytest.mark.asyncio

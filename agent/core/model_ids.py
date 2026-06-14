@@ -10,8 +10,6 @@ MINIMAX_M27_MODEL_ID = "MiniMaxAI/MiniMax-M2.7:novita"
 GLM_51_MODEL_ID = "zai-org/GLM-5.1:novita"
 DEEPSEEK_V4_PRO_MODEL_ID = "deepseek-ai/DeepSeek-V4-Pro:novita"
 
-DEFAULT_MODEL_ID = CLAUDE_OPUS_48_MODEL_ID
-
 HOSTED_MODEL_IDS = {
     CLAUDE_OPUS_48_MODEL_ID,
     GPT_55_MODEL_ID,

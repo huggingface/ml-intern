@@ -64,12 +64,13 @@ from agent.core.model_ids import (
     MINIMAX_M27_MODEL_ID,
     strip_huggingface_model_prefix,
 )
-from usage import build_usage_response, capture_hf_account_usage_baseline
+from agent.core.prompt_caching import with_prompt_cache_params
+from usage import build_usage_response
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["agent"])
-_background_teardown_tasks: set[asyncio.Task] = set()
+_background_route_tasks: set[asyncio.Task] = set()
 
 DEFAULT_OPUS_MODEL_ID = CLAUDE_OPUS_48_MODEL_ID
 DEFAULT_GPT_MODEL_ID = GPT_55_MODEL_ID
@@ -77,18 +78,43 @@ DEFAULT_FREE_MODEL_ID = KIMI_K26_MODEL_ID
 DATASET_UPLOAD_MULTIPART_SLACK_BYTES = 1024 * 1024
 
 
-async def _reset_usage_window_with_hf_baseline(
-    session_id: str,
-    hf_token: str | None,
-) -> dict[str, Any] | None:
-    baseline = await capture_hf_account_usage_baseline(hf_token)
-    captured_at = baseline.get("captured_at") if baseline else None
-    started_at = captured_at if isinstance(captured_at, datetime) else datetime.utcnow()
+async def _reset_usage_window(session_id: str) -> dict[str, Any] | None:
     return await session_manager.reset_session_usage_window(
         session_id,
-        started_at=started_at,
-        baseline=baseline,
+        started_at=datetime.utcnow(),
     )
+
+
+async def _refresh_usage_and_upload(
+    agent_session: AgentSession,
+    *,
+    error_code: str,
+) -> None:
+    session = agent_session.session
+    try:
+        await session_manager.refresh_session_usage_metrics(
+            agent_session,
+            error_code=error_code,
+        )
+        session.save_and_upload_detached(session.config.session_dataset_repo)
+    except Exception as e:
+        logger.warning(
+            "Background usage refresh/upload failed for %s: %s",
+            agent_session.session_id,
+            e,
+        )
+
+
+def _schedule_usage_refresh_and_upload(
+    agent_session: AgentSession,
+    *,
+    error_code: str,
+) -> None:
+    task = asyncio.create_task(
+        _refresh_usage_and_upload(agent_session, error_code=error_code)
+    )
+    _background_route_tasks.add(task)
+    task.add_done_callback(_background_route_tasks.discard)
 
 
 def _available_models() -> list[dict[str, Any]]:
@@ -353,11 +379,13 @@ async def generate_title(
     so the 60-token output budget isn't consumed before the title is written.
     """
     try:
+        await _check_session_access(request.session_id, user)
         llm_params = _resolve_llm_params(
             "openai/gpt-oss-120b:cerebras",
             _user_hf_token(user),
             reasoning_effort="low",
         )
+        llm_params = with_prompt_cache_params(llm_params)
         response = await acompletion(
             messages=[
                 {
@@ -382,7 +410,6 @@ async def generate_title(
         if len(title) > 50:
             title = title[:50].rstrip() + "…"
         try:
-            await _check_session_access(request.session_id, user)
             await session_manager.update_session_title(request.session_id, title)
         except Exception:
             logger.debug(
@@ -448,7 +475,7 @@ async def create_session(
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    await _reset_usage_window_with_hf_baseline(session_id, hf_token)
+    await _reset_usage_window(session_id)
 
     return SessionResponse(
         session_id=session_id,
@@ -492,7 +519,7 @@ async def restore_session_summary(
     except SessionCapacityError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    await _reset_usage_window_with_hf_baseline(session_id, hf_token)
+    await _reset_usage_window(session_id)
 
     await _check_session_access(
         session_id,
@@ -537,8 +564,7 @@ async def activate_session(
 ) -> SessionInfo:
     """Mark a session as actively revisited and reset its usage meter window."""
     await _check_session_access(session_id, user, request)
-    hf_token = resolve_hf_request_token(request)
-    info = await _reset_usage_window_with_hf_baseline(session_id, hf_token)
+    info = await _reset_usage_window(session_id)
     if not info:
         raise HTTPException(status_code=404, detail="Session not found")
     return SessionInfo(**info)
@@ -728,7 +754,7 @@ async def get_usage(
             request,
             preload_sandbox=False,
         )
-    return await build_usage_response(
+    usage = await build_usage_response(
         session_manager,
         user_id=user["user_id"],
         hf_token=(
@@ -739,6 +765,16 @@ async def get_usage(
         session_id=session_id,
         timezone_name=tz,
     )
+    if session_id:
+        auto_approval = (
+            await session_manager.reconcile_session_auto_approval_from_usage(
+                session_id,
+                usage,
+            )
+        )
+        if auto_approval is not None:
+            usage["auto_approval"] = auto_approval
+    return usage
 
 
 @router.get("/sessions", response_model=list[SessionInfo])
@@ -755,8 +791,8 @@ async def teardown_session_sandbox(
     """Best-effort sandbox teardown that preserves durable chat history."""
     await _check_session_access(session_id, user, preload_sandbox=False)
     task = asyncio.create_task(session_manager.teardown_sandbox(session_id))
-    _background_teardown_tasks.add(task)
-    task.add_done_callback(_background_teardown_tasks.discard)
+    _background_route_tasks.add(task)
+    task.add_done_callback(_background_route_tasks.discard)
     return {"status": "teardown_requested", "session_id": session_id}
 
 
@@ -906,8 +942,9 @@ async def record_pro_click(
         target=str(body.get("target") or "pro_pricing"),
     )
     if agent_session.session.config.save_sessions:
-        agent_session.session.save_and_upload_detached(
-            agent_session.session.config.session_dataset_repo
+        _schedule_usage_refresh_and_upload(
+            agent_session,
+            error_code="pro_click_billing_snapshot_error",
         )
     return {"status": "ok"}
 
@@ -1150,7 +1187,8 @@ async def submit_feedback(
     # Fire-and-forget save so feedback reaches the dataset even if the user
     # closes the tab right after clicking.
     if agent_session.session.config.save_sessions:
-        agent_session.session.save_and_upload_detached(
-            agent_session.session.config.session_dataset_repo
+        _schedule_usage_refresh_and_upload(
+            agent_session,
+            error_code="feedback_billing_snapshot_error",
         )
     return {"status": "ok"}

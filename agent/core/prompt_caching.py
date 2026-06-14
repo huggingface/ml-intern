@@ -16,12 +16,28 @@ from agent.core.model_ids import HF_ROUTER_BASE_URL
 
 _CACHE_CONTROL = {"type": "ephemeral"}
 _CACHEABLE_ROLES = {"system", "user"}
-_OPENROUTER_SESSION_ID_MAX_LENGTH = 256
+_HF_ROUTER_SESSION_ID_MAX_LENGTH = 256
+HF_ROUTER_SESSION_ID_HEADER = "X-HF-Session-id"
+
+
+def router_session_id_for(session: Any) -> str | None:
+    """Return the usage-window-scoped Router session ID for a runtime session."""
+    billing_session_id = getattr(session, "inference_billing_session_id", None)
+    if isinstance(billing_session_id, str) and billing_session_id:
+        return billing_session_id
+    session_id = getattr(session, "session_id", None)
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    return None
+
+
+def _is_hf_router_request(llm_params: dict[str, Any]) -> bool:
+    api_base = str(llm_params.get("api_base") or "").rstrip("/")
+    return api_base == HF_ROUTER_BASE_URL
 
 
 def _is_fal_router_request(llm_params: dict[str, Any]) -> bool:
-    api_base = str(llm_params.get("api_base") or "").rstrip("/")
-    return api_base == HF_ROUTER_BASE_URL and ":fal" in _router_model(llm_params)
+    return _is_hf_router_request(llm_params) and ":fal" in _router_model(llm_params)
 
 
 def _router_model(llm_params: dict[str, Any]) -> str:
@@ -54,19 +70,30 @@ def _merge_extra_body(
     return cached_params
 
 
+def _merge_extra_headers(
+    llm_params: dict[str, Any], updates: dict[str, str]
+) -> dict[str, Any]:
+    if not updates:
+        return llm_params
+
+    cached_params = dict(llm_params)
+    extra_headers = dict(cached_params.get("extra_headers") or {})
+    extra_headers.update(updates)
+    cached_params["extra_headers"] = extra_headers
+    return cached_params
+
+
 def with_prompt_cache_params(
     llm_params: dict[str, Any],
     *,
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """Return LiteLLM params with provider-native prompt-cache body hints."""
-    if not _is_fal_router_request(llm_params):
-        return llm_params
-
     updates: dict[str, Any] = {}
-    if session_id:
-        stable_session_id = session_id[:_OPENROUTER_SESSION_ID_MAX_LENGTH]
-        updates["session_id"] = stable_session_id
+    headers: dict[str, str] = {}
+    if session_id and _is_hf_router_request(llm_params):
+        stable_session_id = session_id[:_HF_ROUTER_SESSION_ID_MAX_LENGTH]
+        headers[HF_ROUTER_SESSION_ID_HEADER] = stable_session_id
         if _is_openai_gpt55(llm_params):
             updates["prompt_cache_key"] = stable_session_id
 
@@ -76,7 +103,7 @@ def with_prompt_cache_params(
     if _is_openai_gpt55(llm_params):
         updates["prompt_cache_retention"] = "24h"
 
-    return _merge_extra_body(llm_params, updates)
+    return _merge_extra_headers(_merge_extra_body(llm_params, updates), headers)
 
 
 def _message_role(message: Any) -> str | None:
