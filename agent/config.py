@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal, Union
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from fastmcp.mcp_config import (
     RemoteMCPServer,
     StdioMCPServer,
@@ -207,10 +207,12 @@ def load_config(
     Use ${VAR_NAME} in your JSON for any secret.
     Automatically loads from .env file.
     """
-    # Load .env from project root first (so it works from any directory),
-    # then CWD .env can override if present
+    # Repo .env first, then let the launch directory's .env fill in any gaps.
+    # find_dotenv needs usecwd=True to look at the launch CWD, not this file.
     load_dotenv(_PROJECT_ROOT / ".env")
-    load_dotenv(override=False)
+    cwd_dotenv = find_dotenv(usecwd=True)
+    if cwd_dotenv:
+        load_dotenv(cwd_dotenv, override=False)
 
     raw_config = _load_json_config(Path(config_path))
     if include_user_defaults:

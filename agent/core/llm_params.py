@@ -33,6 +33,18 @@ def _resolve_hf_router_token(session_hf_token: str | None = None) -> str | None:
 # an accepted-looking value, so this stays intentionally small and generic.
 _HF_EFFORTS = {"low", "medium", "high"}
 
+# When ``HF_BILL_TO`` names an org you belong to, the router charges that org's
+# credits instead of your personal allowance — same header huggingface_hub's
+# ``bill_to=`` sets, applied here because we go through LiteLLM, not InferenceClient.
+HF_BILL_TO_ENV = "HF_BILL_TO"
+HF_BILL_TO_HEADER = "X-HF-Bill-To"
+
+
+def _resolve_hf_bill_to() -> str | None:
+    """Org to bill HF Inference Providers usage to, or None if unset."""
+    value = os.environ.get(HF_BILL_TO_ENV)
+    return value.strip() or None if value else None
+
 
 def _hf_router_effort_level(reasoning_effort: str) -> str:
     level = "low" if reasoning_effort == "minimal" else reasoning_effort
@@ -120,6 +132,10 @@ def _resolve_llm_params(
       1. session.hf_token — the user's own token (CLI / OAuth / cache file).
       2. huggingface_hub cache — ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` /
          local ``hf auth login`` cache.
+
+    When ``HF_BILL_TO`` is set, an ``X-HF-Bill-To`` header is attached to
+    HF-router calls so Inference Providers usage is charged to that org's
+    credits instead of the token owner's personal monthly allowance.
     """
     normalized_model = strip_huggingface_model_prefix(model_name) or model_name
 
@@ -136,6 +152,9 @@ def _resolve_llm_params(
         "api_base": HF_ROUTER_BASE_URL,
         "api_key": api_key,
     }
+    bill_to = _resolve_hf_bill_to()
+    if bill_to:
+        params["extra_headers"] = {HF_BILL_TO_HEADER: bill_to}
     if reasoning_effort:
         hf_level = _hf_router_effort_level(reasoning_effort)
         if hf_level not in _HF_EFFORTS:

@@ -33,9 +33,10 @@ Create a `.env` file in the project root (or export these in your shell):
 ```bash
 HF_TOKEN=<your-hugging-face-token> # HF Router inference + Hub actions
 GITHUB_TOKEN=<github-personal-access-token>
+HF_BILL_TO=<org-name> # optional: bill Inference Providers usage to an org
 ```
 
-All API-based model calls go through Hugging Face [Inference Providers](https://huggingface.co/docs/inference-providers/en/index), so your `HF_TOKEN` must be allowed to make Inference Provider calls. If no `HF_TOKEN` is set, the CLI will prompt you to paste one on first launch unless you start on a local model. To get a `GITHUB_TOKEN` follow the tutorial [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token). See the [local models section below](#local-models) for instructions on using agents that run on your hardware.
+All API-based model calls go through Hugging Face [Inference Providers](https://huggingface.co/docs/inference-providers/en/index), so your `HF_TOKEN` must be allowed to make Inference Provider calls. Set `HF_BILL_TO` to an org you belong to to charge inference to that org's credits instead of your personal monthly allowance — this sends an `X-HF-Bill-To` header on every router call (main agent, research sub-agent, and compaction alike). If no `HF_TOKEN` is set, the CLI will prompt you to paste one on first launch unless you start on a local model. To get a `GITHUB_TOKEN` follow the tutorial [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token). See the [local models section below](#local-models) for instructions on using agents that run on your hardware.
 
 ### Usage
 

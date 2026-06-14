@@ -2,11 +2,19 @@ import pytest
 
 from agent.core.hf_tokens import resolve_hf_request_token
 from agent.core.llm_params import (
+    HF_BILL_TO_ENV,
+    HF_BILL_TO_HEADER,
     UnsupportedEffortError,
     _resolve_hf_router_token,
     _resolve_llm_params,
 )
 from agent.core.model_ids import HF_ROUTER_BASE_URL
+
+
+@pytest.fixture(autouse=True)
+def _clear_bill_to(monkeypatch):
+    """Keep the developer's own HF_BILL_TO out of the default-behavior tests."""
+    monkeypatch.delenv(HF_BILL_TO_ENV, raising=False)
 
 
 def test_hf_router_params_for_default_model_uses_session_token():
@@ -63,10 +71,36 @@ def test_router_params_fall_back_to_hf_cache_when_session_token_missing(monkeypa
     assert "extra_headers" not in params
 
 
-def test_router_params_never_set_bill_to_headers():
+def test_router_params_omit_bill_to_header_when_env_unset():
     params = _resolve_llm_params("moonshotai/Kimi-K2.6", "session-token")
 
     assert params["api_key"] == "session-token"
+    assert "extra_headers" not in params
+
+
+def test_router_params_add_bill_to_header_when_env_set(monkeypatch):
+    monkeypatch.setenv(HF_BILL_TO_ENV, "my-org")
+
+    params = _resolve_llm_params("moonshotai/Kimi-K2.6", "session-token")
+
+    assert params["extra_headers"] == {HF_BILL_TO_HEADER: "my-org"}
+
+
+def test_router_params_strip_whitespace_and_ignore_blank_bill_to(monkeypatch):
+    monkeypatch.setenv(HF_BILL_TO_ENV, "  my-org  ")
+    assert _resolve_llm_params("moonshotai/Kimi-K2.6")["extra_headers"] == {
+        HF_BILL_TO_HEADER: "my-org"
+    }
+
+    monkeypatch.setenv(HF_BILL_TO_ENV, "   ")
+    assert "extra_headers" not in _resolve_llm_params("moonshotai/Kimi-K2.6")
+
+
+def test_local_model_params_never_get_bill_to_header(monkeypatch):
+    monkeypatch.setenv(HF_BILL_TO_ENV, "my-org")
+
+    params = _resolve_llm_params("ollama/llama3.1:8b")
+
     assert "extra_headers" not in params
 
 
