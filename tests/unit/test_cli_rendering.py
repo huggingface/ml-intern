@@ -130,7 +130,13 @@ async def test_hf_identity_uses_single_whoami_v2_payload(monkeypatch):
 def test_cli_forwards_model_flag_to_interactive_main(monkeypatch):
     seen: dict[str, object] = {}
 
-    async def fake_main(*, model=None, sandbox_tools=False):
+    async def fake_main(
+        model=None,
+        sandbox_tools=False,
+        *,
+        notify_on_block=False,
+        notification_method="auto",
+    ):
         seen["model"] = model
         seen["sandbox_tools"] = sandbox_tools
 
@@ -146,7 +152,13 @@ def test_cli_forwards_model_flag_to_interactive_main(monkeypatch):
 def test_cli_forwards_sandbox_flag_to_interactive_main(monkeypatch):
     seen: dict[str, object] = {}
 
-    async def fake_main(*, model=None, sandbox_tools=False):
+    async def fake_main(
+        model=None,
+        sandbox_tools=False,
+        *,
+        notify_on_block=False,
+        notification_method="auto",
+    ):
         seen["model"] = model
         seen["sandbox_tools"] = sandbox_tools
 
@@ -392,6 +404,7 @@ async def test_interactive_main_passes_user_plan_to_submission_loop(monkeypatch)
         _config,
         *,
         session_holder=None,
+        **_kwargs,
     ):
         ready_event.set()
         try:

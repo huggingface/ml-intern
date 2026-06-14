@@ -57,10 +57,16 @@ ml-intern "fine-tune llama on my dataset"
 ml-intern --sandbox-tools "your prompt"                         # use HF Space sandbox tools
 ml-intern --max-iterations 100 "your prompt"
 ml-intern --no-stream "your prompt"
+ml-intern --notify-on-block --notify-method auto
 # Change model
 ml-intern --model moonshotai/Kimi-K2.6 "your prompt"
 ml-intern --model openai/gpt-5.5:fal-ai "your prompt"
 ```
+
+`--notify-on-block` adds an attention ping when the interactive CLI is blocked
+waiting for approval. `--notify-method auto` prefers desktop notifications when
+supported (`osascript` on macOS, `notify-send` on Linux) and falls back to the
+terminal bell.
 
 Run `ml-intern` then `/model` to see the full list of suggested model ids
 (Claude, GPT, HF Router models like MiniMax, Kimi, GLM, DeepSeek, and local
@@ -159,6 +165,11 @@ To override the destination repo, set:
 
 The shared `smolagents/ml-intern-sessions` dataset is unrelated and only
 receives anonymized telemetry rows used by the backend KPI scheduler.
+
+`--notify-on-block` adds an attention ping when the interactive CLI is blocked
+waiting for approval. `--notify-method auto` prefers desktop notifications when
+supported (`osascript` on macOS, `notify-send` on Linux) and falls back to the
+terminal bell.
 
 ## Supported Gateways
 
