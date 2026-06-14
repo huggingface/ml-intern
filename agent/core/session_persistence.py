@@ -65,6 +65,10 @@ class NoopSessionStore:
     async def init(self) -> None:
         return None
 
+    async def maybe_reconnect(self) -> bool:
+        """Return True when the store is usable; subclasses may retry a failed init."""
+        return self.enabled
+
     async def close(self) -> None:
         return None
 
@@ -129,6 +133,16 @@ class MongoSessionStore(NoopSessionStore):
                 await self.client.close()
             self.client = None
             self.db = None
+
+    async def maybe_reconnect(self) -> bool:
+        """Retry a failed init so one Mongo blip at boot doesn't disable
+        persistence (and with it the idle reaper) until the next restart."""
+        if self.enabled:
+            return True
+        await self.init()
+        if self.enabled:
+            logger.info("Mongo session persistence recovered after earlier failure")
+        return self.enabled
 
     async def close(self) -> None:
         if self.client is not None:
@@ -251,6 +265,34 @@ class MongoSessionStore(NoopSessionStore):
                 raise RuntimeError("session store not ready")
             return
         now = _now()
+        if raise_on_error:
+            await self._write_snapshot_messages(
+                session_id=session_id,
+                messages=messages,
+                now=now,
+                raise_on_error=True,
+            )
+            await self.upsert_session(
+                session_id=session_id,
+                user_id=user_id,
+                model=model,
+                title=title,
+                created_at=created_at,
+                runtime_state=runtime_state,
+                status=status,
+                message_count=len(messages),
+                turn_count=turn_count,
+                pending_approval=pending_approval,
+                notification_destinations=notification_destinations,
+                usage_window_started_at=usage_window_started_at,
+                inference_billing_session_id=inference_billing_session_id,
+                auto_approval_enabled=auto_approval_enabled,
+                auto_approval_cost_cap_usd=auto_approval_cost_cap_usd,
+                auto_approval_estimated_spend_usd=auto_approval_estimated_spend_usd,
+                usage_warning_next_threshold_usd=usage_warning_next_threshold_usd,
+            )
+            return
+
         await self.upsert_session(
             session_id=session_id,
             user_id=user_id,
@@ -270,6 +312,21 @@ class MongoSessionStore(NoopSessionStore):
             auto_approval_estimated_spend_usd=auto_approval_estimated_spend_usd,
             usage_warning_next_threshold_usd=usage_warning_next_threshold_usd,
         )
+        await self._write_snapshot_messages(
+            session_id=session_id,
+            messages=messages,
+            now=now,
+            raise_on_error=False,
+        )
+
+    async def _write_snapshot_messages(
+        self,
+        *,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        now: datetime,
+        raise_on_error: bool,
+    ) -> None:
         ops: list[Any] = []
         for idx, raw in enumerate(messages):
             ops.append(

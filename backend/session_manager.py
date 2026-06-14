@@ -198,6 +198,15 @@ REAPER_IDLE_MINUTES: float = float(os.environ.get("REAPER_IDLE_MINUTES", "15"))
 REAPER_INTERVAL_S: float = float(os.environ.get("REAPER_INTERVAL_S", "300"))
 REAP_TEARDOWN_TIMEOUT_S: float = float(os.environ.get("REAP_TEARDOWN_TIMEOUT_S", "30"))
 REAPER_IDLE = timedelta(minutes=REAPER_IDLE_MINUTES)
+# Sessions parked on a real tool-permission prompt keep their slot longer than
+# plain idle ones (the user may genuinely want to "approve later"), but not
+# forever — an unanswered prompt must not pin a capacity slot indefinitely.
+# Acknowledgement-type prompts (usage-threshold / YOLO-cap), which are created
+# automatically at turn end with no user action, use the normal idle window.
+REAPER_TOOL_APPROVAL_IDLE_MINUTES: float = float(
+    os.environ.get("REAPER_TOOL_APPROVAL_IDLE_MINUTES", "60")
+)
+REAPER_TOOL_APPROVAL_IDLE = timedelta(minutes=REAPER_TOOL_APPROVAL_IDLE_MINUTES)
 
 
 class SessionManager:
@@ -249,6 +258,32 @@ class SessionManager:
         """Count active sessions owned by a specific user."""
         return sum(
             1 for s in self.sessions.values() if s.user_id == user_id and s.is_active
+        )
+
+    def _user_slot_breakdown(self, user_id: str) -> str:
+        """Summarize what holds a user's live slots, for the capacity error.
+
+        Call under the manager lock so the breakdown matches the count that
+        triggered the error.
+        """
+        tool_approvals = ack_prompts = processing = idle = 0
+        for s in self.sessions.values():
+            if s.user_id != user_id or not s.is_active:
+                continue
+            pending = s.session.pending_approval
+            if is_usage_threshold_pending(pending) or is_yolo_budget_pending(pending):
+                ack_prompts += 1
+            elif pending:
+                tool_approvals += 1
+            elif s.is_processing:
+                processing += 1
+            else:
+                idle += 1
+        return (
+            f"{tool_approvals} awaiting tool approval, "
+            f"{ack_prompts} usage/cost prompts, "
+            f"{processing} still processing, "
+            f"{idle} idle"
         )
 
     @staticmethod
@@ -358,13 +393,45 @@ class SessionManager:
             )
         return result
 
-    def _restore_pending_approval(
-        self, session: Session, pending_approval: list[dict[str, Any]] | None
-    ) -> None:
+    @staticmethod
+    def _pending_approval_docs(
+        pending_approval: Any,
+        *,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return persisted pending approval docs that are safe to inspect."""
         if not pending_approval:
+            return []
+        if not isinstance(pending_approval, list):
+            logger.warning(
+                "Dropping malformed pending approval for %s: expected list, got %s",
+                session_id or "<unknown>",
+                type(pending_approval).__name__,
+            )
+            return []
+        docs: list[dict[str, Any]] = []
+        for raw in pending_approval:
+            if isinstance(raw, dict):
+                docs.append(raw)
+            else:
+                logger.warning(
+                    "Dropping malformed pending approval item for %s: expected dict, got %s",
+                    session_id or "<unknown>",
+                    type(raw).__name__,
+                )
+        return docs
+
+    def _restore_pending_approval(
+        self, session: Session, pending_approval: Any
+    ) -> None:
+        docs = self._pending_approval_docs(
+            pending_approval,
+            session_id=getattr(session, "session_id", None),
+        )
+        if not docs:
             session.pending_approval = None
             return
-        first = pending_approval[0]
+        first = docs[0]
         if isinstance(first, dict) and first.get("kind") in {
             USAGE_THRESHOLD_TOOL_NAME,
             YOLO_BUDGET_TOOL_NAME,
@@ -374,7 +441,7 @@ class SessionManager:
         from litellm import ChatCompletionMessageToolCall as ToolCall
 
         restored = []
-        for raw in pending_approval:
+        for raw in docs:
             try:
                 if "function" in raw:
                     restored.append(ToolCall(**raw))
@@ -395,18 +462,19 @@ class SessionManager:
 
     @staticmethod
     def _pending_docs_for_api(
-        pending_approval: list[dict[str, Any]] | None,
+        pending_approval: Any,
     ) -> list[dict[str, Any]] | None:
-        if not pending_approval:
+        docs = SessionManager._pending_approval_docs(pending_approval)
+        if not docs:
             return None
-        first = pending_approval[0]
+        first = docs[0]
         if isinstance(first, dict) and first.get("kind") == USAGE_THRESHOLD_TOOL_NAME:
             return [usage_threshold_pending_to_tool(first)]
         if isinstance(first, dict) and first.get("kind") == YOLO_BUDGET_TOOL_NAME:
             return [yolo_budget_pending_to_tool(first)]
         result: list[dict[str, Any]] = []
-        for raw in pending_approval:
-            if "function" in raw:
+        for raw in docs:
+            if "function" in raw and isinstance(raw.get("function"), dict):
                 function = raw.get("function") or {}
                 try:
                     args = json.loads(function.get("arguments") or "{}")
@@ -438,6 +506,133 @@ class SessionManager:
         if not agent_session.is_active:
             return "ended"
         return "idle"
+
+    @staticmethod
+    def _reaper_verdict(agent_session: AgentSession, now: datetime) -> str:
+        """Classify a live session for the reaper.
+
+        Returns an ``evict_*`` reason when the session should be torn down
+        this sweep, a ``skip_*`` label when it holds a slot for a known
+        reason, or ``"skip"`` when it is simply fresh. ``is_reaping`` is
+        deliberately not consulted here: callers handle it (_reap_one
+        re-checks the verdict after setting the flag itself).
+
+        ``is_processing`` is evaluated before ``pending_approval``: when both
+        are true (an in-flight exec-approval continuation), in-flight work
+        keeps the slot until it finishes, fails, or is interrupted explicitly.
+        """
+        if agent_session.user_id == "dev" or not agent_session.is_active:
+            return "skip"
+        if agent_session.is_processing:
+            return "skip_processing"
+        queue_empty = agent_session.submission_queue.empty()
+        idle_for = now - agent_session.last_active_at
+        pending = agent_session.session.pending_approval
+        if pending:
+            if is_usage_threshold_pending(pending) or is_yolo_budget_pending(pending):
+                if idle_for >= REAPER_IDLE and queue_empty:
+                    return "evict_pending_ack"
+                return "skip_pending_ack"
+            if idle_for >= REAPER_TOOL_APPROVAL_IDLE and queue_empty:
+                return "evict_pending_tool"
+            return "skip_pending_tool"
+        if idle_for >= REAPER_IDLE and queue_empty:
+            return "evict_idle"
+        return "skip"
+
+    @staticmethod
+    def _tool_call_identity(raw: Any) -> tuple[str | None, str | None]:
+        """Return (tool_call_id, tool_name) from a pending approval tool call."""
+        if hasattr(raw, "function"):
+            function = getattr(raw, "function", None)
+            return getattr(raw, "id", None), getattr(function, "name", None)
+        if not isinstance(raw, dict):
+            return None, None
+        if isinstance(raw.get("function"), dict):
+            function = raw.get("function") or {}
+            return raw.get("id"), function.get("name")
+        return raw.get("tool_call_id"), raw.get("tool")
+
+    @staticmethod
+    def _append_context_message(session: Session, message: Any) -> None:
+        add_message = getattr(session.context_manager, "add_message", None)
+        if callable(add_message):
+            add_message(message)
+            return
+        session.context_manager.items.append(message)
+
+    async def _expire_pending_tool_approval(
+        self,
+        agent_session: AgentSession,
+    ) -> None:
+        """Expire stale real tool approvals before reaping their sandbox.
+
+        Every assistant tool call needs a matching tool result for future LLM
+        requests to remain valid. We synthesize those results before clearing
+        the pending approval so the session restores as idle, not actionable.
+        """
+        pending = agent_session.session.pending_approval
+        if (
+            not isinstance(pending, dict)
+            or is_usage_threshold_pending(pending)
+            or is_yolo_budget_pending(pending)
+        ):
+            return
+
+        from litellm import Message
+
+        tool_calls = pending.get("tool_calls") or []
+        expired = 0
+        for raw in tool_calls:
+            tool_call_id, tool_name = self._tool_call_identity(raw)
+            if not tool_call_id or not tool_name:
+                logger.warning(
+                    "Dropping malformed pending tool approval while reaping %s",
+                    agent_session.session_id,
+                )
+                continue
+            content = (
+                "Tool approval expired after inactivity before execution. "
+                "The live session was released and its sandbox was reset."
+            )
+            self._append_context_message(
+                agent_session.session,
+                Message(
+                    role="tool",
+                    content=content,
+                    tool_call_id=tool_call_id,
+                    name=tool_name,
+                ),
+            )
+            expired += 1
+            await agent_session.session.send_event(
+                Event(
+                    event_type="tool_state_change",
+                    data={
+                        "tool_call_id": tool_call_id,
+                        "tool": tool_name,
+                        "state": "abandoned",
+                        "reason": "expired_inactive",
+                    },
+                )
+            )
+        agent_session.session.pending_approval = None
+        logger.info(
+            "Expired %d pending approval tool(s) before reaping %s",
+            expired,
+            agent_session.session_id,
+        )
+
+    def _reaper_verdict_still_matches(
+        self,
+        agent_session: AgentSession,
+        original_verdict: str,
+        now: datetime,
+    ) -> bool:
+        current_verdict = self._reaper_verdict(agent_session, now)
+        if original_verdict == "evict_pending_tool":
+            return current_verdict == "evict_idle"
+        return current_verdict == original_verdict
 
     @staticmethod
     def _auto_approval_summary(session: Session) -> dict[str, Any]:
@@ -1296,9 +1491,12 @@ class SessionManager:
                 if user_count >= MAX_SESSIONS_PER_USER:
                     raise SessionCapacityError(
                         f"You have reached the maximum of {MAX_SESSIONS_PER_USER} "
-                        f"live sessions. Close an existing session, or wait "
-                        f"{REAPER_IDLE_MINUTES:g} minutes after your last activity "
-                        "for an idle session to be released.",
+                        "live sessions. Close an existing session, or wait "
+                        f"{REAPER_IDLE_MINUTES:g} minutes for idle or usage/cost "
+                        "prompt sessions to be released, or "
+                        f"{REAPER_TOOL_APPROVAL_IDLE_MINUTES:g} minutes for "
+                        "unanswered tool approvals to expire. Currently held: "
+                        f"{self._user_slot_breakdown(user_id)}.",
                         error_type="per_user",
                     )
             self._pending_creates += 1
@@ -1523,80 +1721,118 @@ class SessionManager:
                 logger.error("Idle-session reaper sweep failed: %s", e)
 
     async def _reap_idle_sessions(self) -> None:
-        """Select idle candidates under the lock, then tear each down.
+        """Classify live sessions under the lock, then tear down evictees.
 
-        Candidates are non-dev sessions that are live, not processing, not
-        awaiting tool approval (those are "approve later", not idle — reaping
-        would destroy the sandbox the approved tool needs), and untouched for
-        the idle window. We only snapshot IDs under the lock; the actual
-        teardown in _reap_one re-acquires it, because tearing a session down
-        while holding the lock would deadlock (the lock is non-reentrant).
+        Each session gets a verdict from _reaper_verdict: plain idle or
+        approval prompts unanswered past their window. We only snapshot
+        (id, verdict) pairs under the lock; the actual teardown in _reap_one
+        re-acquires it, because tearing a session down while holding the lock
+        would deadlock (the lock is non-reentrant).
         """
         # Reaping is only safe when sessions stay resumable from Mongo. With no
-        # store, eviction would destroy non-dev chats outright, so don't reap.
-        if not getattr(self._store(), "enabled", False):
-            return
+        # store, eviction would destroy non-dev chats outright, so don't reap —
+        # but give a Mongo store that failed its boot-time init a chance to
+        # recover instead of staying disabled until the next restart. The sweep
+        # interval is the retry backoff.
+        store = self._store()
+        if not getattr(store, "enabled", False):
+            if not await store.maybe_reconnect():
+                return
 
-        cutoff = datetime.utcnow() - REAPER_IDLE
+        now = datetime.utcnow()
+        counters = {
+            "evicted_idle": 0,
+            "evicted_pending_ack": 0,
+            "evicted_pending_tool": 0,
+            "skipped_processing": 0,
+            "skipped_pending_tool_within_window": 0,
+            "skipped_pending_ack_within_window": 0,
+            "aborted": 0,
+        }
+        candidates: list[tuple[str, str]] = []
         async with self._lock:
-            candidates = [
-                agent_session.session_id
-                for agent_session in self.sessions.values()
-                if agent_session.is_active
-                and not agent_session.is_processing
-                and not agent_session.is_reaping
-                and agent_session.user_id != "dev"
-                and not agent_session.session.pending_approval
-                and agent_session.last_active_at <= cutoff
-            ]
-        if not candidates:
-            return
+            for agent_session in self.sessions.values():
+                if agent_session.is_reaping:
+                    continue
+                verdict = self._reaper_verdict(agent_session, now)
+                if verdict.startswith("evict_"):
+                    candidates.append((agent_session.session_id, verdict))
+                elif verdict == "skip_processing":
+                    counters["skipped_processing"] += 1
+                elif verdict == "skip_pending_tool":
+                    counters["skipped_pending_tool_within_window"] += 1
+                elif verdict == "skip_pending_ack":
+                    counters["skipped_pending_ack_within_window"] += 1
 
-        reaped = 0
-        for session_id in candidates:
+        for session_id, verdict in candidates:
             try:
-                if await self._reap_one(session_id, cutoff):
-                    reaped += 1
+                if await self._reap_one(session_id, verdict=verdict, now=now):
+                    counters["evicted_" + verdict.removeprefix("evict_")] += 1
+                else:
+                    counters["aborted"] += 1
             except Exception as e:
                 logger.warning("Failed to reap idle session %s: %s", session_id, e)
-        if reaped:
-            logger.info("Reaped %d idle session(s)", reaped)
+                counters["aborted"] += 1
+        if (
+            counters["evicted_idle"]
+            or counters["evicted_pending_ack"]
+            or counters["evicted_pending_tool"]
+            or counters["aborted"]
+        ):
+            logger.info(
+                "Reaper sweep: evicted_idle=%d evicted_pending_ack=%d "
+                "evicted_pending_tool=%d skipped_processing=%d "
+                "skipped_pending_tool_within_window=%d "
+                "skipped_pending_ack_within_window=%d aborted=%d",
+                counters["evicted_idle"],
+                counters["evicted_pending_ack"],
+                counters["evicted_pending_tool"],
+                counters["skipped_processing"],
+                counters["skipped_pending_tool_within_window"],
+                counters["skipped_pending_ack_within_window"],
+                counters["aborted"],
+            )
 
-    async def _reap_one(self, session_id: str, cutoff: datetime) -> bool:
-        """Tear down one idle session, leaving it resumable from Mongo.
+    async def _reap_one(self, session_id: str, *, verdict: str, now: datetime) -> bool:
+        """Tear down one evictable session, leaving it resumable from Mongo.
 
-        Re-checks every idle condition under the lock (a user may have become
-        active in the gap since selection), marks the session reaping, persists
-        a resumable snapshot outside the lock, then does one final locked
-        re-check before eviction. The runtime task is cancelled *outside* the
-        lock: its own ``finally`` frees the sandbox, and its identity-gated
-        persist no-ops because the session is already popped — so it can't
-        overwrite our resumable snapshot with ``"ended"`` and there's no
-        deadlock. Returns True if the session was reaped.
+        Re-checks the verdict under the lock (a user may have become active —
+        or answered a prompt — in the gap since selection), marks the session
+        reaping, persists a resumable snapshot outside the lock, then does one
+        final locked re-check before eviction. Real tool approvals are expired
+        before snapshotting so they restore as idle after the sandbox is torn
+        down. The runtime task is cancelled *outside* the lock: its own
+        ``finally`` frees the sandbox, and its identity-gated persist no-ops
+        because the session is already popped — so it can't overwrite our
+        resumable snapshot with ``"ended"`` and there's no deadlock. Returns
+        True if the session was reaped.
         """
         async with self._lock:
             agent_session = self.sessions.get(session_id)
             if (
                 agent_session is None
-                or not agent_session.is_active
-                or agent_session.is_processing
                 or agent_session.is_reaping
-                or agent_session.session.pending_approval
-                or agent_session.last_active_at > cutoff
-                or not agent_session.submission_queue.empty()
+                or self._reaper_verdict(agent_session, now) != verdict
             ):
                 return False
             agent_session.is_reaping = True
 
         # Persist a resumable snapshot *before* eviction so a concurrent reopen
         # reloads clean state. status="active" (never "ended") keeps it a normal
-        # chat in the sidebar. Do this outside the manager lock: Mongo writes can
-        # take network round trips, and is_reaping=True is enough to block submit
-        # from enqueueing while the snapshot is in flight.
+        # chat in the sidebar; runtime_state never persists as "processing", or
+        # an evicted row would render as processing forever in list_sessions.
+        # Do this outside the manager lock: Mongo writes can take network round
+        # trips, and is_reaping=True is enough to block submit from enqueueing
+        # while the snapshot is in flight.
         try:
+            if verdict == "evict_pending_tool":
+                await self._expire_pending_tool_approval(agent_session)
+            runtime_state = (
+                "waiting_approval" if agent_session.session.pending_approval else "idle"
+            )
             await self.persist_session_snapshot(
                 agent_session,
-                runtime_state="idle",
+                runtime_state=runtime_state,
                 status="active",
                 raise_on_error=True,
             )
@@ -1615,13 +1851,7 @@ class SessionManager:
             current = self.sessions.get(session_id)
             if current is not agent_session:
                 return False
-            if (
-                not agent_session.is_active
-                or agent_session.is_processing
-                or agent_session.session.pending_approval
-                or agent_session.last_active_at > cutoff
-                or not agent_session.submission_queue.empty()
-            ):
+            if not self._reaper_verdict_still_matches(agent_session, verdict, now):
                 agent_session.is_reaping = False
                 return False
             self.sessions.pop(session_id, None)
@@ -1671,7 +1901,7 @@ class SessionManager:
 
         session = agent_session.session
 
-        # Start event broadcaster task
+        # Start event broadcaster task.
         broadcaster = EventBroadcaster(event_queue)
         agent_session.broadcaster = broadcaster
         broadcast_task = asyncio.create_task(broadcaster.run())

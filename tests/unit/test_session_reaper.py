@@ -8,6 +8,7 @@ reaping) of the session-limit fix.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,7 +22,10 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 import session_manager as sm  # noqa: E402
-from agent.core.session_persistence import NoopSessionStore  # noqa: E402
+from agent.core.session_persistence import (  # noqa: E402
+    MongoSessionStore,
+    NoopSessionStore,
+)
 from session_manager import (  # noqa: E402
     AgentSession,
     Operation,
@@ -34,6 +38,11 @@ from agent.core.session import OpType  # noqa: E402
 def test_reaper_idle_default_is_fifteen_minutes():
     assert sm.REAPER_IDLE_MINUTES == 15
     assert sm.REAPER_IDLE == timedelta(minutes=15)
+
+
+def test_reaper_window_defaults():
+    assert sm.REAPER_TOOL_APPROVAL_IDLE_MINUTES == 60
+    assert sm.REAPER_TOOL_APPROVAL_IDLE == timedelta(minutes=60)
 
 
 class RecordingStore(NoopSessionStore):
@@ -51,6 +60,14 @@ class RecordingStore(NoopSessionStore):
         return [s for s in self.snapshots if s.get("session_id") == session_id]
 
 
+class FakeContextManager:
+    def __init__(self) -> None:
+        self.items: list[Any] = []
+
+    def add_message(self, message: Any, token_count: int | None = None) -> None:
+        self.items.append(message)
+
+
 class FakeSession:
     """Minimal Session stand-in supporting both persistence and _run_session."""
 
@@ -62,7 +79,7 @@ class FakeSession:
     ) -> None:
         self.hf_token = hf_token
         self.user_plan = user_plan
-        self.context_manager = SimpleNamespace(items=[])
+        self.context_manager = FakeContextManager()
         self.pending_approval: Any = None
         self.turn_count = 0
         self.config = SimpleNamespace(model_name="test-model", save_sessions=False)
@@ -71,9 +88,14 @@ class FakeSession:
         self.auto_approval_cost_cap_usd = None
         self.auto_approval_estimated_spend_usd = 0.0
         self.is_running = True
+        self.cancel_called = False
+        self.events: list[Any] = []
 
     async def send_event(self, event: Any) -> None:
-        return None
+        self.events.append(event)
+
+    def cancel(self) -> None:
+        self.cancel_called = True
 
 
 class FakeToolRouter:
@@ -216,20 +238,25 @@ async def test_reaper_evicts_idle_session_as_resumable():
     [
         # Fresh: touched just now.
         {"last_active_at": None},
-        # Currently processing a turn.
+        # Processing work is never reaped while in flight.
         {
             "last_active_at": datetime.utcnow() - timedelta(hours=5),
             "is_processing": True,
         },
-        # Awaiting tool approval ("approve later", not idle).
+        # Awaiting tool approval, still inside the 60-min grace window.
         {
-            "last_active_at": datetime.utcnow() - timedelta(hours=5),
-            "pending_approval": {"tool_calls": [object()]},
+            "last_active_at": datetime.utcnow() - timedelta(minutes=30),
+            "pending_approval": {"tool_calls": [{"id": "tc-1"}]},
+        },
+        # Acknowledgement prompt raised moments ago.
+        {
+            "last_active_at": datetime.utcnow() - timedelta(minutes=5),
+            "pending_approval": {"kind": "usage_threshold", "tool_call_id": "u1"},
         },
         # Dev sessions are never reaped.
         {"last_active_at": datetime.utcnow() - timedelta(hours=5), "user_id": "dev"},
     ],
-    ids=["fresh", "processing", "pending_approval", "dev"],
+    ids=["fresh", "processing", "pending_tool_in_window", "pending_ack_fresh", "dev"],
 )
 async def test_reaper_spares(kwargs):
     manager = _manager()
@@ -256,8 +283,9 @@ async def test_reap_aborts_when_message_enqueued_first():
     manager.sessions["racing"] = agent_session
     agent_session.submission_queue.put_nowait(object())
 
-    cutoff = datetime.utcnow() - sm.REAPER_IDLE
-    reaped = await manager._reap_one("racing", cutoff)
+    reaped = await manager._reap_one(
+        "racing", verdict="evict_idle", now=datetime.utcnow()
+    )
 
     assert reaped is False
     assert "racing" in manager.sessions
@@ -297,11 +325,13 @@ async def test_turn_finish_restamps_activity(monkeypatch):
     agent_session = await _start_real_run_session(
         manager, "longturn", last_active_at=datetime.utcnow()
     )
+    process_started = asyncio.Event()
 
     async def fake_process(session: Any, submission: Any) -> bool:
         # Simulate a turn that has been running far longer than the idle
         # window before it completes.
         agent_session.last_active_at = datetime.utcnow() - timedelta(hours=3)
+        process_started.set()
         return True
 
     monkeypatch.setattr(sm, "process_submission", fake_process)
@@ -310,12 +340,17 @@ async def test_turn_finish_restamps_activity(monkeypatch):
         sm.Submission(id="s1", operation=Operation(op_type=OpType.USER_INPUT, data={}))
     )
 
+    await asyncio.wait_for(process_started.wait(), timeout=2.0)
     # Wait for the turn-finish stamp to land.
     for _ in range(200):
         await asyncio.sleep(0.01)
-        if datetime.utcnow() - agent_session.last_active_at < timedelta(minutes=1):
+        if (
+            not agent_session.is_processing
+            and datetime.utcnow() - agent_session.last_active_at < timedelta(minutes=1)
+        ):
             break
 
+    assert not agent_session.is_processing
     assert datetime.utcnow() - agent_session.last_active_at < timedelta(minutes=1)
 
     await _cancel_tasks(manager)
@@ -388,9 +423,14 @@ async def test_per_user_cap_frees_up_after_slot_reclaimed():
         message = str(exc.value)
         assert f"maximum of {sm.MAX_SESSIONS_PER_USER} live sessions" in message
         assert "Close an existing session" in message
-        assert f"wait {sm.REAPER_IDLE_MINUTES:g} minutes" in message
-        assert "after your last activity" in message
-        assert "idle session to be released" in message
+        assert (
+            f"wait {sm.REAPER_IDLE_MINUTES:g} minutes for idle or usage/cost "
+            "prompt sessions"
+        ) in message
+        assert (
+            f"{sm.REAPER_TOOL_APPROVAL_IDLE_MINUTES:g} minutes for unanswered "
+            "tool approvals"
+        ) in message
 
         # Reclaiming a slot (the reaper evicts an idle session) frees capacity.
         manager.sessions.pop("owner-0")
@@ -439,8 +479,9 @@ async def test_reap_aborts_when_snapshot_write_fails():
     )
     manager.sessions["idle"] = agent_session
 
-    cutoff = datetime.utcnow() - sm.REAPER_IDLE
-    reaped = await manager._reap_one("idle", cutoff)
+    reaped = await manager._reap_one(
+        "idle", verdict="evict_idle", now=datetime.utcnow()
+    )
 
     assert reaped is False
     assert "idle" in manager.sessions
@@ -470,8 +511,9 @@ async def test_reap_aborts_when_message_write_fails_silently():
     )
     manager.sessions["idle"] = agent_session
 
-    cutoff = datetime.utcnow() - sm.REAPER_IDLE
-    reaped = await manager._reap_one("idle", cutoff)
+    reaped = await manager._reap_one(
+        "idle", verdict="evict_idle", now=datetime.utcnow()
+    )
 
     assert reaped is False
     assert "idle" in manager.sessions
@@ -501,8 +543,9 @@ async def test_old_reaped_task_does_not_end_freshly_restored_session():
         "restore-race",
         last_active_at=datetime.utcnow() - timedelta(hours=3),
     )
-    cutoff = datetime.utcnow() - sm.REAPER_IDLE
-    reap_task = asyncio.create_task(manager._reap_one("restore-race", cutoff))
+    reap_task = asyncio.create_task(
+        manager._reap_one("restore-race", verdict="evict_idle", now=datetime.utcnow())
+    )
 
     for _ in range(100):
         await asyncio.sleep(0.01)
@@ -549,9 +592,10 @@ async def test_reaper_teardown_propagates_outer_cancellation():
     agent_session = await _start_real_run_session(
         manager, "slow", last_active_at=datetime.utcnow() - timedelta(hours=3)
     )
-    cutoff = datetime.utcnow() - sm.REAPER_IDLE
 
-    reap_task = asyncio.create_task(manager._reap_one("slow", cutoff))
+    reap_task = asyncio.create_task(
+        manager._reap_one("slow", verdict="evict_idle", now=datetime.utcnow())
+    )
     # Let _reap_one persist + pop, then enter the teardown wait (the session
     # task is stuck in slow_cleanup, so the wait won't complete on its own).
     for _ in range(100):
@@ -569,3 +613,295 @@ async def test_reaper_teardown_propagates_outer_cancellation():
     release.set()
     if agent_session.task is not None:
         await asyncio.gather(agent_session.task, return_exceptions=True)
+
+
+# ── Pending-approval eviction windows ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["usage_threshold", "yolo_budget"])
+async def test_reaper_evicts_pending_ack_after_idle_window(kind):
+    """Acknowledgement prompts (usage-threshold / YOLO-cap) are auto-created
+    at turn end with no user action; they must not pin a slot past the normal
+    idle window, and must stay answerable after restore."""
+    manager = _manager()
+
+    async def fake_cleanup(session: Any) -> None:
+        return None
+
+    manager._cleanup_sandbox = fake_cleanup  # type: ignore[method-assign]
+
+    agent_session = await _start_real_run_session(
+        manager,
+        "ack",
+        last_active_at=datetime.utcnow() - timedelta(minutes=20),
+    )
+    pending = {"kind": kind, "tool_call_id": "p1", "continuation": "continue_agent"}
+    agent_session.session.pending_approval = pending
+
+    await manager._reap_idle_sessions()
+
+    assert "ack" not in manager.sessions
+    snapshots = manager.persistence_store.snapshots_for("ack")
+    assert snapshots, "eviction must persist a resumable snapshot"
+    assert all(s["status"] == "active" for s in snapshots)
+    assert snapshots[-1]["runtime_state"] == "waiting_approval"
+    assert snapshots[-1]["pending_approval"] == [pending]
+    restored = FakeSession()
+    manager._restore_pending_approval(restored, snapshots[-1]["pending_approval"])
+    assert restored.pending_approval == pending
+
+
+@pytest.mark.asyncio
+async def test_reaper_evicts_tool_approval_after_long_window():
+    """Real tool-permission prompts expire before reaping.
+
+    They must not remain actionable after their sandbox is torn down.
+    """
+    manager = _manager()
+
+    async def fake_cleanup(session: Any) -> None:
+        return None
+
+    manager._cleanup_sandbox = fake_cleanup  # type: ignore[method-assign]
+    from litellm import ChatCompletionMessageToolCall as ToolCall
+
+    agent_session = await _start_real_run_session(
+        manager,
+        "tool-approval",
+        last_active_at=datetime.utcnow() - timedelta(hours=2),
+    )
+    tool_call = ToolCall(
+        id="tc-1",
+        type="function",
+        function={"name": "create_file", "arguments": '{"path":"app.py"}'},
+    )
+    agent_session.session.pending_approval = {"tool_calls": [tool_call]}
+    serialized = manager._serialize_pending_approval(agent_session.session)
+    restored = FakeSession()
+    manager._restore_pending_approval(restored, serialized)
+    restored_tool_calls = restored.pending_approval["tool_calls"]
+    assert restored_tool_calls[0].id == "tc-1"
+    assert restored_tool_calls[0].function.name == "create_file"
+
+    await manager._reap_idle_sessions()
+
+    assert "tool-approval" not in manager.sessions
+    assert agent_session.session.pending_approval is None
+    snapshots = manager.persistence_store.snapshots_for("tool-approval")
+    assert snapshots
+    assert all(s["status"] == "active" for s in snapshots)
+    assert snapshots[-1]["runtime_state"] == "idle"
+    assert snapshots[-1]["pending_approval"] == []
+    [expired_msg] = agent_session.session.context_manager.items
+    assert expired_msg.role == "tool"
+    assert expired_msg.tool_call_id == "tc-1"
+    assert expired_msg.name == "create_file"
+    assert "expired after inactivity" in expired_msg.content
+    [event] = [
+        event
+        for event in agent_session.session.events
+        if event.event_type == "tool_state_change"
+    ]
+    assert event.event_type == "tool_state_change"
+    assert event.data["state"] == "abandoned"
+    assert event.data["reason"] == "expired_inactive"
+
+
+@pytest.mark.asyncio
+async def test_reaper_spares_quiet_processing_session():
+    """Processing work is preserved even if it has been quiet for a long time."""
+    manager = _manager()
+    agent_session = _make_agent_session(
+        "busy",
+        last_active_at=datetime.utcnow() - timedelta(hours=5),
+        is_processing=True,
+    )
+    manager.sessions["busy"] = agent_session
+
+    await manager._reap_idle_sessions()
+
+    assert "busy" in manager.sessions
+    assert agent_session.is_reaping is False
+
+
+@pytest.mark.asyncio
+async def test_reaper_spares_quiet_processing_session_with_queued_messages():
+    """Accepted queued submissions are not dropped by processing-session reaps."""
+    manager = _manager()
+
+    async def fake_cleanup(session: Any) -> None:
+        return None
+
+    manager._cleanup_sandbox = fake_cleanup  # type: ignore[method-assign]
+
+    agent_session = _make_agent_session(
+        "busy-queued",
+        last_active_at=datetime.utcnow() - timedelta(hours=5),
+        is_processing=True,
+    )
+    manager.sessions["busy-queued"] = agent_session
+    agent_session.submission_queue.put_nowait(object())
+
+    await manager._reap_idle_sessions()
+
+    assert "busy-queued" in manager.sessions
+    assert agent_session.submission_queue.qsize() == 1
+    assert agent_session.is_reaping is False
+    assert agent_session.session.cancel_called is False
+    assert manager.persistence_store.snapshots_for("busy-queued") == []
+
+
+# ── Verdict re-check ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reap_one_aborts_on_verdict_mismatch():
+    """A session whose state changes between selection and teardown (e.g. the
+    prompt was answered) must abort this reap cycle."""
+    manager = _manager()
+    agent_session = _make_agent_session(
+        "answered",
+        last_active_at=datetime.utcnow() - timedelta(hours=2),
+        pending_approval={"tool_calls": [{"id": "tc-1"}]},
+    )
+    manager.sessions["answered"] = agent_session
+
+    now = datetime.utcnow()
+    assert manager._reaper_verdict(agent_session, now) == "evict_pending_tool"
+
+    # Approval answered in the gap between selection and teardown.
+    agent_session.session.pending_approval = None
+    reaped = await manager._reap_one("answered", verdict="evict_pending_tool", now=now)
+
+    assert reaped is False
+    assert "answered" in manager.sessions
+    assert agent_session.is_reaping is False
+
+
+# ── Mongo store retry ────────────────────────────────────────────────────
+
+
+class FlippableMongoStore(MongoSessionStore):
+    """MongoSessionStore whose init() flips enabled without touching the
+    network, to exercise the sweep's maybe_reconnect path."""
+
+    def __init__(self, *, recovers: bool) -> None:
+        super().__init__("mongodb://unreachable.invalid", "testdb")
+        self.recovers = recovers
+        self.init_calls = 0
+        self.snapshots: list[dict[str, Any]] = []
+
+    async def init(self) -> None:
+        self.init_calls += 1
+        self.enabled = self.recovers
+
+    async def save_snapshot(self, **kwargs: Any) -> None:
+        self.snapshots.append(kwargs)
+
+
+@pytest.mark.asyncio
+async def test_reaper_retries_disabled_mongo_store():
+    """A Mongo store that failed its boot-time init is retried at sweep time,
+    so one boot blip no longer disables reaping until the next restart."""
+    manager = _manager()
+
+    async def fake_cleanup(session: Any) -> None:
+        return None
+
+    manager._cleanup_sandbox = fake_cleanup  # type: ignore[method-assign]
+    store = FlippableMongoStore(recovers=True)
+    manager.persistence_store = store
+    manager.sessions["idle"] = _make_agent_session(
+        "idle", last_active_at=datetime.utcnow() - timedelta(hours=1)
+    )
+
+    await manager._reap_idle_sessions()
+
+    assert store.init_calls == 1
+    assert "idle" not in manager.sessions
+    assert store.snapshots
+
+
+@pytest.mark.asyncio
+async def test_reaper_stays_noop_while_mongo_store_down():
+    manager = _manager()
+    store = FlippableMongoStore(recovers=False)
+    manager.persistence_store = store
+    agent_session = _make_agent_session(
+        "idle", last_active_at=datetime.utcnow() - timedelta(hours=1)
+    )
+    manager.sessions["idle"] = agent_session
+
+    await manager._reap_idle_sessions()
+
+    assert store.init_calls == 1
+    assert "idle" in manager.sessions
+    assert agent_session.is_reaping is False
+
+
+# ── Capacity-error breakdown ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_capacity_error_message_breaks_down_held_slots():
+    manager = _manager()
+    sessions = []
+    for i in range(3):
+        sessions.append(
+            _make_agent_session(
+                f"tool-{i}", pending_approval={"tool_calls": [{"id": f"t{i}"}]}
+            )
+        )
+    for i in range(2):
+        sessions.append(
+            _make_agent_session(
+                f"ack-{i}",
+                pending_approval={"kind": "usage_threshold", "tool_call_id": f"a{i}"},
+            )
+        )
+    sessions.append(_make_agent_session("busy", is_processing=True))
+    for i in range(4):
+        sessions.append(_make_agent_session(f"idle-{i}"))
+    assert len(sessions) == sm.MAX_SESSIONS_PER_USER
+    for agent_session in sessions:
+        manager.sessions[agent_session.session_id] = agent_session
+
+    with pytest.raises(SessionCapacityError) as exc:
+        await manager.create_session(user_id="owner")
+
+    message = str(exc.value)
+    assert f"maximum of {sm.MAX_SESSIONS_PER_USER} live sessions" in message
+    assert "Close an existing session" in message
+    assert "Currently held: 3 awaiting tool approval, 2 usage/cost prompts" in message
+    assert "1 still processing, 4 idle." in message
+
+
+# ── Sweep observability ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sweep_log_emitted_only_when_nonzero(caplog):
+    manager = _manager()
+    manager.sessions["busy-only"] = _make_agent_session("busy-only", is_processing=True)
+
+    with caplog.at_level(logging.INFO):
+        await manager._reap_idle_sessions()
+    assert "Reaper sweep:" not in caplog.text
+    manager.sessions.clear()
+
+    async def fake_cleanup(session: Any) -> None:
+        return None
+
+    manager._cleanup_sandbox = fake_cleanup  # type: ignore[method-assign]
+    manager.sessions["idle"] = _make_agent_session(
+        "idle", last_active_at=datetime.utcnow() - timedelta(hours=1)
+    )
+    manager.sessions["busy"] = _make_agent_session("busy", is_processing=True)
+
+    with caplog.at_level(logging.INFO):
+        await manager._reap_idle_sessions()
+
+    assert "Reaper sweep:" in caplog.text
+    assert "evicted_idle=1" in caplog.text
+    assert "skipped_processing=1" in caplog.text
