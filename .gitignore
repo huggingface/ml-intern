@@ -53,7 +53,8 @@ frontend/yarn-error.log*
 .docker/
 
 # Eval (stale)
-eval/
+/eval/
+/eval_runs/
 
 # Project-specific
 scratch/
