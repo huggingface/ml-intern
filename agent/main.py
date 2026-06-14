@@ -468,9 +468,11 @@ async def event_listener(
                 invalid_model = data.get("invalid_saved_model")
                 forked = bool(data.get("forked", False))
                 redacted = bool(data.get("had_redacted_content", False))
+                title = data.get("session_title")
                 verb = "Forked from" if forked else "Resumed"
+                titled = f" [cyan]{title}[/cyan]" if title else ""
                 console.print(
-                    f"[green]{verb}[/green] {path} "
+                    f"[green]{verb}[/green]{titled} {path} "
                     f"([cyan]{count}[/cyan] messages, "
                     f"model [cyan]{model}[/cyan])."
                 )
@@ -900,30 +902,26 @@ async def _resume_picker(
             console.print(f"[bold red]No matching session log:[/bold red] {arg}")
         return selected
 
-    console.print()
-    console.print("[bold]Saved sessions[/bold]")
-    for index, entry in enumerate(entries, start=1):
-        console.print(format_session_log_entry(index, entry))
-    console.print()
-
     if prompt_session is None:
+        # Headless/non-interactive: print the list so it's still visible, but
+        # there's no TTY to drive the picker.
+        console.print()
+        console.print("[bold]Saved sessions[/bold]")
+        for index, entry in enumerate(entries, start=1):
+            console.print(format_session_log_entry(index, entry))
         console.print("[yellow]Cannot prompt for a selection here.[/yellow]")
         return None
 
+    from agent.utils.session_picker import pick_session_interactive
+
     try:
-        choice = await prompt_session.prompt_async(
-            "Select session number (blank to cancel): "
-        )
+        selected = await pick_session_interactive(entries)
     except (EOFError, KeyboardInterrupt):
         console.print("[dim]Resume cancelled.[/dim]")
         return None
-    choice = choice.strip()
-    if not choice:
+    if selected is None:
         console.print("[dim]Resume cancelled.[/dim]")
         return None
-    selected = resolve_session_log_arg(choice, entries, directory)
-    if selected is None:
-        console.print(f"[bold red]Invalid selection:[/bold red] {choice}")
     return selected
 
 
@@ -1009,8 +1007,9 @@ async def _handle_slash_command(
             return None
         session.session_title = new_title
         session._title_user_set = True
-        # Rename the active log file to reflect the new title immediately.
-        session.apply_title_to_local_file()
+        # Persist the new title immediately so /resume reflects it even when no
+        # file exists yet (e.g. right after a resume forked the save path).
+        session.persist_title()
         get_console().print(
             f"[green]Renamed session to[/green] [cyan]{new_title}[/cyan]."
         )

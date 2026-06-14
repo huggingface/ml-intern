@@ -101,6 +101,28 @@ def test_title_change_renames_existing_file_in_place(tmp_path):
     assert len(list(tmp_path.glob("session_*.json"))) == 1
 
 
+def test_rename_refreshes_persisted_title(tmp_path):
+    import json
+
+    from agent.core.session_resume import list_session_logs
+
+    session = _make_session()
+    session.save_trajectory_local(directory=str(tmp_path))
+
+    session.session_title = "my run"
+    session.apply_title_to_local_file()
+    renamed = session._local_save_path
+
+    # The JSON content's session_title is updated, not just the filename.
+    data = json.loads(Path(renamed).read_text())
+    assert data["session_title"] == "my run"
+    # And /resume's listing reads that refreshed title.
+    entry = next(
+        e for e in list_session_logs(tmp_path) if Path(e.path) == Path(renamed)
+    )
+    assert entry.session_title == "my run"
+
+
 def test_rename_preserves_original_timestamp(tmp_path):
     session = _make_session()
     first = session.save_trajectory_local(directory=str(tmp_path))
@@ -126,3 +148,42 @@ def test_list_session_logs_parses_titled_files(tmp_path):
     saved = session.save_trajectory_local(directory=str(tmp_path))
     entries = list_session_logs(tmp_path)
     assert any(Path(e.path) == Path(saved) for e in entries)
+
+
+def test_persist_title_creates_file_when_none_exists(tmp_path):
+    # Mirrors /rename right after a resume: no file cached, but content exists.
+    session = _make_session()
+    session.config.save_sessions = True
+    session.config.session_log_dir = str(tmp_path)
+    session.session_title = "demo session"
+    session._title_user_set = True
+    session.persist_title()
+    files = list(tmp_path.glob("session_*.json"))
+    assert len(files) == 1
+    assert "demo-session" in files[0].name
+    import json
+    assert json.loads(files[0].read_text())["session_title"] == "demo session"
+
+
+def test_persist_title_renames_existing_file(tmp_path):
+    session = _make_session()
+    session.config.save_sessions = True
+    session.config.session_log_dir = str(tmp_path)
+    session.save_trajectory_local(directory=str(tmp_path))
+    session.session_title = "renamed run"
+    session.persist_title()
+    files = list(tmp_path.glob("session_*.json"))
+    assert len(files) == 1  # renamed in place, no second file
+    assert "renamed-run" in files[0].name
+
+
+def test_persist_title_noop_for_empty_session(tmp_path):
+    from litellm import Message
+
+    session = _make_session()
+    session.config.save_sessions = True
+    session.config.session_log_dir = str(tmp_path)
+    session.context_manager.items = [Message(role="system", content="sys")]
+    session.session_title = "nothing here"
+    session.persist_title()
+    assert list(tmp_path.glob("session_*.json")) == []

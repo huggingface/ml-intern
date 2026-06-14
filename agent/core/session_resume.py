@@ -33,6 +33,7 @@ class SessionLogEntry:
     message_count: int
     preview: str
     mtime: float
+    session_title: str | None = None
 
 
 def _message_preview(content: Any, max_chars: int = 72) -> str:
@@ -61,9 +62,28 @@ def _first_user_preview(messages: list[Any]) -> str:
     for raw in messages:
         if isinstance(raw, dict) and raw.get("role") == "user":
             preview = _message_preview(raw.get("content"))
-            if preview:
+            # Skip slash commands (e.g. a leading "/model ...") so the preview
+            # reflects a real prompt rather than command noise.
+            if preview and not preview.startswith("/"):
                 return preview
     return "(no user prompt preview)"
+
+
+def _sort_timestamp(entry: "SessionLogEntry") -> datetime:
+    """Single canonical, tz-aware timestamp for both sorting and display.
+
+    Prefers ``session_end_time``, then ``session_start_time``; naive values are
+    normalized to local tz. Falls back to the file mtime when neither parses, so
+    unparseable entries keep a sensible (non-collapsed) order.
+    """
+    for ts in (entry.session_end_time, entry.session_start_time):
+        if isinstance(ts, str) and ts:
+            try:
+                dt = datetime.fromisoformat(ts)
+            except ValueError:
+                continue
+            return dt if dt.tzinfo else dt.astimezone()
+    return datetime.fromtimestamp(entry.mtime).astimezone()
 
 
 def list_session_logs(
@@ -87,9 +107,13 @@ def list_session_logs(
 
         session_id = data.get("session_id")
         if not isinstance(session_id, str) or not session_id:
-            session_id = path.stem
+            # Namespace the fallback so a corrupted/legacy log with no
+            # session_id can never collide with another file's real id when
+            # the listing is deduped by session_id below.
+            session_id = f"legacy:{path.stem}"
 
         stat = path.stat()
+        title = data.get("session_title")
         entries.append(
             SessionLogEntry(
                 path=path,
@@ -100,27 +124,36 @@ def list_session_logs(
                 message_count=len(messages),
                 preview=_first_user_preview(messages),
                 mtime=stat.st_mtime,
+                session_title=title if isinstance(title, str) and title else None,
             )
         )
 
-    entries.sort(key=lambda item: item.mtime, reverse=True)
-    return entries
+    # Sort and display use the SAME timestamp so the visible order never looks
+    # scrambled (the old code sorted by mtime but displayed session_end_time).
+    # mtime is only a tiebreaker for entries sharing a timestamp.
+    entries.sort(key=lambda e: (_sort_timestamp(e), e.mtime), reverse=True)
+
+    # Collapse multiple on-disk files for the same conversation to one entry.
+    # A resumed continuation reuses its session_id but forks the save path, so
+    # continuing writes a new-timestamp file while the original remains —
+    # without this, /resume shows the same conversation two (or more) times.
+    # Entries are newest-first, so the first seen per id is the latest state.
+    deduped: dict[str, SessionLogEntry] = {}
+    for entry in entries:
+        deduped.setdefault(entry.session_id, entry)
+    return list(deduped.values())
 
 
 def format_session_log_entry(index: int, entry: SessionLogEntry) -> str:
-    timestamp = entry.session_end_time or entry.session_start_time
-    label = "unknown time"
-    if isinstance(timestamp, str) and timestamp:
-        try:
-            label = datetime.fromisoformat(timestamp).strftime("%Y-%m-%d %H:%M")
-        except ValueError:
-            label = timestamp[:16]
+    label = _sort_timestamp(entry).astimezone().strftime("%Y-%m-%d %H:%M")
     short_id = entry.session_id[:8]
     model = entry.model_name or "unknown model"
+    # Lead with the human-readable title; fall back to the first-prompt preview
+    # for older logs that predate session titles.
+    heading = entry.session_title or entry.preview
     return (
-        f"{index:>2}. {label}  {short_id}  "
-        f"{entry.message_count} msgs  {model}\n"
-        f"    {entry.preview}"
+        f"{index:>2}. {heading}\n"
+        f"    {label}  {short_id}  {entry.message_count} msgs  {model}"
     )
 
 
@@ -242,6 +275,13 @@ def restore_session_from_log(session: Any, path: Path) -> dict[str, Any]:
     saved_user_id = data.get("user_id")
     is_continuation = saved_user_id == session.user_id
 
+    # Carry the saved title across the resume so the conversation keeps its
+    # name and auto-titling doesn't re-fire on it.
+    saved_title = data.get("session_title")
+    if isinstance(saved_title, str) and saved_title:
+        session.session_title = saved_title
+        session._title_user_set = True
+
     if is_continuation:
         if isinstance(saved_session_id, str) and saved_session_id:
             session.session_id = saved_session_id
@@ -283,6 +323,7 @@ def restore_session_from_log(session: Any, path: Path) -> dict[str, Any]:
         "restored_count": len(restored_messages),
         "dropped_count": dropped_count,
         "model_name": session.config.model_name,
+        "session_title": session.session_title,
         "invalid_saved_model": invalid_saved_model,
         "forked": not is_continuation,
         "had_redacted_content": _has_redacted_content(raw_messages),

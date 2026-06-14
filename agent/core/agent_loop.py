@@ -1201,9 +1201,8 @@ async def _generate_and_set_title(session: "Session", final_response: str | None
         if not title or session._title_user_set or session.session_title:
             return
         session.session_title = title
-        # Rename the active log so even a single-turn session gets a titled
-        # filename (falls back to next-save naming if no file exists yet).
-        session.apply_title_to_local_file()
+        # Persist the title so even a single-turn session is titled on disk.
+        session.persist_title()
         await session.send_event(
             Event(
                 event_type="conversation_title",

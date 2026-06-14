@@ -600,7 +600,7 @@ class Session:
             "user_id": self.user_id,
             "hf_username": self.hf_username,
             "session_start_time": self.session_start_time,
-            "session_end_time": datetime.now().isoformat(),
+            "session_end_time": datetime.now().astimezone().isoformat(),
             "model_name": self.config.model_name,
             "total_cost_usd": total_cost_usd,
             "usage_metrics": usage_metrics,
@@ -629,12 +629,14 @@ class Session:
         return f"session_{self.session_id}_{timestamp}.json"
 
     def apply_title_to_local_file(self) -> None:
-        """Reflect the current ``session_title`` in the active log filename.
+        """Reflect the current ``session_title`` in the active log file.
 
         Called when a title is set (auto-title or ``/rename``). If a log file
-        already exists on disk it is renamed in place so even a single-turn
-        session ends up with a titled filename; otherwise the cached path is
-        cleared so the next save picks up the title. Safe no-op on any error.
+        already exists on disk it is renamed to a titled filename AND its
+        persisted ``session_title`` field is refreshed, so even a single-turn
+        session ends up titled both on disk and in the JSON that ``/resume``
+        reads. If no file exists yet the cached path is cleared so the next
+        save picks up the title. Safe no-op on any error.
         """
         old = self._local_save_path
         if not old:
@@ -653,14 +655,44 @@ class Session:
             else datetime.now().strftime("%Y%m%d_%H%M%S")
         )
         new_path = old_path.with_name(self._session_log_filename(timestamp))
-        if new_path == old_path:
-            return
         try:
-            old_path.rename(new_path)
-            self._local_save_path = str(new_path)
-        except OSError as e:
-            logger.debug("Could not rename log to titled name: %s", e)
+            if new_path != old_path:
+                old_path.rename(new_path)
+                self._local_save_path = str(new_path)
+            # Refresh the persisted title inside the file so readers (e.g.
+            # /resume) show the new name, not just the renamed file. Operate on
+            # the file path directly so an explicitly-located log is updated in
+            # place regardless of config-resolved directories.
+            target = Path(self._local_save_path)
+            with open(target) as f:
+                data = json.load(f)
+            data["session_title"] = self.session_title
+            tmp_path = target.with_suffix(target.suffix + ".tmp")
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=2)
+            tmp_path.replace(target)
+        except (OSError, ValueError) as e:
+            logger.debug("Could not retitle log file: %s", e)
             self._local_save_path = None
+
+    def persist_title(self) -> None:
+        """Persist the current ``session_title`` to disk right away.
+
+        Renames/updates the existing log when there is one; otherwise saves a
+        fresh titled log so ``/resume`` reflects the new name even when no file
+        exists yet for this session — e.g. right after a resume forked the save
+        path, or before the first turn of a session that already has restored
+        content. Does nothing for an empty session or when saving is disabled.
+        """
+        self.apply_title_to_local_file()
+        if self._local_save_path is not None or not self.config.save_sessions:
+            return
+        has_content = any(
+            getattr(item, "role", None) != "system"
+            for item in self.context_manager.items
+        )
+        if has_content:
+            self.save_trajectory_local()
 
     def save_trajectory_local(
         self,
