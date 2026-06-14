@@ -27,6 +27,10 @@ class Config(BaseModel):
     mcpServers: dict[str, MCPServerConfig] = {}
     save_sessions: bool = True
     session_dataset_repo: str = "smolagents/ml-intern-sessions"
+    # Where session logs are stored locally. None = resolve at runtime via
+    # agent.core.session.resolve_session_log_dir (XDG data dir, overridable by
+    # the ML_INTERN_SESSION_DIR env var, with a legacy ./session_logs fallback).
+    session_log_dir: str | None = None
     # Per-user private dataset that mirrors each session in Claude Code JSONL
     # format so the HF Agent Trace Viewer auto-renders it
     # (https://huggingface.co/changelog/agent-trace-viewer). Created private

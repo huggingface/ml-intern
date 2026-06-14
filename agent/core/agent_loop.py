@@ -37,7 +37,12 @@ from agent.core.prompt_caching import (
     with_prompt_cache_params,
     with_prompt_caching,
 )
-from agent.core.session import DEFAULT_SESSION_LOG_DIR, Event, OpType, Session
+from agent.core.session import (
+    Event,
+    OpType,
+    Session,
+    resolve_session_log_dir,
+)
 from agent.core.tools import ToolRouter
 from agent.core.usage_thresholds import (
     USAGE_THRESHOLD_TOOL_NAME,
@@ -2644,7 +2649,7 @@ async def submission_loop(
     # to publish to the user's HF dataset gets a fresh attempt on next run.
     if config and config.save_sessions:
         Session.retry_failed_uploads_detached(
-            directory=str(DEFAULT_SESSION_LOG_DIR),
+            directory=str(resolve_session_log_dir(config)),
             repo_id=config.session_dataset_repo,
             personal_repo_id=session._personal_trace_repo_id(),
         )

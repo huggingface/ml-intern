@@ -873,6 +873,7 @@ async def get_user_input(prompt_session: PromptSession) -> str:
 async def _resume_picker(
     arg: str,
     prompt_session: PromptSession | None,
+    config=None,
 ) -> Path | None:
     """Resolve a session log path via ``arg`` or interactive selection.
 
@@ -884,13 +885,13 @@ async def _resume_picker(
         list_session_logs,
         resolve_session_log_arg,
     )
-    from agent.core.session import DEFAULT_SESSION_LOG_DIR
+    from agent.core.session import resolve_session_log_dir
 
     console = get_console()
-    directory = DEFAULT_SESSION_LOG_DIR
+    directory = resolve_session_log_dir(config)
     entries = list_session_logs(directory)
     if not entries:
-        console.print(f"[yellow]No session logs found in ./{directory}.[/yellow]")
+        console.print(f"[yellow]No session logs found in {directory}.[/yellow]")
         return None
 
     if arg:
@@ -984,7 +985,7 @@ async def _handle_slash_command(
                 "[bold red]No active session to restore into.[/bold red]"
             )
             return None
-        selected_path = await _resume_picker(arg, prompt_session)
+        selected_path = await _resume_picker(arg, prompt_session, config)
         if selected_path is None:
             return None
         submission_id[0] += 1

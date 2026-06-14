@@ -29,6 +29,41 @@ _TURN_COMPLETE_NOTIFICATION_CHARS = 39000
 
 DEFAULT_SESSION_LOG_DIR = Path("session_logs")
 
+# Env var to override where session logs are stored (highest precedence after
+# an explicit config value).
+SESSION_DIR_ENV_VAR = "ML_INTERN_SESSION_DIR"
+
+
+def resolve_session_log_dir(config: Any | None = None) -> Path:
+    """Resolve where CLI session logs are read from and written to.
+
+    Precedence (first match wins):
+      1. ``config.session_log_dir`` if set.
+      2. ``$ML_INTERN_SESSION_DIR`` env var.
+      3. Legacy ``./session_logs`` if that directory already exists in the
+         current working directory (back-compat for existing checkouts).
+      4. XDG default: ``$XDG_DATA_HOME/ml-intern/sessions``
+         (``~/.local/share/ml-intern/sessions`` when XDG_DATA_HOME is unset).
+
+    Every reader and writer routes through this single helper so reads and
+    writes never diverge.
+    """
+    if config is not None:
+        configured = getattr(config, "session_log_dir", None)
+        if configured:
+            return Path(configured).expanduser()
+
+    env_dir = os.environ.get(SESSION_DIR_ENV_VAR)
+    if env_dir:
+        return Path(env_dir).expanduser()
+
+    if DEFAULT_SESSION_LOG_DIR.exists():
+        return DEFAULT_SESSION_LOG_DIR
+
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg_data_home).expanduser() if xdg_data_home else Path.home() / ".local" / "share"
+    return base / "ml-intern" / "sessions"
+
 
 def _format_usd(value: Any) -> str:
     if isinstance(value, bool):
@@ -576,7 +611,7 @@ class Session:
 
     def save_trajectory_local(
         self,
-        directory: str = str(DEFAULT_SESSION_LOG_DIR),
+        directory: str | None = None,
         upload_status: str = "pending",
         dataset_url: Optional[str] = None,
     ) -> Optional[str]:
@@ -584,7 +619,8 @@ class Session:
         Save trajectory to local JSON file as backup with upload status
 
         Args:
-            directory: Directory to save logs (default: "session_logs")
+            directory: Directory to save logs. When None, resolved from config
+                via ``resolve_session_log_dir`` (XDG path or override).
             upload_status: Status of upload attempt ("pending", "success", "failed")
             dataset_url: URL of dataset if upload succeeded
 
@@ -592,6 +628,8 @@ class Session:
             Path to saved file if successful, None otherwise
         """
         try:
+            if directory is None:
+                directory = str(resolve_session_log_dir(self.config))
             log_dir = Path(directory)
             log_dir.mkdir(parents=True, exist_ok=True)
 
