@@ -23,14 +23,17 @@ def _write_session_log(
     user_id: str | None = "user-a",
     extra_messages: list[dict] | None = None,
     events: list[dict] | None = None,
+    session_title: str | None = None,
+    end_time: str = "2026-01-01T00:05:00",
 ) -> Path:
     directory.mkdir(exist_ok=True)
     path = directory / name
     payload = {
         "session_id": session_id,
+        "session_title": session_title,
         "user_id": user_id,
         "session_start_time": "2026-01-01T00:00:00",
-        "session_end_time": "2026-01-01T00:05:00",
+        "session_end_time": end_time,
         "model_name": ROUTER_GPT_55,
         "messages": [
             {"role": "system", "content": "old system"},
@@ -64,6 +67,8 @@ class _FakeSession:
         self.session_id = "current-session"
         self.session_start_time = "2026-01-02T00:00:00"
         self.user_id = user_id
+        self.session_title: str | None = None
+        self._title_user_set = False
         self.logged_events: list[dict] = []
         self._local_save_path: str | None = None
         self.turn_count = 0
@@ -382,3 +387,112 @@ def test_resolve_session_log_arg_accepts_index_and_id_prefix(tmp_path):
     assert session_resume.resolve_session_log_arg("1", entries, log_dir) == newer
     assert session_resume.resolve_session_log_arg("abc", entries, log_dir) == older
     assert session_resume.resolve_session_log_arg("nope", entries, log_dir) is None
+
+
+def test_list_populates_session_title_with_preview_fallback(tmp_path):
+    log_dir = tmp_path / "session_logs"
+    _write_session_log(
+        log_dir, "titled.json", session_id="s1", content="train a model",
+        mtime=time.time(), session_title="Fine-Tune Llama", end_time="2026-02-02T10:00:00",
+    )
+    _write_session_log(
+        log_dir, "untitled.json", session_id="s2", content="process data",
+        mtime=time.time() - 5, end_time="2026-02-01T10:00:00",
+    )
+    by_id = {e.session_id: e for e in session_resume.list_session_logs(log_dir)}
+    assert by_id["s1"].session_title == "Fine-Tune Llama"
+    assert by_id["s2"].session_title is None
+    assert by_id["s2"].preview == "process data"  # preview still available
+
+
+def test_preview_skips_slash_command_first_message(tmp_path):
+    log_dir = tmp_path / "session_logs"
+    _write_session_log(
+        log_dir, "cmd.json", session_id="s1", content="/model openai/gpt-5.5",
+        mtime=time.time(),
+        extra_messages=[{"role": "user", "content": "actually fine-tune llama"}],
+    )
+    entry = session_resume.list_session_logs(log_dir)[0]
+    assert entry.preview == "actually fine-tune llama"
+
+
+def test_sort_and_display_agree_newest_first(tmp_path):
+    log_dir = tmp_path / "session_logs"
+    # Deliberately give the OLDER end_time a NEWER mtime to expose the old
+    # mtime-sort-vs-end_time-display mismatch; the fix sorts by end_time.
+    _write_session_log(
+        log_dir, "a.json", session_id="old", content="x",
+        mtime=time.time(), end_time="2026-01-01T09:00:00",
+    )
+    _write_session_log(
+        log_dir, "b.json", session_id="new", content="y",
+        mtime=time.time() - 100, end_time="2026-03-01T09:00:00",
+    )
+    entries = session_resume.list_session_logs(log_dir)
+    # Newest end_time first regardless of mtime.
+    assert [e.session_id for e in entries] == ["new", "old"]
+    # Displayed labels are in the same (descending) order.
+    labels = [session_resume._sort_timestamp(e) for e in entries]
+    assert labels == sorted(labels, reverse=True)
+
+
+def test_sort_timestamp_falls_back_to_mtime(tmp_path):
+    entry = session_resume.SessionLogEntry(
+        path=Path("x.json"), session_id="s", session_start_time="not-a-date",
+        session_end_time="also-bad", model_name=None, message_count=1,
+        preview="p", mtime=1_700_000_000.0,
+    )
+    ts = session_resume._sort_timestamp(entry)
+    assert ts.tzinfo is not None  # tz-aware, no TypeError
+
+
+def test_format_entry_shows_title(tmp_path):
+    log_dir = tmp_path / "session_logs"
+    _write_session_log(
+        log_dir, "t.json", session_id="s1", content="train a model",
+        mtime=time.time(), session_title="My Cool Run",
+    )
+    entry = session_resume.list_session_logs(log_dir)[0]
+    out = session_resume.format_session_log_entry(1, entry)
+    assert "My Cool Run" in out
+
+
+def test_restore_carries_session_title(tmp_path):
+    log_dir = tmp_path / "session_logs"
+    path = _write_session_log(
+        log_dir, "t.json", session_id="s1", content="hello",
+        mtime=time.time(), session_title="Resumed Run", user_id="user-a",
+    )
+    session = _FakeSession(user_id="user-a")
+    result = session_resume.restore_session_from_log(session, path)
+    assert session.session_title == "Resumed Run"
+    assert session._title_user_set is True
+    assert result["session_title"] == "Resumed Run"
+
+
+def test_list_dedupes_same_session_id_keeping_newest(tmp_path):
+    log_dir = tmp_path / "session_logs"
+    # Same session_id (a resumed continuation), two files, different end_times.
+    _write_session_log(
+        log_dir, "old.json", session_id="dup", content="first",
+        mtime=time.time() - 100, session_title="Old Title",
+        end_time="2026-01-01T09:00:00",
+    )
+    _write_session_log(
+        log_dir, "new.json", session_id="dup", content="continued",
+        mtime=time.time(), session_title="New Title",
+        end_time="2026-03-01T09:00:00",
+    )
+    # A genuinely different session that happens to share a title.
+    _write_session_log(
+        log_dir, "other.json", session_id="other", content="z",
+        mtime=time.time() - 50, session_title="New Title",
+        end_time="2026-02-01T09:00:00",
+    )
+    entries = session_resume.list_session_logs(log_dir)
+    ids = [e.session_id for e in entries]
+    assert ids.count("dup") == 1  # collapsed to one
+    assert "other" in ids  # distinct session kept
+    # The kept "dup" entry is the newest (New Title).
+    dup = next(e for e in entries if e.session_id == "dup")
+    assert dup.session_title == "New Title"

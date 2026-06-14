@@ -28,6 +28,12 @@ class FakeUsageApprovalSession:
         self.events: list[Event] = []
         self.turn_count = 0
         self.auto_saved = False
+        # Title fields a real Session carries; the completion path may spawn the
+        # one-shot auto-title task, which no-ops here (no user message to title).
+        self.session_id = "usage-fake"
+        self.session_title = None
+        self._title_user_set = False
+        self._conversation_epoch = 0
 
     async def send_event(self, event: Event):
         self.events.append(event)

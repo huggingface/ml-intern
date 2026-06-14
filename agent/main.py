@@ -455,6 +455,14 @@ async def event_listener(
                 else:
                     console.print("[dim]Started new chat.[/dim]")
                 turn_complete_event.set()
+            elif event.event_type == "conversation_title":
+                title = (event.data or {}).get("title")
+                if title:
+                    from rich.markup import escape
+
+                    console.print(
+                        f"[dim]Titled this session:[/dim] [cyan]{escape(title)}[/cyan]"
+                    )
             elif event.event_type == "resume_complete":
                 data = event.data or {}
                 path = data.get("path", "?")
@@ -464,9 +472,16 @@ async def event_listener(
                 invalid_model = data.get("invalid_saved_model")
                 forked = bool(data.get("forked", False))
                 redacted = bool(data.get("had_redacted_content", False))
+                title = data.get("session_title")
                 verb = "Forked from" if forked else "Resumed"
+                if title:
+                    from rich.markup import escape
+
+                    titled = f" [cyan]{escape(title)}[/cyan]"
+                else:
+                    titled = ""
                 console.print(
-                    f"[green]{verb}[/green] {path} "
+                    f"[green]{verb}[/green]{titled} {path} "
                     f"([cyan]{count}[/cyan] messages, "
                     f"model [cyan]{model}[/cyan])."
                 )
@@ -869,6 +884,7 @@ async def get_user_input(prompt_session: PromptSession) -> str:
 async def _resume_picker(
     arg: str,
     prompt_session: PromptSession | None,
+    config=None,
 ) -> Path | None:
     """Resolve a session log path via ``arg`` or interactive selection.
 
@@ -880,13 +896,17 @@ async def _resume_picker(
         list_session_logs,
         resolve_session_log_arg,
     )
-    from agent.core.session import DEFAULT_SESSION_LOG_DIR
+    from agent.core.session import legacy_session_log_dirs, resolve_session_log_dir
 
     console = get_console()
-    directory = DEFAULT_SESSION_LOG_DIR
-    entries = list_session_logs(directory)
+    directory = resolve_session_log_dir(config)
+    # Union-read any legacy ./session_logs left behind by the XDG migration so
+    # pre-upgrade sessions stay visible even when launched from a different cwd.
+    entries = list_session_logs(
+        directory, extra_dirs=legacy_session_log_dirs(directory)
+    )
     if not entries:
-        console.print(f"[yellow]No session logs found in ./{directory}.[/yellow]")
+        console.print(f"[yellow]No session logs found in {directory}.[/yellow]")
         return None
 
     if arg:
@@ -895,30 +915,26 @@ async def _resume_picker(
             console.print(f"[bold red]No matching session log:[/bold red] {arg}")
         return selected
 
-    console.print()
-    console.print("[bold]Saved sessions[/bold]")
-    for index, entry in enumerate(entries, start=1):
-        console.print(format_session_log_entry(index, entry))
-    console.print()
-
     if prompt_session is None:
+        # Headless/non-interactive: print the list so it's still visible, but
+        # there's no TTY to drive the picker.
+        console.print()
+        console.print("[bold]Saved sessions[/bold]")
+        for index, entry in enumerate(entries, start=1):
+            console.print(format_session_log_entry(index, entry))
         console.print("[yellow]Cannot prompt for a selection here.[/yellow]")
         return None
 
+    from agent.utils.session_picker import pick_session_interactive
+
     try:
-        choice = await prompt_session.prompt_async(
-            "Select session number (blank to cancel): "
-        )
+        selected = await pick_session_interactive(entries)
     except (EOFError, KeyboardInterrupt):
         console.print("[dim]Resume cancelled.[/dim]")
         return None
-    choice = choice.strip()
-    if not choice:
+    if selected is None:
         console.print("[dim]Resume cancelled.[/dim]")
         return None
-    selected = resolve_session_log_arg(choice, entries, directory)
-    if selected is None:
-        console.print(f"[bold red]Invalid selection:[/bold red] {choice}")
     return selected
 
 
@@ -980,7 +996,7 @@ async def _handle_slash_command(
                 "[bold red]No active session to restore into.[/bold red]"
             )
             return None
-        selected_path = await _resume_picker(arg, prompt_session)
+        selected_path = await _resume_picker(arg, prompt_session, config)
         if selected_path is None:
             return None
         submission_id[0] += 1
@@ -990,6 +1006,34 @@ async def _handle_slash_command(
                 op_type=OpType.RESUME, data={"path": str(selected_path)}
             ),
         )
+
+    if command == "/rename":
+        session = session_holder[0] if session_holder else None
+        if session is None:
+            get_console().print("[bold red]No active session to rename.[/bold red]")
+            return None
+        from rich.markup import escape
+
+        from agent.core.title import strip_title_secrets
+
+        # Scrub credentials from the explicit name: like the auto-title path,
+        # the title reaches a filename and the persisted JSON, which bypass the
+        # trajectory-wide redactor.
+        new_title = strip_title_secrets(arg)
+        if not new_title:
+            get_console().print(
+                "[dim]Usage: /rename <name> — give the current session a title.[/dim]"
+            )
+            return None
+        session.session_title = new_title
+        session._title_user_set = True
+        # Persist the new title immediately so /resume reflects it even when no
+        # file exists yet (e.g. right after a resume forked the save path).
+        session.persist_title()
+        get_console().print(
+            f"[green]Renamed session to[/green] [cyan]{escape(new_title)}[/cyan]."
+        )
+        return None
 
     if command == "/model":
         console = get_console()
