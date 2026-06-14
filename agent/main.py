@@ -458,7 +458,11 @@ async def event_listener(
             elif event.event_type == "conversation_title":
                 title = (event.data or {}).get("title")
                 if title:
-                    console.print(f"[dim]Titled this session:[/dim] [cyan]{title}[/cyan]")
+                    from rich.markup import escape
+
+                    console.print(
+                        f"[dim]Titled this session:[/dim] [cyan]{escape(title)}[/cyan]"
+                    )
             elif event.event_type == "resume_complete":
                 data = event.data or {}
                 path = data.get("path", "?")
@@ -470,7 +474,12 @@ async def event_listener(
                 redacted = bool(data.get("had_redacted_content", False))
                 title = data.get("session_title")
                 verb = "Forked from" if forked else "Resumed"
-                titled = f" [cyan]{title}[/cyan]" if title else ""
+                if title:
+                    from rich.markup import escape
+
+                    titled = f" [cyan]{escape(title)}[/cyan]"
+                else:
+                    titled = ""
                 console.print(
                     f"[green]{verb}[/green]{titled} {path} "
                     f"([cyan]{count}[/cyan] messages, "
@@ -887,11 +896,15 @@ async def _resume_picker(
         list_session_logs,
         resolve_session_log_arg,
     )
-    from agent.core.session import resolve_session_log_dir
+    from agent.core.session import legacy_session_log_dirs, resolve_session_log_dir
 
     console = get_console()
     directory = resolve_session_log_dir(config)
-    entries = list_session_logs(directory)
+    # Union-read any legacy ./session_logs left behind by the XDG migration so
+    # pre-upgrade sessions stay visible even when launched from a different cwd.
+    entries = list_session_logs(
+        directory, extra_dirs=legacy_session_log_dirs(directory)
+    )
     if not entries:
         console.print(f"[yellow]No session logs found in {directory}.[/yellow]")
         return None
@@ -999,7 +1012,14 @@ async def _handle_slash_command(
         if session is None:
             get_console().print("[bold red]No active session to rename.[/bold red]")
             return None
-        new_title = arg.strip()
+        from rich.markup import escape
+
+        from agent.core.title import strip_title_secrets
+
+        # Scrub credentials from the explicit name: like the auto-title path,
+        # the title reaches a filename and the persisted JSON, which bypass the
+        # trajectory-wide redactor.
+        new_title = strip_title_secrets(arg)
         if not new_title:
             get_console().print(
                 "[dim]Usage: /rename <name> — give the current session a title.[/dim]"
@@ -1011,7 +1031,7 @@ async def _handle_slash_command(
         # file exists yet (e.g. right after a resume forked the save path).
         session.persist_title()
         get_console().print(
-            f"[green]Renamed session to[/green] [cyan]{new_title}[/cyan]."
+            f"[green]Renamed session to[/green] [cyan]{escape(new_title)}[/cyan]."
         )
         return None
 

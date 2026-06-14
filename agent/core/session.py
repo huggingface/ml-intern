@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -63,6 +64,42 @@ def resolve_session_log_dir(config: Any | None = None) -> Path:
     xdg_data_home = os.environ.get("XDG_DATA_HOME")
     base = Path(xdg_data_home).expanduser() if xdg_data_home else Path.home() / ".local" / "share"
     return base / "ml-intern" / "sessions"
+
+
+def legacy_session_log_dirs(resolved: Any | None = None) -> list[Path]:
+    """Extra legacy dirs to union-read so pre-XDG-migration logs stay visible.
+
+    Returns ``[./session_logs]`` when that cwd-relative legacy dir exists and is
+    not already the resolved/primary dir; otherwise an empty list. Reads only —
+    writes always go to the resolved dir, so this never moves or mutates the
+    legacy logs.
+    """
+    legacy = DEFAULT_SESSION_LOG_DIR
+    if not legacy.exists():
+        return []
+    if resolved is not None:
+        try:
+            if legacy.resolve() == Path(resolved).resolve():
+                return []
+        except OSError:
+            pass
+    return [legacy]
+
+
+def _scrub_title(title: str | None) -> str | None:
+    """Best-effort secret scrub for a title before it is written to disk.
+
+    Defence-in-depth: the title sources already scrub at the source, but this
+    guards the on-disk/uploaded copy against any future un-sanitised source.
+    """
+    if not title:
+        return title
+    try:
+        from agent.core.redact import scrub_string
+
+        return scrub_string(title)
+    except Exception:
+        return title
 
 
 def _format_usd(value: Any) -> str:
@@ -181,6 +218,15 @@ class Session:
         # auto-titling never clobbers a name the user chose.
         self.session_title: str | None = session_title
         self._title_user_set: bool = session_title is not None
+        # Bumped on every conversation rotation (``/new`` reset, resume) so a
+        # fire-and-forget auto-title task spawned for one conversation can
+        # detect that it finished too late and refuse to stamp a stale title
+        # onto a different one.
+        self._conversation_epoch: int = 0
+        # Serialises on-disk log mutations between the event-loop thread (title
+        # rename) and the heartbeat worker thread (trajectory save) so a save
+        # can't resurrect a file the rename just moved away.
+        self._save_lock = threading.Lock()
         self.inference_billing_session_id: str | None = None
         self.config = config
         self.is_running = True
@@ -502,6 +548,9 @@ class Session:
         self.session_id = str(uuid.uuid4())
         self.session_title = None
         self._title_user_set = False
+        # Rotate so any auto-title task still in flight for the previous
+        # conversation bails instead of titling this fresh one.
+        self._conversation_epoch += 1
         self.inference_billing_session_id = None
         self.session_start_time = datetime.now().astimezone().isoformat()
         self.turn_count = 0
@@ -596,7 +645,7 @@ class Session:
             usage_metrics = self.usage_metrics or {}
         return {
             "session_id": self.session_id,
-            "session_title": self.session_title,
+            "session_title": _scrub_title(self.session_title),
             "user_id": self.user_id,
             "hf_username": self.hf_username,
             "session_start_time": self.session_start_time,
@@ -638,42 +687,47 @@ class Session:
         reads. If no file exists yet the cached path is cleared so the next
         save picks up the title. Safe no-op on any error.
         """
-        old = self._local_save_path
-        if not old:
-            return
-        old_path = Path(old)
-        if not old_path.exists():
-            self._local_save_path = None
-            return
-        # Preserve the original timestamp suffix (last two underscore tokens)
-        # so chronological ordering is stable; regenerate if it doesn't parse.
-        parts = old_path.stem.split("_")
-        tail = "_".join(parts[-2:])
-        timestamp = (
-            tail
-            if len(parts) >= 2 and parts[-2].isdigit() and parts[-1].isdigit()
-            else datetime.now().strftime("%Y%m%d_%H%M%S")
-        )
-        new_path = old_path.with_name(self._session_log_filename(timestamp))
-        try:
-            if new_path != old_path:
-                old_path.rename(new_path)
-                self._local_save_path = str(new_path)
-            # Refresh the persisted title inside the file so readers (e.g.
-            # /resume) show the new name, not just the renamed file. Operate on
-            # the file path directly so an explicitly-located log is updated in
-            # place regardless of config-resolved directories.
-            target = Path(self._local_save_path)
-            with open(target) as f:
-                data = json.load(f)
-            data["session_title"] = self.session_title
-            tmp_path = target.with_suffix(target.suffix + ".tmp")
-            with open(tmp_path, "w") as f:
-                json.dump(data, f, indent=2)
-            tmp_path.replace(target)
-        except (OSError, ValueError) as e:
-            logger.debug("Could not retitle log file: %s", e)
-            self._local_save_path = None
+        # Hold the save lock across the read of _local_save_path, the rename,
+        # and the rewrite so a heartbeat save on the worker thread can't read
+        # the pre-rename path and recreate it as an orphan after we move it.
+        with self._save_lock:
+            old = self._local_save_path
+            if not old:
+                return
+            old_path = Path(old)
+            if not old_path.exists():
+                self._local_save_path = None
+                return
+            # Preserve the original timestamp suffix (last two underscore
+            # tokens) so chronological ordering is stable; regenerate if it
+            # doesn't parse.
+            parts = old_path.stem.split("_")
+            tail = "_".join(parts[-2:])
+            timestamp = (
+                tail
+                if len(parts) >= 2 and parts[-2].isdigit() and parts[-1].isdigit()
+                else datetime.now().strftime("%Y%m%d_%H%M%S")
+            )
+            new_path = old_path.with_name(self._session_log_filename(timestamp))
+            try:
+                if new_path != old_path:
+                    old_path.rename(new_path)
+                    self._local_save_path = str(new_path)
+                # Refresh the persisted title inside the file so readers (e.g.
+                # /resume) show the new name, not just the renamed file. Operate
+                # on the file path directly so an explicitly-located log is
+                # updated in place regardless of config-resolved directories.
+                target = Path(self._local_save_path)
+                with open(target) as f:
+                    data = json.load(f)
+                data["session_title"] = _scrub_title(self.session_title)
+                tmp_path = target.with_suffix(target.suffix + ".tmp")
+                with open(tmp_path, "w") as f:
+                    json.dump(data, f, indent=2)
+                tmp_path.replace(target)
+            except (OSError, ValueError) as e:
+                logger.debug("Could not retitle log file: %s", e)
+                self._local_save_path = None
 
     def persist_title(self) -> None:
         """Persist the current ``session_title`` to disk right away.
@@ -741,19 +795,29 @@ class Session:
             # the same file instead of creating a new timestamped file every
             # minute. The timestamp in the filename is kept for first-save
             # ordering; subsequent saves just rewrite that file.
-            if self._local_save_path and Path(self._local_save_path).parent == log_dir:
-                filepath = Path(self._local_save_path)
-            else:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filepath = log_dir / self._session_log_filename(timestamp)
-                self._local_save_path = str(filepath)
+            #
+            # Hold the save lock across path selection and the write so a
+            # concurrent title rename (event-loop thread) and this save
+            # (heartbeat worker thread) can't interleave and leave an orphan
+            # copy at a path the rename moved away from.
+            with self._save_lock:
+                if (
+                    self._local_save_path
+                    and Path(self._local_save_path).parent == log_dir
+                ):
+                    filepath = Path(self._local_save_path)
+                else:
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filepath = log_dir / self._session_log_filename(timestamp)
+                    self._local_save_path = str(filepath)
 
-            # Atomic-ish write: stage to .tmp then rename so a crash mid-write
-            # doesn't leave a truncated JSON that breaks the retry scanner.
-            tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
-            with open(tmp_path, "w") as f:
-                json.dump(trajectory, f, indent=2)
-            tmp_path.replace(filepath)
+                # Atomic-ish write: stage to .tmp then rename so a crash
+                # mid-write doesn't leave a truncated JSON that breaks the retry
+                # scanner.
+                tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
+                with open(tmp_path, "w") as f:
+                    json.dump(trajectory, f, indent=2)
+                tmp_path.replace(filepath)
 
             return str(filepath)
         except Exception as e:
@@ -871,7 +935,7 @@ class Session:
 
     @staticmethod
     def retry_failed_uploads_detached(
-        directory: str = str(DEFAULT_SESSION_LOG_DIR),
+        directory: Optional[str] = None,
         repo_id: Optional[str] = None,
         *,
         personal_repo_id: Optional[str] = None,
@@ -881,13 +945,18 @@ class Session:
         (fire-and-forget).
 
         Args:
-            directory: Directory containing session logs
+            directory: Directory containing session logs. When ``None``,
+                resolved via ``resolve_session_log_dir`` (XDG path or override)
+                so it never diverges from where saves are written.
             repo_id: Target dataset repo ID for the shared org/KPI upload.
             personal_repo_id: Per-user dataset for Claude-Code-format
                 retries. ``None`` skips the personal retry pass.
         """
         if not repo_id and not personal_repo_id:
             return
+
+        if directory is None:
+            directory = str(resolve_session_log_dir())
 
         try:
             uploader_script = Path(__file__).parent / "session_uploader.py"

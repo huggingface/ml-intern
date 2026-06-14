@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +15,6 @@ from litellm import Message
 
 from agent.core.model_ids import strip_huggingface_model_prefix
 from agent.core.model_switcher import is_valid_model_id
-from agent.core.session import DEFAULT_SESSION_LOG_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +86,8 @@ def _sort_timestamp(entry: "SessionLogEntry") -> datetime:
     return datetime.fromtimestamp(entry.mtime).astimezone()
 
 
-def list_session_logs(
-    directory: Path = DEFAULT_SESSION_LOG_DIR,
-) -> list[SessionLogEntry]:
-    """Return readable session logs under ``directory``, newest first."""
+def _read_session_log_entries(directory: Path) -> list[SessionLogEntry]:
+    """Read every readable ``*.json`` log in one directory (no sort/dedupe)."""
     if not directory.exists():
         return []
 
@@ -127,6 +125,32 @@ def list_session_logs(
                 session_title=title if isinstance(title, str) and title else None,
             )
         )
+    return entries
+
+
+def list_session_logs(
+    directory: Path,
+    *,
+    extra_dirs: Iterable[Path] = (),
+) -> list[SessionLogEntry]:
+    """Return readable session logs, newest first, deduped by ``session_id``.
+
+    ``extra_dirs`` are union-read alongside ``directory`` (e.g. a legacy
+    cwd-relative ``./session_logs`` left behind by the XDG migration) so old
+    sessions stay visible regardless of launch cwd. A session present in more
+    than one dir collapses to its newest file via the dedupe below.
+    """
+    entries: list[SessionLogEntry] = []
+    seen_dirs: set[Path] = set()
+    for d in [directory, *extra_dirs]:
+        try:
+            key = d.resolve()
+        except OSError:
+            key = d
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        entries.extend(_read_session_log_entries(d))
 
     # Sort and display use the SAME timestamp so the visible order never looks
     # scrambled (the old code sorted by mtime but displayed session_end_time).
@@ -145,12 +169,16 @@ def list_session_logs(
 
 
 def format_session_log_entry(index: int, entry: SessionLogEntry) -> str:
+    from rich.markup import escape
+
     label = _sort_timestamp(entry).astimezone().strftime("%Y-%m-%d %H:%M")
     short_id = entry.session_id[:8]
     model = entry.model_name or "unknown model"
     # Lead with the human-readable title; fall back to the first-prompt preview
-    # for older logs that predate session titles.
-    heading = entry.session_title or entry.preview
+    # for older logs that predate session titles. Escape so a title/preview
+    # containing Rich markup (e.g. "[red]") can't inject styling or raise when
+    # this string is printed via the console.
+    heading = escape(entry.session_title or entry.preview)
     return (
         f"{index:>2}. {heading}\n"
         f"    {label}  {short_id}  {entry.message_count} msgs  {model}"
@@ -160,7 +188,7 @@ def format_session_log_entry(index: int, entry: SessionLogEntry) -> str:
 def resolve_session_log_arg(
     arg: str,
     entries: list[SessionLogEntry],
-    directory: Path = DEFAULT_SESSION_LOG_DIR,
+    directory: Path,
 ) -> Path | None:
     """Resolve ``/resume <arg>`` as index, path, filename, or session id prefix."""
     value = arg.strip()
@@ -274,6 +302,12 @@ def restore_session_from_log(session: Any, path: Path) -> dict[str, Any]:
     saved_session_id = data.get("session_id")
     saved_user_id = data.get("user_id")
     is_continuation = saved_user_id == session.user_id
+
+    # Rotate the conversation epoch so an auto-title task still in flight for
+    # the pre-resume conversation bails instead of stamping its title onto this
+    # one (a forked resume keeps no field the title-task guard would otherwise
+    # catch). getattr keeps test doubles without the attr working.
+    session._conversation_epoch = getattr(session, "_conversation_epoch", 0) + 1
 
     # Carry the saved title across the resume so the conversation keeps its
     # name and auto-titling doesn't re-fire on it.

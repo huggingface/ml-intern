@@ -21,14 +21,16 @@ import logging
 import re
 from typing import Any
 
+from agent.core.redact import scrub_string
+
 logger = logging.getLogger(__name__)
 
 # Keep titles short and skimmable in a one-line picker row.
 MAX_TITLE_WORDS = 6
 MAX_TITLE_CHARS = 50
 
-# Strip anything that looks like a long opaque secret (tokens, keys, base64
-# blobs) before it can land in a persisted title or a filename. The title is
+# Generic fallback for long opaque secrets (tokens, keys, base64 blobs) that the
+# shared redactor's prefix-anchored patterns don't recognise. The title is
 # derived from the first user message, which may contain a pasted credential.
 _SECRET_RUN = re.compile(r"\b[A-Za-z0-9_\-]{30,}\b")
 
@@ -39,8 +41,25 @@ def _collapse(text: str) -> str:
 
 
 def _strip_secrets(text: str) -> str:
-    """Drop long credential-like tokens so they never reach disk via a title."""
-    return _collapse(_SECRET_RUN.sub("", text))
+    """Drop credential-like tokens so they never reach disk via a title.
+
+    The title is the one trajectory field that bypasses the save-time
+    ``redact.scrub`` pass, so it must scrub itself. We run the project's shared
+    ``scrub_string`` first — it catches structured secrets the generic heuristic
+    misses (AWS key ids, ``Bearer`` tokens, ``NAME=value`` env dumps, sk-/hf_/
+    gh_ keys) — then strip any remaining long opaque run.
+    """
+    return _collapse(_SECRET_RUN.sub("", scrub_string(str(text))))
+
+
+def strip_title_secrets(text: str | None) -> str:
+    """Scrub secrets from an explicitly-provided title (e.g. ``/rename``).
+
+    Unlike the auto-title path this does not cap length — the user chose the
+    name — it only removes credentials so they can't reach a filename or the
+    persisted JSON title.
+    """
+    return _strip_secrets(text or "")
 
 
 def _cap(text: str, max_words: int = MAX_TITLE_WORDS, max_chars: int = MAX_TITLE_CHARS) -> str:

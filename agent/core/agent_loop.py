@@ -1176,17 +1176,40 @@ async def _call_llm_non_streaming(
     )
 
 
-async def _generate_and_set_title(session: "Session", final_response: str | None) -> None:
+# Strong references to in-flight auto-title tasks. asyncio only holds a weak
+# reference to a bare create_task result, so without this the task could be
+# GC'd mid-await and the title silently dropped (mirrors telemetry.py's
+# _heartbeat_tasks pattern).
+_title_tasks: set[asyncio.Task] = set()
+
+
+async def _generate_and_set_title(
+    session: "Session",
+    final_response: str | None,
+    origin_session_id: str | None = None,
+    origin_epoch: int | None = None,
+) -> None:
     """Generate a conversation title and attach it to the session.
 
     Runs as a fire-and-forget task after the first turn. Any failure is
     swallowed so it can never break the turn that spawned it.
+
+    ``origin_session_id`` / ``origin_epoch`` snapshot the conversation identity
+    at spawn time; if they're omitted they default to the session's current
+    values. After the (multi-second) title LLM call we bail unless the session
+    is still the same conversation — otherwise a ``/new`` or ``/resume`` issued
+    during the await would let us stamp this title onto a different one.
     """
     try:
         from agent.core.title import (
             extract_first_user_text,
             generate_conversation_title,
         )
+
+        if origin_session_id is None:
+            origin_session_id = session.session_id
+        if origin_epoch is None:
+            origin_epoch = session._conversation_epoch
 
         first_user_text = extract_first_user_text(session.context_manager.items)
         if not first_user_text:
@@ -1197,8 +1220,15 @@ async def _generate_and_set_title(session: "Session", final_response: str | None
             first_user_text,
             final_response,
         )
-        # The user may have renamed (or a /new fired) while we were awaiting.
-        if not title or session._title_user_set or session.session_title:
+        # Bail if the user renamed, or a /new or /resume rotated the
+        # conversation, while we were awaiting the title.
+        if (
+            not title
+            or session._title_user_set
+            or session.session_title
+            or session.session_id != origin_session_id
+            or session._conversation_epoch != origin_epoch
+        ):
             return
         session.session_title = title
         # Persist the title so even a single-turn session is titled on disk.
@@ -1211,6 +1241,35 @@ async def _generate_and_set_title(session: "Session", final_response: str | None
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("Auto-title task failed: %s", e)
+
+
+def _maybe_spawn_auto_title(session: "Session", final_response: Any) -> None:
+    """Spawn the one-shot auto-title task if this is the first untitled turn.
+
+    Called from every turn-completion path (normal and the usage-threshold /
+    YOLO / abandon resume paths) so a first turn that paused for an approval
+    still gets titled. Snapshots the conversation identity and keeps a strong
+    reference to the task. Never raises — a title must never break a turn.
+    """
+    try:
+        if (
+            session.turn_count != 0
+            or session.session_title
+            or session._title_user_set
+        ):
+            return
+        task = asyncio.create_task(
+            _generate_and_set_title(
+                session,
+                final_response if isinstance(final_response, str) else None,
+                session.session_id,
+                session._conversation_epoch,
+            )
+        )
+        _title_tasks.add(task)
+        task.add_done_callback(_title_tasks.discard)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Auto-title spawn skipped: %s", e)
 
 
 class Handlers:
@@ -1258,6 +1317,9 @@ class Handlers:
                         },
                     )
                 )
+                # First turn may complete here (paused for an approval, then
+                # the user continued); title it before turn_count increments.
+                _maybe_spawn_auto_title(session, final_response)
                 session.increment_turn()
                 await session.auto_save_if_needed()
             return
@@ -1925,17 +1987,7 @@ class Handlers:
             # Auto-title the conversation once, after the very first completed
             # turn, unless the user already named it via /rename. Fire-and-forget
             # so a slow or failing title never delays the turn.
-            if (
-                session.turn_count == 0
-                and not session.session_title
-                and not session._title_user_set
-            ):
-                asyncio.create_task(
-                    _generate_and_set_title(
-                        session,
-                        final_response if isinstance(final_response, str) else None,
-                    )
-                )
+            _maybe_spawn_auto_title(session, final_response)
 
         # Increment turn counter and check for auto-save
         session.increment_turn()
@@ -2079,6 +2131,10 @@ class Handlers:
                     },
                 )
             )
+            # First turn may complete here (paused for an approval); title it
+            # before turn_count increments so it isn't left permanently
+            # untitled.
+            _maybe_spawn_auto_title(session, final_response)
             session.increment_turn()
             await session.auto_save_if_needed()
             return
@@ -2210,6 +2266,10 @@ class Handlers:
                     },
                 )
             )
+            # First turn may complete here (paused for an approval); title it
+            # before turn_count increments so it isn't left permanently
+            # untitled.
+            _maybe_spawn_auto_title(session, final_response)
             session.increment_turn()
             await session.auto_save_if_needed()
             return
