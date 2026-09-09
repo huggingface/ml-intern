@@ -77,6 +77,65 @@ def test_huggingface_prefix_is_stripped_for_router_calls():
     assert params["api_base"] == HF_ROUTER_BASE_URL
 
 
+def test_gemini_effort_is_forwarded_as_reasoning_effort():
+    params = _resolve_llm_params(
+        "gemini/gemini-2.5-pro",
+        reasoning_effort="high",
+        strict=True,
+    )
+
+    assert params == {"model": "gemini/gemini-2.5-pro", "reasoning_effort": "high"}
+
+
+def test_vertex_ai_effort_is_forwarded_as_reasoning_effort():
+    params = _resolve_llm_params(
+        "vertex_ai/gemini-2.5-flash",
+        reasoning_effort="medium",
+        strict=True,
+    )
+
+    assert params == {
+        "model": "vertex_ai/gemini-2.5-flash",
+        "reasoning_effort": "medium",
+    }
+
+
+def test_gemini_minimal_effort_normalizes_to_low():
+    params = _resolve_llm_params(
+        "gemini/gemini-2.5-pro",
+        reasoning_effort="minimal",
+        strict=True,
+    )
+
+    assert params["reasoning_effort"] == "low"
+
+
+def test_gemini_max_effort_is_rejected_in_strict_mode():
+    with pytest.raises(UnsupportedEffortError, match="Gemini doesn't accept"):
+        _resolve_llm_params(
+            "gemini/gemini-2.5-pro",
+            reasoning_effort="max",
+            strict=True,
+        )
+
+
+def test_gemini_unsupported_effort_is_dropped_in_non_strict_mode():
+    params = _resolve_llm_params(
+        "gemini/gemini-2.5-pro",
+        reasoning_effort="xhigh",
+        strict=False,
+    )
+
+    assert params == {"model": "gemini/gemini-2.5-pro"}
+
+
+def test_gemini_is_not_routed_through_hf_router():
+    params = _resolve_llm_params("gemini/gemini-2.5-pro")
+
+    assert params["model"] == "gemini/gemini-2.5-pro"
+    assert "api_base" not in params
+
+
 def test_resolve_ollama_params_adds_v1_and_uses_default_key(monkeypatch):
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")

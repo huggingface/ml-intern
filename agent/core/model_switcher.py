@@ -20,7 +20,7 @@ import asyncio
 from litellm import acompletion
 
 from agent.core.effort_probe import ProbeInconclusive, probe_effort
-from agent.core.llm_params import _resolve_llm_params
+from agent.core.llm_params import _GEMINI_PREFIXES, _resolve_llm_params
 from agent.core.local_models import (
     LOCAL_MODEL_PREFIXES,
     is_local_model_id,
@@ -48,6 +48,8 @@ SUGGESTED_MODELS = [
     {"id": KIMI_K27_CODE_MODEL_ID, "label": "Kimi K2.7 Code"},
     {"id": GLM_52_MODEL_ID, "label": "GLM 5.2"},
     {"id": DEEPSEEK_V4_PRO_MODEL_ID, "label": "DeepSeek V4 Pro"},
+    {"id": "gemini/gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+    {"id": "gemini/gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
 ]
 
 
@@ -59,6 +61,7 @@ def is_valid_model_id(model_id: str) -> bool:
     """Loose format check — lets users pick any model id.
 
     Accepts:
+      • gemini/<model>, vertex_ai/<model>  (direct Google API)
       • ollama/<model>, vllm/<model>, lm_studio/<model>, llamacpp/<model>
       • <org>/<model>[:<tag>]            (HF router; tag = provider or policy)
       • huggingface/<org>/<model>[:<tag>] (same, optional LiteLLM prefix)
@@ -93,6 +96,12 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
     availability for uncataloged ids.
     """
     if is_local_model_id(model_id):
+        return True
+
+    # Gemini goes direct to Google, not through the HF router, so the
+    # catalog has nothing to say about it. The probe below covers "does
+    # this model exist".
+    if model_id.startswith(_GEMINI_PREFIXES):
         return True
 
     from agent.core import hf_router_catalog as cat
@@ -163,6 +172,7 @@ def print_model_listing(config, console) -> None:
     console.print(
         "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M3:novita').\n"
         "Add ':fastest', ':cheapest', ':preferred', or ':<provider>' to override routing.\n"
+        "Use 'gemini/<model>' or 'vertex_ai/<model>' for Google Gemini.\n"
         "Use 'ollama/<model>', 'vllm/<model>', 'lm_studio/<model>', or "
         "'llamacpp/<model>' for local OpenAI-compatible endpoints.[/dim]"
     )
@@ -173,6 +183,7 @@ def print_invalid_id(arg: str, console) -> None:
     console.print(
         "[dim]Expected:\n"
         "  • <org>/<model>[:tag]    (HF router — paste from huggingface.co)\n"
+        "  • gemini/<model> | vertex_ai/<model>\n"
         "  • ollama/<model> | vllm/<model> | lm_studio/<model> | llamacpp/<model>[/dim]"
     )
 

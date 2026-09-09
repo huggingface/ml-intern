@@ -32,6 +32,15 @@ def _resolve_hf_router_token(session_hf_token: str | None = None) -> str | None:
 # ``extra_body`` field. The probe cascade walks down when a provider rejects
 # an accepted-looking value, so this stays intentionally small and generic.
 _HF_EFFORTS = {"low", "medium", "high"}
+# Gemini 2.5+ thinking models. LiteLLM maps reasoning_effort → thinking
+# budget for both the Google AI Studio (``gemini/``) and Vertex AI
+# (``vertex_ai/``) routes; "disable" turns thinking off but we model that
+# as "no effort" (None) rather than an effort level.
+_GEMINI_EFFORTS = {"low", "medium", "high"}
+
+# Prefixes routed directly through LiteLLM's Google Gemini adapters rather
+# than the HuggingFace router catch-all.
+_GEMINI_PREFIXES = ("gemini/", "vertex_ai/")
 
 
 def _hf_router_effort_level(reasoning_effort: str) -> str:
@@ -96,6 +105,16 @@ def _resolve_llm_params(
     """
     Build LiteLLM kwargs for a given model id.
 
+    • ``gemini/<model>`` / ``vertex_ai/<model>`` — Google Gemini via the AI
+      Studio API (``GEMINI_API_KEY``) or Vertex AI (GCP creds from
+      ``VERTEX_PROJECT`` / ``VERTEX_LOCATION`` or application-default
+      credentials). Routed directly through LiteLLM's Google adapters rather
+      than the HF Router (which doesn't serve Gemini). ``reasoning_effort``
+      is forwarded as a top-level kwarg; LiteLLM's Gemini adapter translates
+      it into the thinking budget for 2.5+ thinking models. "minimal"
+      normalizes to "low". Models that don't support thinking reject it and
+      the probe cascade drops it.
+
     • ``ollama/<model>``, ``vllm/<model>``, ``lm_studio/<model>``, and
       ``llamacpp/<model>`` — local OpenAI-compatible endpoints. The id prefix
       selects a configurable localhost base URL, and the model suffix is sent
@@ -128,6 +147,19 @@ def _resolve_llm_params(
 
     if local_model_provider(normalized_model) is not None:
         return _resolve_local_model_params(normalized_model, reasoning_effort, strict)
+
+    if normalized_model.startswith(_GEMINI_PREFIXES):
+        params = {"model": normalized_model}
+        if reasoning_effort:
+            level = "low" if reasoning_effort == "minimal" else reasoning_effort
+            if level not in _GEMINI_EFFORTS:
+                if strict:
+                    raise UnsupportedEffortError(
+                        f"Gemini doesn't accept effort={level!r}"
+                    )
+            else:
+                params["reasoning_effort"] = level
+        return params
 
     hf_model = normalized_model
     api_key = _resolve_hf_router_token(session_hf_token)
