@@ -228,6 +228,78 @@ async def test_interactive_main_applies_model_override_before_banner(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_interactive_codex_model_uses_codex_runtime_without_hf_prompt(
+    monkeypatch,
+):
+    seen: dict[str, object] = {}
+    prompt_session = object()
+
+    async def fail_hf_prompt(_prompt_session):
+        raise AssertionError("Codex local runtime must not require HF auth")
+
+    async def fake_codex_runtime(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(main_mod.os, "system", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(main_mod, "PromptSession", lambda: prompt_session)
+    monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: None)
+    monkeypatch.setattr(main_mod, "_prompt_and_save_hf_token", fail_hf_prompt)
+    monkeypatch.setattr(main_mod, "_get_hf_identity", _fake_hf_identity)
+    monkeypatch.setattr(
+        main_mod,
+        "load_config",
+        lambda _path, **_kwargs: SimpleNamespace(
+            model_name="zai-org/GLM-5.2:novita",
+            mcpServers={},
+            tool_runtime="local",
+        ),
+    )
+    monkeypatch.setattr(main_mod, "run_codex_interactive", fake_codex_runtime)
+
+    await main_mod.main(model="codex/default")
+
+    assert seen["prompt_session"] is prompt_session
+    assert seen["hf_token"] is None
+    assert seen["local_mode"] is True
+    assert seen["config"].model_name == "codex/default"
+
+
+@pytest.mark.asyncio
+async def test_headless_codex_model_uses_codex_runtime_without_hf_token(monkeypatch):
+    seen: dict[str, object] = {}
+
+    async def fake_codex_runtime(prompt, **kwargs):
+        seen["prompt"] = prompt
+        seen.update(kwargs)
+
+    monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: None)
+    monkeypatch.setattr(
+        main_mod,
+        "load_config",
+        lambda _path, **_kwargs: SimpleNamespace(
+            model_name="zai-org/GLM-5.2:novita",
+            mcpServers={},
+            tool_runtime="local",
+            yolo_mode=False,
+            max_iterations=50,
+        ),
+    )
+    monkeypatch.setattr(main_mod, "run_codex_headless", fake_codex_runtime)
+
+    await main_mod.headless_main(
+        "inspect this repo",
+        model="codex/default",
+        stream=False,
+    )
+
+    assert seen["prompt"] == "inspect this repo"
+    assert seen["hf_token"] is None
+    assert seen["local_mode"] is True
+    assert seen["stream"] is False
+    assert seen["config"].model_name == "codex/default"
+
+
+@pytest.mark.asyncio
 async def test_local_model_local_runtime_skips_hf_token_prompt(monkeypatch):
     class StopAfterBanner(Exception):
         pass

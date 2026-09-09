@@ -23,9 +23,12 @@ import litellm
 from prompt_toolkit import PromptSession
 
 from agent.config import load_config
+from agent.codex_cli import run_codex_headless, run_codex_interactive
 from agent.core.approval_policy import is_scheduled_operation
 from agent.core.agent_loop import submission_loop
 from agent.core import model_switcher
+from agent.core.codex_models import is_codex_model_id
+from agent.core.codex_runtime import CodexRuntimeError
 from agent.core.hf_access import fetch_whoami_v2, normalize_hf_user_plan
 from agent.core.hf_tokens import resolve_hf_token
 from agent.core.local_models import is_local_model_id
@@ -86,7 +89,8 @@ def _validate_cli_model_override(model: str) -> str:
     if not model_switcher.is_valid_model_id(model):
         raise ValueError(
             "Invalid model id. Use an HF Router id like "
-            "'zai-org/GLM-5.2:novita' or a supported local prefix."
+            "'zai-org/GLM-5.2:novita', 'codex/default' for Codex auth, "
+            "or a supported local prefix."
         )
     return model.removeprefix("huggingface/")
 
@@ -1192,6 +1196,23 @@ async def main(model: str | None = None, sandbox_tools: bool = False):
     _apply_tool_runtime_override(config, sandbox_tools=sandbox_tools)
     local_mode = _is_local_tool_runtime(config)
 
+    if is_codex_model_id(config.model_name):
+        # Codex owns OpenAI authentication. HF auth remains optional for ML
+        # Intern's Hub tools, except when the user explicitly selects the
+        # remote HF sandbox runtime.
+        hf_token = resolve_hf_token()
+        if not hf_token and not local_mode:
+            hf_token = await _prompt_and_save_hf_token(prompt_session)
+        hf_user, _hf_user_plan = await _get_hf_identity(hf_token)
+        await run_codex_interactive(
+            config=config,
+            prompt_session=prompt_session,
+            hf_token=hf_token,
+            hf_user=hf_user,
+            local_mode=local_mode,
+        )
+        return
+
     # HF token — required for Hub-backed models/tools and sandbox tools, but
     # not for local LLMs using only local filesystem tools.
     hf_token = resolve_hf_token()
@@ -1447,6 +1468,33 @@ async def headless_main(
     local_mode = _is_local_tool_runtime(config)
 
     hf_token = resolve_hf_token()
+    if is_codex_model_id(config.model_name):
+        if not hf_token and not local_mode:
+            print(
+                "ERROR: HF sandbox tools require HF_TOKEN. Set it or use the "
+                "default local tool runtime.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if max_iterations is not None:
+            config.max_iterations = max_iterations
+        print(f"Model: {config.model_name}", file=sys.stderr)
+        print(f"Tool runtime: {_tool_runtime_label(local_mode)}", file=sys.stderr)
+        print(f"Prompt: {prompt}", file=sys.stderr)
+        print("---", file=sys.stderr)
+        try:
+            await run_codex_headless(
+                prompt,
+                config=config,
+                hf_token=hf_token,
+                local_mode=local_mode,
+                stream=stream,
+            )
+        except CodexRuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
     if not hf_token and (not is_local_model_id(config.model_name) or not local_mode):
         print(
             "ERROR: No HF token found. Set HF_TOKEN or run `hf auth login`.",

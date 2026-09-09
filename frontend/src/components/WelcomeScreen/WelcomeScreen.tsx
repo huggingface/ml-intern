@@ -181,7 +181,7 @@ function ChecklistStep({
 
 export default function WelcomeScreen() {
   const { createSession } = useSessionStore();
-  const { setPlan, clearPanel, user } = useAgentStore();
+  const { setPlan, clearPanel, authChecking, user } = useAgentStore();
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -313,7 +313,17 @@ export default function WelcomeScreen() {
             mx: 2,
           }}
         >
-          {isDevUser ? (
+          {authChecking ? (
+            <ChecklistStep
+              stepNumber={1}
+              title="Checking Hugging Face access"
+              description="Loading your local credentials."
+              status="active"
+              actionLabel="Checking"
+              loading
+              isLast
+            />
+          ) : isDevUser ? (
             /* Dev mode: single step */
             <ChecklistStep
               stepNumber={1}

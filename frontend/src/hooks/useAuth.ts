@@ -32,47 +32,66 @@ export function triggerLogin(): void {
  */
 export function useAuth() {
   const setUser = useAgentStore((s) => s.setUser);
+  const setAuthChecking = useAgentStore((s) => s.setAuthChecking);
 
   useEffect(() => {
     let cancelled = false;
 
+    async function hydrateCurrentUser(): Promise<boolean> {
+      const response = await fetch('/auth/me', { credentials: 'include' });
+      if (!response.ok) return false;
+
+      const data = await response.json();
+      if (!data.authenticated) return false;
+      if (!cancelled) {
+        setUser({
+          authenticated: true,
+          username: data.username,
+          name: data.name,
+          picture: data.picture,
+          plan: data.plan === 'pro' ? 'pro' : 'free',
+        });
+        logger.log('Authenticated as', data.username);
+      }
+      return true;
+    }
+
     async function checkAuth() {
       try {
-        // Check if user is already authenticated (cookie-based)
-        const response = await fetch('/auth/me', { credentials: 'include' });
-        if (response.ok) {
-          const data = await response.json();
-          if (!cancelled && data.authenticated) {
-            setUser({
-              authenticated: true,
-              username: data.username,
-              name: data.name,
-              picture: data.picture,
-              plan: data.plan === 'pro' ? 'pro' : 'free',
-            });
-            logger.log('Authenticated as', data.username);
-            return;
-          }
-        }
-
-        // Not authenticated — check if auth is enabled
+        // Check the cheap instance status first. Local development bypasses
+        // OAuth, so mark it authenticated immediately instead of flashing a
+        // misleading "Sign in" gate while /auth/me validates HF_TOKEN.
         const statusRes = await fetch('/auth/status', { credentials: 'include' });
-        const statusData = await statusRes.json();
-        if (!statusData.auth_enabled) {
-          // Dev mode — no OAuth configured
-          if (!cancelled) setUser({ authenticated: true, username: 'dev', plan: 'pro' });
+        const statusData = statusRes.ok ? await statusRes.json() : null;
+        if (statusData && !statusData.auth_enabled) {
+          if (!cancelled) {
+            setUser({ authenticated: true, username: 'dev', plan: 'pro' });
+            setAuthChecking(false);
+          }
+          // Resolve the real HF identity in the background when HF_TOKEN is
+          // configured. Failure is harmless because dev auth is already valid.
+          try {
+            await hydrateCurrentUser();
+          } catch {
+            // Keep the local dev identity.
+          }
           return;
         }
+
+        // Hosted/OAuth mode: restore the cookie-backed user when available.
+        if (await hydrateCurrentUser()) return;
 
         // Auth enabled but not logged in — welcome screen will handle it
         if (!cancelled) setUser(null);
       } catch {
         // Backend unreachable — assume dev mode
         if (!cancelled) setUser({ authenticated: true, username: 'dev', plan: 'pro' });
+      } finally {
+        if (!cancelled) setAuthChecking(false);
       }
     }
 
     checkAuth();
     return () => { cancelled = true; };
-  }, [setUser]);
+  }, [setAuthChecking, setUser]);
 }

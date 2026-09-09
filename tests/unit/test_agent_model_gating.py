@@ -18,6 +18,11 @@ from dependencies import INTERNAL_HF_TOKEN_KEY  # noqa: E402
 BILLING_SESSION_ID = "00000000-0000-4000-8000-000000000001"
 
 
+@pytest.fixture(autouse=True)
+def _disable_codex_web_by_default(monkeypatch):
+    monkeypatch.setattr(agent, "codex_web_enabled", lambda: False)
+
+
 def test_available_models_exclude_sonnet_and_have_no_pro_gate():
     models = {model["id"]: model for model in agent.AVAILABLE_MODELS}
 
@@ -34,6 +39,59 @@ def test_available_models_exclude_sonnet_and_have_no_pro_gate():
 
 def test_default_model_is_glm():
     assert agent._default_model() == agent.DEFAULT_MODEL_ID
+
+
+def test_local_codex_web_is_listed_and_becomes_default(monkeypatch):
+    monkeypatch.setattr(agent, "codex_web_enabled", lambda: True)
+
+    models = {model["id"]: model for model in agent._available_models()}
+
+    assert models[agent.CODEX_DEFAULT_MODEL_ID] == {
+        "id": agent.CODEX_DEFAULT_MODEL_ID,
+        "label": "Codex (ChatGPT)",
+        "provider": "codex",
+        "recommended": True,
+    }
+    assert "recommended" not in models[agent.DEFAULT_MODEL_ID]
+    assert agent._default_model() == agent.CODEX_DEFAULT_MODEL_ID
+    assert agent._model_override_for_new_session(None) == agent.CODEX_DEFAULT_MODEL_ID
+
+
+@pytest.mark.asyncio
+async def test_model_config_uses_live_codex_catalog(monkeypatch):
+    async def fake_codex_models():
+        return [
+            {
+                "id": agent.CODEX_DEFAULT_MODEL_ID,
+                "label": "Codex Auto (GPT-5.6-Sol)",
+                "provider": "codex",
+                "recommended": True,
+                "default_reasoning_effort": "low",
+                "reasoning_efforts": [
+                    {"id": "low", "description": "Fast"},
+                    {"id": "max", "description": "Deep"},
+                ],
+            },
+            {
+                "id": "codex/gpt-5.6-terra",
+                "label": "Codex · GPT-5.6-Terra",
+                "provider": "codex",
+                "default_reasoning_effort": "medium",
+                "reasoning_efforts": [{"id": "medium", "description": "Balanced"}],
+            },
+        ]
+
+    monkeypatch.setattr(agent, "codex_web_enabled", lambda: True)
+    monkeypatch.setattr(agent, "codex_web_models", fake_codex_models)
+
+    payload = await agent.get_model()
+
+    assert payload["current"] == agent.CODEX_DEFAULT_MODEL_ID
+    assert [model["id"] for model in payload["available"][:2]] == [
+        agent.CODEX_DEFAULT_MODEL_ID,
+        "codex/gpt-5.6-terra",
+    ]
+    assert payload["available"][0]["reasoning_efforts"][1]["id"] == "max"
 
 
 @pytest.mark.asyncio
@@ -108,6 +166,28 @@ async def test_llm_health_skips_router_probe_without_token(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_codex_health_uses_codex_login_without_hf_completion(monkeypatch):
+    class Request:
+        headers = {}
+        cookies = {}
+
+    async def fake_codex_status():
+        return "Logged in using ChatGPT"
+
+    async def fail_acompletion(**_kwargs):
+        raise AssertionError("Codex health must not use HF Router")
+
+    monkeypatch.setattr(agent, "codex_web_enabled", lambda: True)
+    monkeypatch.setattr(agent, "codex_login_status", fake_codex_status)
+    monkeypatch.setattr(agent, "acompletion", fail_acompletion)
+
+    response = await agent.llm_health_check(Request(), {"user_id": "dev"})
+
+    assert response.status == "ok"
+    assert response.model == agent.CODEX_DEFAULT_MODEL_ID
+
+
+@pytest.mark.asyncio
 async def test_generate_title_omits_session_id_from_hf_router(monkeypatch):
     completions = []
     titles = []
@@ -142,6 +222,7 @@ async def test_generate_title_omits_session_id_from_hf_router(monkeypatch):
             session=SimpleNamespace(
                 session_id="session-1",
                 inference_billing_session_id=BILLING_SESSION_ID,
+                config=SimpleNamespace(model_name=agent.DEFAULT_MODEL_ID),
             )
         )
 
@@ -166,6 +247,40 @@ async def test_generate_title_omits_session_id_from_hf_router(monkeypatch):
     assert completions[0]["extra_body"] == {"reasoning_effort": "low"}
     assert HF_ROUTER_SESSION_ID_HEADER not in completions[0].get("extra_headers", {})
     assert titles == [("session-1", "Clean title")]
+
+
+@pytest.mark.asyncio
+async def test_codex_title_avoids_hf_router(monkeypatch):
+    async def fake_check_session_access(_session_id, _user):
+        return SimpleNamespace(
+            session=SimpleNamespace(
+                config=SimpleNamespace(model_name=agent.CODEX_DEFAULT_MODEL_ID)
+            )
+        )
+
+    async def fail_acompletion(**_kwargs):
+        raise AssertionError("Codex sessions must not use HF Router for titles")
+
+    titles = []
+
+    async def fake_update_session_title(session_id, title):
+        titles.append((session_id, title))
+
+    monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
+    monkeypatch.setattr(agent, "acompletion", fail_acompletion)
+    monkeypatch.setattr(
+        agent.session_manager,
+        "update_session_title",
+        fake_update_session_title,
+    )
+
+    response = await agent.generate_title(
+        agent.SubmitRequest(session_id="session-1", text="Research LoRA papers"),
+        {"user_id": "u1"},
+    )
+
+    assert response == {"title": "Research LoRA papers"}
+    assert titles == [("session-1", "Research LoRA papers")]
 
 
 def test_empty_session_model_uses_glm_default():
@@ -234,6 +349,88 @@ async def test_switching_to_gpt_is_allowed_for_free_user(monkeypatch):
 
     assert response == {"session_id": "s1", "model": agent.DEFAULT_GPT_MODEL_ID}
     assert updated == [("s1", agent.DEFAULT_GPT_MODEL_ID)]
+
+
+@pytest.mark.asyncio
+async def test_switching_codex_model_and_reasoning_effort(monkeypatch):
+    updated = []
+    codex_models = [
+        {
+            "id": "codex/gpt-5.6-sol",
+            "label": "Codex · GPT-5.6-Sol",
+            "provider": "codex",
+            "default_reasoning_effort": "low",
+            "reasoning_efforts": [
+                {"id": "low", "description": "Fast"},
+                {"id": "max", "description": "Deep"},
+            ],
+        }
+    ]
+
+    async def fake_live_models():
+        return codex_models
+
+    async def fake_check_session_access(_session_id, _user, _request=None):
+        return SimpleNamespace(
+            session=SimpleNamespace(
+                config=SimpleNamespace(
+                    model_name=agent.CODEX_DEFAULT_MODEL_ID,
+                    reasoning_effort="low",
+                )
+            )
+        )
+
+    async def fake_update_session_model(session_id, model_id, **kwargs):
+        updated.append((session_id, model_id, kwargs))
+
+    monkeypatch.setattr(agent, "_live_available_models", fake_live_models)
+    monkeypatch.setattr(agent, "_check_session_access", fake_check_session_access)
+    monkeypatch.setattr(
+        agent.session_manager,
+        "update_session_model",
+        fake_update_session_model,
+    )
+
+    response = await agent.set_session_model(
+        "s1",
+        {
+            "model": "codex/gpt-5.6-sol",
+            "reasoning_effort": "max",
+        },
+        request=None,
+        user={"user_id": "u1"},
+    )
+
+    assert response == {
+        "session_id": "s1",
+        "model": "codex/gpt-5.6-sol",
+        "reasoning_effort": "max",
+    }
+    assert updated == [
+        (
+            "s1",
+            "codex/gpt-5.6-sol",
+            {"reasoning_effort": "max"},
+        )
+    ]
+
+
+def test_codex_rejects_unsupported_reasoning_effort():
+    with pytest.raises(HTTPException) as exc_info:
+        agent._resolve_codex_reasoning_effort(
+            "codex/gpt-5.6-sol",
+            "ultra",
+            [
+                {
+                    "id": "codex/gpt-5.6-sol",
+                    "reasoning_efforts": [{"id": "low"}],
+                    "default_reasoning_effort": "low",
+                }
+            ],
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "Unsupported reasoning effort" in exc_info.value.detail
 
 
 @pytest.mark.asyncio

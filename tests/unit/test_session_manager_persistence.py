@@ -17,6 +17,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent / "backend"
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+from agent.core.codex_models import CODEX_DEFAULT_MODEL_ID  # noqa: E402
 from agent.core.model_ids import GLM_52_MODEL_ID  # noqa: E402
 from agent.core.session_persistence import NoopSessionStore  # noqa: E402
 from agent.core.usage_thresholds import USAGE_THRESHOLD_TOOL_NAME  # noqa: E402
@@ -35,13 +36,17 @@ class FakeRuntimeSession:
         hf_token: str | None = None,
         user_plan: str | None = None,
         model: str = "test-model",
+        reasoning_effort: str | None = None,
     ):
         self.hf_token = hf_token
         self.user_plan = user_plan
         self.context_manager = SimpleNamespace(items=[])
         self.pending_approval = None
         self.turn_count = 0
-        self.config = SimpleNamespace(model_name=model)
+        self.config = SimpleNamespace(
+            model_name=model,
+            reasoning_effort=reasoning_effort,
+        )
         self.notification_destinations = []
         self.auto_approval_enabled = False
         self.auto_approval_cost_cap_usd = None
@@ -56,9 +61,20 @@ class FakeRuntimeSession:
         self.sandbox_preload_cancel_event = None
         self.events = []
         self.session_id = "s1"
+        self._cancelled = False
 
     async def send_event(self, event):
         self.events.append(event)
+
+    def cancel(self):
+        self._cancelled = True
+
+    def reset_cancel(self):
+        self._cancelled = False
+
+    @property
+    def is_cancelled(self):
+        return self._cancelled
 
     def auto_approval_policy_summary(self):
         cap = self.auto_approval_cost_cap_usd
@@ -178,6 +194,37 @@ def test_agent_session_replaces_non_uuid_inference_billing_session_id():
     assert runtime_session.inference_billing_session_id == (
         agent_session.inference_billing_session_id
     )
+
+
+@pytest.mark.asyncio
+async def test_interrupt_cancels_active_codex_turn_and_closes_runtime():
+    class FakeCodexRuntime:
+        def __init__(self) -> None:
+            self.interrupted = False
+            self.closed = False
+
+        async def interrupt(self) -> None:
+            self.interrupted = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("codex-stop")
+    runtime = FakeCodexRuntime()
+    turn_task = asyncio.create_task(asyncio.Event().wait())
+    agent_session.codex_runtime = runtime  # type: ignore[assignment]
+    agent_session.codex_turn_task = turn_task
+    manager.sessions[agent_session.session_id] = agent_session
+
+    assert await manager.interrupt(agent_session.session_id) is True
+    await asyncio.gather(turn_task, return_exceptions=True)
+
+    assert agent_session.session.is_cancelled is True
+    assert turn_task.cancelled()
+    assert runtime.interrupted is True
+    assert runtime.closed is True
+    assert agent_session.codex_runtime is None
 
 
 @pytest.mark.asyncio
@@ -453,6 +500,27 @@ async def test_refresh_usage_metrics_missing_token_falls_back_to_app_telemetry()
         "source": "hf_billing_usage_v2",
         "available": False,
         "error": "missing_hf_token",
+        "current_session": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_refresh_never_queries_hf_billing(monkeypatch):
+    manager = _manager_with_store(NoopSessionStore())
+    agent_session = _runtime_agent_session("s1", hf_token="owner-token")
+    agent_session.session.config.model_name = CODEX_DEFAULT_MODEL_ID
+
+    async def fail_billing_snapshot(*_args, **_kwargs):
+        raise AssertionError("Codex usage must not query Hugging Face billing")
+
+    monkeypatch.setattr("usage.build_hf_billing_snapshot", fail_billing_snapshot)
+
+    metrics = await manager.refresh_session_usage_metrics(agent_session)
+
+    assert metrics["hf_billing"] == {
+        "source": "hf_billing_usage_v2",
+        "available": False,
+        "error": "codex_uses_chatgpt_allowance",
         "current_session": None,
     }
 
@@ -859,6 +927,10 @@ def test_unknown_saved_model_defaults_to_glm():
     assert model == GLM_52_MODEL_ID
 
 
+def test_saved_codex_model_is_preserved():
+    assert SessionManager._model_from_saved_metadata("codex/default") == "codex/default"
+
+
 @pytest.mark.asyncio
 async def test_update_session_auto_approval_defaults_to_five_dollars():
     manager = _manager_with_store(NoopSessionStore())
@@ -886,6 +958,7 @@ def _install_fake_runtime(manager: SessionManager) -> asyncio.Event:
             hf_token=kwargs.get("hf_token"),
             user_plan=kwargs.get("user_plan"),
             model=kwargs.get("model") or "test-model",
+            reasoning_effort=kwargs.get("reasoning_effort"),
         )
 
     async def fake_run_session(*_: Any) -> None:
@@ -1185,6 +1258,21 @@ async def test_create_session_schedules_cpu_sandbox_preload():
     finally:
         stop.set()
         await _cancel_runtime_tasks(manager)
+
+
+def test_codex_session_does_not_preload_hf_cpu_sandbox(monkeypatch):
+    agent_session = _runtime_agent_session("s1", hf_token="owner-token")
+    agent_session.session.config.model_name = CODEX_DEFAULT_MODEL_ID
+
+    def fail_preload(_session):
+        raise AssertionError("Codex session must not preload an HF sandbox")
+
+    monkeypatch.setattr(
+        "agent.tools.sandbox_tool.start_cpu_sandbox_preload",
+        fail_preload,
+    )
+
+    SessionManager._start_cpu_sandbox_preload(agent_session)
 
 
 @pytest.mark.asyncio

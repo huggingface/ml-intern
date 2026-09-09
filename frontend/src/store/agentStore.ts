@@ -116,6 +116,7 @@ interface AgentStore {
   isProcessing: boolean;
   isConnected: boolean;
   activityStatus: ActivityStatus;
+  authChecking: boolean;
   user: User | null;
   llmHealthError: LLMHealthError | null;
   jobsUpgradeRequired: JobsUpgradeState | null;
@@ -169,6 +170,7 @@ interface AgentStore {
   setProcessing: (isProcessing: boolean) => void;
   setConnected: (isConnected: boolean) => void;
   setActivityStatus: (status: ActivityStatus) => void;
+  setAuthChecking: (checking: boolean) => void;
   setUser: (user: User | null) => void;
   setLlmHealthError: (error: LLMHealthError | null) => void;
   setJobsUpgradeRequired: (state: JobsUpgradeState | null) => void;
@@ -289,6 +291,7 @@ export const useAgentStore = create<AgentStore>()((set, get) => ({
   isProcessing: false,
   isConnected: false,
   activityStatus: { type: 'idle' },
+  authChecking: true,
   user: null,
   llmHealthError: null,
   jobsUpgradeRequired: null,
@@ -401,6 +404,7 @@ export const useAgentStore = create<AgentStore>()((set, get) => ({
   },
   setConnected: (isConnected) => set({ isConnected }),
   setActivityStatus: (status) => set({ activityStatus: status }),
+  setAuthChecking: (authChecking) => set({ authChecking }),
   setUser: (user) => set({ user }),
   setLlmHealthError: (error) => set({ llmHealthError: error }),
   setJobsUpgradeRequired: (state) => set({ jobsUpgradeRequired: state }),

@@ -50,7 +50,10 @@ from session_manager import (
     SessionCapacityError,
     session_manager,
 )
+from codex_web import codex_web_enabled, codex_web_models
 
+from agent.core.codex_models import CODEX_DEFAULT_MODEL_ID, is_codex_model_id
+from agent.core.codex_runtime import CodexRuntimeError, codex_login_status
 from agent.core.hf_access import get_jobs_access
 from agent.core.hf_tokens import resolve_hf_request_token
 from agent.core.local_models import local_model_provider
@@ -116,7 +119,12 @@ def _schedule_usage_refresh_and_upload(
     task.add_done_callback(_background_route_tasks.discard)
 
 
-def _available_models() -> list[dict[str, Any]]:
+def _available_models(
+    *,
+    include_codex: bool | None = None,
+    codex_models: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    include_codex = codex_web_enabled() if include_codex is None else include_codex
     models = [
         {
             "id": CLAUDE_OPUS_48_MODEL_ID,
@@ -144,30 +152,98 @@ def _available_models() -> list[dict[str, Any]]:
             "label": "DeepSeek V4 Pro",
         },
     ]
+    if include_codex:
+        for model in models:
+            model.pop("recommended", None)
+        codex_options = codex_models or [
+            {
+                "id": CODEX_DEFAULT_MODEL_ID,
+                "label": "Codex (ChatGPT)",
+                "provider": "codex",
+                "recommended": True,
+            }
+        ]
+        models[0:0] = [dict(model) for model in codex_options]
     return models
 
 
-AVAILABLE_MODELS = _available_models()
+AVAILABLE_MODELS = _available_models(include_codex=False)
 
 
-def _valid_model_ids() -> set[str]:
-    return {m["id"] for m in AVAILABLE_MODELS}
+async def _live_available_models() -> list[dict[str, Any]]:
+    codex_models: list[dict[str, Any]] | None = None
+    if codex_web_enabled():
+        try:
+            codex_models = await codex_web_models()
+        except CodexRuntimeError as e:
+            logger.warning("Could not load Codex model catalog: %s", e)
+    return _available_models(codex_models=codex_models)
 
 
-def _validate_model_id(model_id: str | None) -> None:
-    if not model_id or model_id in _valid_model_ids():
+def _valid_model_ids(models: list[dict[str, Any]]) -> set[str]:
+    return {str(model["id"]) for model in models}
+
+
+def _validate_model_id(
+    model_id: str | None,
+    models: list[dict[str, Any]],
+) -> None:
+    if not model_id or model_id in _valid_model_ids(models):
         return
     raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
 
 
+def _resolve_codex_reasoning_effort(
+    model_id: str,
+    requested_effort: Any,
+    models: list[dict[str, Any]],
+    *,
+    current_effort: str | None = None,
+) -> str | None:
+    if not is_codex_model_id(model_id):
+        if requested_effort is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Reasoning effort is only configurable for Codex models.",
+            )
+        return None
+
+    option = next((model for model in models if model.get("id") == model_id), None)
+    if option is None:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
+    supported = [
+        str(item["id"])
+        for item in option.get("reasoning_efforts") or []
+        if isinstance(item, dict) and item.get("id")
+    ]
+    if requested_effort is not None:
+        if not isinstance(requested_effort, str) or requested_effort not in supported:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unsupported reasoning effort for {model_id}: {requested_effort}"
+                ),
+            )
+        return requested_effort
+    if current_effort in supported:
+        return current_effort
+    default = option.get("default_reasoning_effort")
+    if isinstance(default, str) and default in supported:
+        return default
+    return supported[0] if supported else None
+
+
 def _default_model() -> str:
+    if codex_web_enabled():
+        return CODEX_DEFAULT_MODEL_ID
     return DEFAULT_MODEL_ID
 
 
 def _model_override_for_new_session(requested_model: str | None) -> str | None:
     """Return the model override to use when creating a new session.
 
-    Explicit model requests are honored. Empty web requests default to GLM 5.2.
+    Explicit model requests are honored. Empty requests use the active web
+    default (Codex for an enabled local Codex runtime, otherwise GLM 5.2).
     """
     return requested_model or _default_model()
 
@@ -180,7 +256,9 @@ def _user_hf_token(user: dict[str, Any] | None) -> str | None:
 
 def _model_requires_hf_router_token(model_id: str | None) -> bool:
     normalized = strip_huggingface_model_prefix(model_id) or model_id or ""
-    return local_model_provider(normalized) is None
+    return (
+        not is_codex_model_id(normalized) and local_model_provider(normalized) is None
+    )
 
 
 def _reject_oversize_dataset_upload(request: Request) -> None:
@@ -297,6 +375,18 @@ async def llm_health_check(
     - timeout / network → provider unreachable
     """
     model = _default_model()
+    if is_codex_model_id(model):
+        try:
+            await codex_login_status()
+            return LLMHealthResponse(status="ok", model=model)
+        except CodexRuntimeError as e:
+            return LLMHealthResponse(
+                status="error",
+                model=model,
+                error=str(e)[:500],
+                error_type="auth",
+            )
+
     hf_token = resolve_hf_request_token(request)
     if _model_requires_hf_router_token(model) and not hf_token:
         return LLMHealthResponse(status="skipped", model=model)
@@ -351,8 +441,8 @@ async def llm_health_check(
 async def get_model() -> dict:
     """Get current model and available models. No auth required."""
     return {
-        "current": session_manager.config.model_name,
-        "available": AVAILABLE_MODELS,
+        "current": _default_model(),
+        "available": await _live_available_models(),
     }
 
 
@@ -365,14 +455,18 @@ async def generate_title(
 ) -> dict:
     """Generate a short title for a chat session based on the first user message.
 
-    Always uses gpt-oss-120b via Cerebras on the HF router. The tab headline
-    renders as plain text, so the model is told to avoid markdown and any
-    stray formatting characters are stripped before returning. gpt-oss is a
-    reasoning model — reasoning_effort=low keeps the reasoning budget small
-    so the 60-token output budget isn't consumed before the title is written.
+    Codex sessions use a deterministic local title so they never invoke HF
+    Router. Other sessions use gpt-oss-120b via Cerebras on HF Router. The tab
+    headline renders as plain text, so formatting characters are stripped.
     """
     try:
-        await _check_session_access(request.session_id, user)
+        agent_session = await _check_session_access(request.session_id, user)
+        if is_codex_model_id(agent_session.session.config.model_name):
+            fallback = request.text.strip()
+            title = fallback[:40].rstrip() + "…" if len(fallback) > 40 else fallback
+            await session_manager.update_session_title(request.session_id, title)
+            return {"title": title}
+
         llm_params = _resolve_llm_params(
             "openai/gpt-oss-120b:cerebras",
             _user_hf_token(user),
@@ -448,13 +542,21 @@ async def create_session(
         body = await request.json()
     except Exception:
         body = None
+    reasoning_effort = None
     if isinstance(body, dict):
         model = body.get("model")
+        reasoning_effort = body.get("reasoning_effort")
 
-    _validate_model_id(model)
+    models = await _live_available_models()
+    _validate_model_id(model, models)
 
     # Empty requests use the web default.
     model = _model_override_for_new_session(model)
+    reasoning_effort = _resolve_codex_reasoning_effort(
+        model,
+        reasoning_effort,
+        models,
+    )
 
     try:
         session_id = await session_manager.create_session(
@@ -463,6 +565,7 @@ async def create_session(
             hf_token=hf_token,
             user_plan=user.get("plan"),
             model=model,
+            reasoning_effort=reasoning_effort,
             is_pro=user.get("plan") == "pro",
         )
     except SessionCapacityError as e:
@@ -474,6 +577,7 @@ async def create_session(
         session_id=session_id,
         ready=True,
         model=model,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -496,9 +600,15 @@ async def restore_session_summary(
     hf_token = resolve_hf_request_token(request)
 
     model = body.get("model")
-    _validate_model_id(model)
+    models = await _live_available_models()
+    _validate_model_id(model, models)
 
     model = _model_override_for_new_session(model)
+    reasoning_effort = _resolve_codex_reasoning_effort(
+        model,
+        body.get("reasoning_effort"),
+        models,
+    )
 
     try:
         session_id = await session_manager.create_session(
@@ -507,6 +617,7 @@ async def restore_session_summary(
             hf_token=hf_token,
             user_plan=user.get("plan"),
             model=model,
+            reasoning_effort=reasoning_effort,
             is_pro=user.get("plan") == "pro",
         )
     except SessionCapacityError as e:
@@ -536,6 +647,7 @@ async def restore_session_summary(
         session_id=session_id,
         ready=True,
         model=model,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -579,15 +691,44 @@ async def set_session_model(
     model_id = body.get("model")
     if not model_id:
         raise HTTPException(status_code=400, detail="Missing 'model' field")
-    _validate_model_id(model_id)
+    models = await _live_available_models()
+    _validate_model_id(model_id, models)
     if not agent_session:
         raise HTTPException(status_code=404, detail="Session not found")
-    await session_manager.update_session_model(session_id, model_id)
+    current_session = getattr(agent_session, "session", None)
+    current_config = getattr(current_session, "config", None)
+    current_model = getattr(current_config, "model_name", None)
+    current_effort = (
+        getattr(current_config, "reasoning_effort", None)
+        if is_codex_model_id(current_model)
+        else None
+    )
+    reasoning_effort = _resolve_codex_reasoning_effort(
+        model_id,
+        body.get("reasoning_effort"),
+        models,
+        current_effort=current_effort,
+    )
+    if is_codex_model_id(model_id):
+        await session_manager.update_session_model(
+            session_id,
+            model_id,
+            reasoning_effort=reasoning_effort,
+        )
+    else:
+        await session_manager.update_session_model(session_id, model_id)
     logger.info(
         f"Session {session_id} model → {model_id} "
-        f"(by {user.get('username', 'unknown')})"
+        f"(reasoning={reasoning_effort or 'default'}, "
+        f"by {user.get('username', 'unknown')})"
     )
-    return {"session_id": session_id, "model": model_id}
+    response = {
+        "session_id": session_id,
+        "model": model_id,
+    }
+    if is_codex_model_id(model_id):
+        response["reasoning_effort"] = reasoning_effort
+    return response
 
 
 @router.post("/session/{session_id}/notifications")

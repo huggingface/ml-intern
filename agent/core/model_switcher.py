@@ -19,6 +19,7 @@ import asyncio
 
 from litellm import acompletion
 
+from agent.core.codex_models import CODEX_DEFAULT_MODEL_ID, is_codex_model_id
 from agent.core.effort_probe import ProbeInconclusive, probe_effort
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.local_models import (
@@ -42,6 +43,7 @@ from agent.core.model_ids import (
 # ":cheapest", ":preferred", or ":<provider>" to override the default routing
 # policy (auto = fastest with failover).
 SUGGESTED_MODELS = [
+    {"id": CODEX_DEFAULT_MODEL_ID, "label": "Codex (OpenAI auth)"},
     {"id": CLAUDE_OPUS_48_MODEL_ID, "label": "Claude Opus 4.8"},
     {"id": GPT_55_MODEL_ID, "label": "GPT-5.5"},
     {"id": MINIMAX_M3_MODEL_ID, "label": "MiniMax M3"},
@@ -69,6 +71,8 @@ def is_valid_model_id(model_id: str) -> bool:
     if not model_id:
         return False
     normalized_model_id = strip_huggingface_model_prefix(model_id) or model_id
+    if is_codex_model_id(normalized_model_id):
+        return True
     if is_local_model_id(normalized_model_id):
         return True
     if is_reserved_local_model_id(normalized_model_id):
@@ -92,7 +96,7 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
     against the router catalog when possible; the probe below covers provider
     availability for uncataloged ids.
     """
-    if is_local_model_id(model_id):
+    if is_codex_model_id(model_id) or is_local_model_id(model_id):
         return True
 
     from agent.core import hf_router_catalog as cat
@@ -164,7 +168,9 @@ def print_model_listing(config, console) -> None:
         "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M3:novita').\n"
         "Add ':fastest', ':cheapest', ':preferred', or ':<provider>' to override routing.\n"
         "Use 'ollama/<model>', 'vllm/<model>', 'lm_studio/<model>', or "
-        "'llamacpp/<model>' for local OpenAI-compatible endpoints.[/dim]"
+        "'llamacpp/<model>' for local OpenAI-compatible endpoints.\n"
+        "Use 'codex/default' at startup to reuse `codex login` "
+        "authentication.[/dim]"
     )
 
 
@@ -173,6 +179,7 @@ def print_invalid_id(arg: str, console) -> None:
     console.print(
         "[dim]Expected:\n"
         "  • <org>/<model>[:tag]    (HF router — paste from huggingface.co)\n"
+        "  • codex/default | codex/<model>    (Codex app-server)\n"
         "  • ollama/<model> | vllm/<model> | lm_studio/<model> | llamacpp/<model>[/dim]"
     )
 
@@ -225,6 +232,16 @@ async def probe_and_switch_model(
         _commit_switch(model_id, config, session, effective=None, cache=True)
         console.print(
             f"[green]Model switched to {model_id}[/green] [dim](effort: off)[/dim]"
+        )
+        return
+
+    if is_codex_model_id(model_id):
+        console.print(
+            "[yellow]Codex runtime selection takes effect at process startup.[/yellow]"
+        )
+        console.print(
+            f"[dim]Restart with `ml-intern --model {model_id}`. "
+            "The current conversation keeps its existing model.[/dim]"
         )
         return
 

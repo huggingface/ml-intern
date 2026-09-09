@@ -19,12 +19,14 @@ import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
 import StopIcon from '@mui/icons-material/Stop';
 import AddIcon from '@mui/icons-material/Add';
+import PsychologyAltIcon from '@mui/icons-material/PsychologyAlt';
 import { apiFetch, apiUpload } from '@/utils/api';
 import JobsUpgradeDialog from '@/components/JobsUpgradeDialog';
 import { useAgentStore } from '@/store/agentStore';
 import { useSessionStore } from '@/store/sessionStore';
 import {
   CLAUDE_OPUS_48_MODEL_PATH,
+  CODEX_DEFAULT_MODEL_PATH,
   DEEPSEEK_V4_PRO_MODEL_PATH,
   GLM_52_MODEL_PATH,
   GPT_55_MODEL_PATH,
@@ -39,7 +41,16 @@ interface ModelOption {
   name: string;
   modelPath: string;
   avatarUrl: string;
+  provider?: string;
+  description?: string;
+  defaultReasoningEffort?: string;
+  reasoningEfforts?: ReasoningEffortOption[];
   recommended?: boolean;
+}
+
+interface ReasoningEffortOption {
+  id: string;
+  description?: string;
 }
 
 const getHfAvatarUrl = (modelId: string) => {
@@ -124,16 +135,44 @@ const modelOptionId = (modelPath: string) => (
 const modelOptionFromApi = (model: {
   id?: string;
   label?: string;
+  provider?: string;
+  description?: string;
+  default_reasoning_effort?: string;
+  reasoning_efforts?: ReasoningEffortOption[];
   recommended?: boolean;
 }): ModelOption | null => {
   if (!model.id) return null;
+  const avatarUrl = model.provider === 'codex' || model.id === CODEX_DEFAULT_MODEL_PATH
+    ? getHfAvatarUrl('openai')
+    : getHfAvatarUrl(model.id.replace(/^huggingface\//, ''));
   return {
     id: modelOptionId(model.id),
     name: model.label ?? model.id,
     modelPath: model.id,
-    avatarUrl: getHfAvatarUrl(model.id.replace(/^huggingface\//, '')),
+    avatarUrl,
+    provider: model.provider,
+    description: model.description,
+    defaultReasoningEffort: model.default_reasoning_effort,
+    reasoningEfforts: model.reasoning_efforts ?? [],
     recommended: Boolean(model.recommended),
   };
+};
+
+const isCodexModel = (model: ModelOption | undefined) => (
+  model?.provider === 'codex' || model?.modelPath.startsWith('codex/')
+);
+
+const reasoningEffortLabel = (effort: string | undefined) => {
+  switch (effort) {
+    case 'minimal': return 'Minimal';
+    case 'low': return 'Low';
+    case 'medium': return 'Medium';
+    case 'high': return 'High';
+    case 'xhigh': return 'Extra High';
+    case 'max': return 'Max';
+    case 'ultra': return 'Ultra';
+    default: return effort || 'Default';
+  }
 };
 
 const readApiErrorMessage = async (res: Response, fallback: string): Promise<string> => {
@@ -205,6 +244,8 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     ),
   );
   const [modelAnchorEl, setModelAnchorEl] = useState<null | HTMLElement>(null);
+  const [reasoningAnchorEl, setReasoningAnchorEl] = useState<null | HTMLElement>(null);
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
   const jobsUpgradeRequired = useAgentStore((s) => s.jobsUpgradeRequired);
   const setJobsUpgradeRequired = useAgentStore((s) => s.setJobsUpgradeRequired);
   const updateSessionModel = useSessionStore((s) => s.updateSessionModel);
@@ -238,7 +279,10 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
         setModelOptions(next);
         if (!sessionIdRef.current) {
           const current = data.current ? findModelByPath(data.current, next) : null;
-          if (current) setSelectedModelPath(current.modelPath);
+          if (current) {
+            setSelectedModelPath(current.modelPath);
+            setSelectedReasoningEffort(current.defaultReasoningEffort ?? null);
+          }
         }
       })
       .catch(() => { /* ignore */ });
@@ -257,6 +301,9 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
         if (data?.model) {
           const model = findModelByPath(data.model, modelOptionsRef.current);
           setSelectedModelPath(model?.modelPath ?? data.model);
+          setSelectedReasoningEffort(
+            data.reasoning_effort ?? model?.defaultReasoningEffort ?? null,
+          );
           updateSessionModel(sessionId, data.model);
         }
       })
@@ -273,6 +320,24 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     || visibleModelOptions[0]
     || modelOptions[0]
   );
+  const selectedReasoningOptions = selectedModel.reasoningEfforts ?? [];
+  const selectedReasoningLabel = reasoningEffortLabel(
+    selectedReasoningEffort ?? selectedModel.defaultReasoningEffort,
+  );
+
+  useEffect(() => {
+    if (!selectedModelPath.startsWith('codex/')) {
+      setSelectedReasoningEffort(null);
+      return;
+    }
+    const model = findModelByPath(selectedModelPath, modelOptions);
+    if (!model) return;
+    const supported = new Set((model.reasoningEfforts ?? []).map((effort) => effort.id));
+    setSelectedReasoningEffort((current) => {
+      if (current && supported.has(current)) return current;
+      return model.defaultReasoningEffort ?? model.reasoningEfforts?.[0]?.id ?? null;
+    });
+  }, [modelOptions, selectedModelPath]);
 
   // Auto-focus the textarea when the session becomes ready
   useEffect(() => {
@@ -381,16 +446,40 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
     setModelAnchorEl(null);
   };
 
+  const handleReasoningClick = (event: React.MouseEvent<HTMLElement>) => {
+    setReasoningAnchorEl(event.currentTarget);
+  };
+
+  const handleReasoningClose = () => {
+    setReasoningAnchorEl(null);
+  };
+
   const handleSelectModel = async (model: ModelOption) => {
     handleModelClose();
     if (!sessionId) return;
+    const supported = new Set((model.reasoningEfforts ?? []).map((effort) => effort.id));
+    const nextReasoningEffort = isCodexModel(model)
+      ? (
+        (selectedReasoningEffort && supported.has(selectedReasoningEffort)
+          ? selectedReasoningEffort
+          : null)
+        ?? model.defaultReasoningEffort
+        ?? model.reasoningEfforts?.[0]?.id
+        ?? null
+      )
+      : null;
     try {
       const res = await apiFetch(`/api/session/${sessionId}/model`, {
         method: 'POST',
-        body: JSON.stringify({ model: model.modelPath }),
+        body: JSON.stringify({
+          model: model.modelPath,
+          ...(nextReasoningEffort ? { reasoning_effort: nextReasoningEffort } : {}),
+        }),
       });
       if (res.ok) {
+        const data = await res.json();
         setSelectedModelPath(model.modelPath);
+        setSelectedReasoningEffort(data.reasoning_effort ?? nextReasoningEffort);
         updateSessionModel(sessionId, model.modelPath);
         setModelSwitchError(null);
         return;
@@ -398,6 +487,31 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
       setModelSwitchError(await readApiErrorMessage(res, 'Could not switch model.'));
     } catch (error) {
       setModelSwitchError(error instanceof Error ? error.message : 'Could not switch model.');
+    }
+  };
+
+  const handleSelectReasoningEffort = async (effort: ReasoningEffortOption) => {
+    handleReasoningClose();
+    if (!sessionId || !isCodexModel(selectedModel)) return;
+    try {
+      const res = await apiFetch(`/api/session/${sessionId}/model`, {
+        method: 'POST',
+        body: JSON.stringify({
+          model: selectedModel.modelPath,
+          reasoning_effort: effort.id,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSelectedReasoningEffort(data.reasoning_effort ?? effort.id);
+        setModelSwitchError(null);
+        return;
+      }
+      setModelSwitchError(await readApiErrorMessage(res, 'Could not change thinking level.'));
+    } catch (error) {
+      setModelSwitchError(
+        error instanceof Error ? error.message : 'Could not change thinking level.',
+      );
     }
   };
 
@@ -650,33 +764,70 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
 
         {/* Powered By Badge */}
         <Box
-          onClick={handleModelClick}
           sx={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             mt: 1.5,
-            gap: 0.8,
-            opacity: 0.6,
-            cursor: 'pointer',
-            transition: 'opacity 0.2s',
-            '&:hover': {
-              opacity: 1
-            }
+            gap: 0.7,
           }}
         >
-          <Typography variant="caption" sx={{ fontSize: '10px', color: 'var(--muted-text)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 500 }}>
-            powered by
-          </Typography>
-          <img
-            src={selectedModel.avatarUrl}
-            alt={selectedModel.name}
-            style={{ height: '14px', width: '14px', objectFit: 'contain', borderRadius: '2px' }}
-          />
-          <Typography variant="caption" sx={{ fontSize: '10px', color: 'var(--text)', fontWeight: 600, letterSpacing: '0.02em' }}>
-            {selectedModel.name}
-          </Typography>
-          <ArrowDropDownIcon sx={{ fontSize: '14px', color: 'var(--muted-text)' }} />
+          <Box
+            onClick={handleModelClick}
+            role="button"
+            tabIndex={0}
+            aria-label={`Model: ${selectedModel.name}`}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.8,
+              opacity: 0.65,
+              cursor: 'pointer',
+              transition: 'opacity 0.2s',
+              '&:hover': { opacity: 1 },
+            }}
+          >
+            <Typography variant="caption" sx={{ fontSize: '10px', color: 'var(--muted-text)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 500 }}>
+              powered by
+            </Typography>
+            <img
+              src={selectedModel.avatarUrl}
+              alt={selectedModel.name}
+              style={{ height: '14px', width: '14px', objectFit: 'contain', borderRadius: '2px' }}
+            />
+            <Typography variant="caption" sx={{ fontSize: '10px', color: 'var(--text)', fontWeight: 600, letterSpacing: '0.02em' }}>
+              {selectedModel.name}
+            </Typography>
+            <ArrowDropDownIcon sx={{ fontSize: '14px', color: 'var(--muted-text)' }} />
+          </Box>
+          {isCodexModel(selectedModel) && selectedReasoningOptions.length > 0 && (
+            <>
+              <Typography variant="caption" sx={{ color: 'var(--divider)' }}>·</Typography>
+              <Tooltip title="Choose Codex thinking level">
+                <Box
+                  onClick={handleReasoningClick}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Thinking: ${selectedReasoningLabel}`}
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 0.45,
+                    opacity: 0.65,
+                    cursor: 'pointer',
+                    transition: 'opacity 0.2s',
+                    '&:hover': { opacity: 1 },
+                  }}
+                >
+                  <PsychologyAltIcon sx={{ fontSize: '14px', color: 'var(--muted-text)' }} />
+                  <Typography variant="caption" sx={{ fontSize: '10px', color: 'var(--text)', fontWeight: 600 }}>
+                    Thinking: {selectedReasoningLabel}
+                  </Typography>
+                  <ArrowDropDownIcon sx={{ fontSize: '14px', color: 'var(--muted-text)' }} />
+                </Box>
+              </Tooltip>
+            </>
+          )}
         </Box>
 
         {/* Model Selection Menu */}
@@ -741,6 +892,72 @@ export default function ChatInput({ sessionId, initialModelPath, onSend, onStop,
                     )}
                   </Box>
                 }
+                secondary={model.description || undefined}
+                secondaryTypographyProps={{
+                  sx: {
+                    color: 'var(--muted-text)',
+                    fontSize: '11px',
+                    maxWidth: 360,
+                    whiteSpace: 'normal',
+                    lineHeight: 1.3,
+                  },
+                }}
+              />
+            </MenuItem>
+          ))}
+        </Menu>
+
+        <Menu
+          anchorEl={reasoningAnchorEl}
+          open={Boolean(reasoningAnchorEl)}
+          onClose={handleReasoningClose}
+          anchorOrigin={{
+            vertical: 'top',
+            horizontal: 'center',
+          }}
+          transformOrigin={{
+            vertical: 'bottom',
+            horizontal: 'center',
+          }}
+          slotProps={{
+            paper: {
+              sx: {
+                bgcolor: 'var(--panel)',
+                border: '1px solid var(--divider)',
+                mb: 1,
+                maxHeight: '400px',
+                minWidth: '280px',
+              },
+            },
+          }}
+        >
+          {selectedReasoningOptions.map((effort) => (
+            <MenuItem
+              key={effort.id}
+              onClick={() => handleSelectReasoningEffort(effort)}
+              selected={selectedReasoningEffort === effort.id}
+              sx={{
+                py: 1.2,
+                '&.Mui-selected': {
+                  bgcolor: 'rgba(255,255,255,0.05)',
+                },
+              }}
+            >
+              <ListItemIcon>
+                <PsychologyAltIcon sx={{ fontSize: 21, color: 'var(--muted-text)' }} />
+              </ListItemIcon>
+              <ListItemText
+                primary={reasoningEffortLabel(effort.id)}
+                secondary={effort.description || undefined}
+                secondaryTypographyProps={{
+                  sx: {
+                    color: 'var(--muted-text)',
+                    fontSize: '11px',
+                    maxWidth: 320,
+                    whiteSpace: 'normal',
+                    lineHeight: 1.3,
+                  },
+                }}
               />
             </MenuItem>
           ))}

@@ -2,6 +2,12 @@ import pytest
 
 from agent.config import load_config
 from agent.core import model_switcher
+from agent.core.codex_models import (
+    CODEX_DEFAULT_MODEL_ID,
+    codex_model_name,
+    is_codex_model_id,
+)
+from agent.core.llm_params import _resolve_llm_params
 from agent.core.local_models import is_local_model_id
 from agent.main import CLI_CONFIG_PATH
 
@@ -32,9 +38,23 @@ def test_openai_compat_prefix_is_not_supported():
     assert not model_switcher.is_valid_model_id("openai-compat/custom-model")
 
 
+def test_codex_model_ids_are_first_class_but_not_litellm_models():
+    assert is_codex_model_id(CODEX_DEFAULT_MODEL_ID)
+    assert is_codex_model_id("codex/gpt-example")
+    assert not is_codex_model_id("codex/")
+    assert not is_codex_model_id("codex/model with spaces")
+    assert codex_model_name(CODEX_DEFAULT_MODEL_ID) is None
+    assert codex_model_name("codex/gpt-example") == "gpt-example"
+    assert model_switcher.is_valid_model_id(CODEX_DEFAULT_MODEL_ID)
+
+    with pytest.raises(ValueError, match="Codex app-server runtime"):
+        _resolve_llm_params(CODEX_DEFAULT_MODEL_ID)
+
+
 def test_suggested_models_include_router_claude_models_and_no_native_ids():
     ids = {m["id"] for m in model_switcher.SUGGESTED_MODELS}
 
+    assert CODEX_DEFAULT_MODEL_ID in ids
     assert "anthropic/claude-opus-4.8:fal-ai" in ids
     assert all(model_id.count("/") >= 1 for model_id in ids)
 

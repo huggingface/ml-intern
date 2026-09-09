@@ -69,6 +69,7 @@ class SessionResponse(BaseModel):
     session_id: str
     ready: bool = True
     model: str | None = None
+    reasoning_effort: str | None = None
 
 
 class PendingApprovalTool(BaseModel):
@@ -100,6 +101,7 @@ class SessionInfo(BaseModel):
     user_id: str = "dev"
     pending_approval: list[PendingApprovalTool] | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
     title: str | None = None
     notification_destinations: list[str] = Field(default_factory=list)
     auto_approval: SessionAutoApprovalInfo = Field(

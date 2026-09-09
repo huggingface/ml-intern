@@ -7,6 +7,7 @@ creating circular imports.
 
 import os
 
+from agent.core.codex_models import is_codex_model_id
 from agent.core.hf_tokens import resolve_hf_router_token
 from agent.core.local_models import (
     LOCAL_MODEL_API_KEY_DEFAULT,
@@ -122,6 +123,13 @@ def _resolve_llm_params(
          local ``hf auth login`` cache.
     """
     normalized_model = strip_huggingface_model_prefix(model_name) or model_name
+
+    if is_codex_model_id(normalized_model):
+        raise ValueError(
+            "Codex model ids use the Codex app-server runtime and cannot be "
+            "sent through LiteLLM. Start ML Intern with "
+            "`--model codex/default`."
+        )
 
     if is_reserved_local_model_id(normalized_model):
         raise ValueError(f"Unsupported local model id: {normalized_model}")

@@ -12,6 +12,7 @@ export const KIMI_K27_CODE_MODEL_PATH = 'moonshotai/Kimi-K2.7-Code:novita';
 export const MINIMAX_M3_MODEL_PATH = 'MiniMaxAI/MiniMax-M3:novita';
 export const GLM_52_MODEL_PATH = 'zai-org/GLM-5.2:novita';
 export const DEEPSEEK_V4_PRO_MODEL_PATH = 'deepseek-ai/DeepSeek-V4-Pro:novita';
+export const CODEX_DEFAULT_MODEL_PATH = 'codex/default';
 
 export function isClaudePath(modelPath: string | undefined): boolean {
   return !!modelPath && modelPath.includes('anthropic');
