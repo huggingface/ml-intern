@@ -3,6 +3,7 @@
 from datetime import datetime
 
 import pytest
+from pymongo.errors import PyMongoError
 
 from agent.core.session_persistence import (
     MongoSessionStore,
@@ -35,6 +36,50 @@ def test_unsafe_message_payload_is_replaced_with_marker():
 
     assert marker["role"] == "tool"
     assert marker["ml_intern_persistence_error"] == "message_too_large_or_invalid"
+
+
+class _RecordingSessions:
+    def __init__(self) -> None:
+        self.update_calls = []
+
+    async def update_one(self, *args, **kwargs):
+        self.update_calls.append((args, kwargs))
+
+
+class _FailingSessionMessages:
+    async def bulk_write(self, *args, **kwargs):
+        raise PyMongoError("message write failed")
+
+
+class _FailingSnapshotDB:
+    def __init__(self) -> None:
+        self.sessions = _RecordingSessions()
+        self.session_messages = _FailingSessionMessages()
+
+
+def _store_with_snapshot_db(db) -> MongoSessionStore:
+    s = MongoSessionStore.__new__(MongoSessionStore)
+    s.enabled = True
+    s.db = db
+    return s
+
+
+@pytest.mark.asyncio
+async def test_strict_snapshot_does_not_update_metadata_when_message_write_fails():
+    db = _FailingSnapshotDB()
+    store = _store_with_snapshot_db(db)
+
+    with pytest.raises(PyMongoError):
+        await store.save_snapshot(
+            session_id="s1",
+            user_id="u1",
+            model="m",
+            messages=[{"role": "user", "content": "hello"}],
+            runtime_state="idle",
+            raise_on_error=True,
+        )
+
+    assert db.sessions.update_calls == []
 
 
 # ── mark_pro_seen ─────────────────────────────────────────────────────────
