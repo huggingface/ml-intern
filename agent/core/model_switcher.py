@@ -19,6 +19,10 @@ import asyncio
 
 from litellm import acompletion
 
+from agent.core.direct_models import (
+    DIRECT_MODEL_PREFIXES,
+    is_direct_model_id,
+)
 from agent.core.effort_probe import ProbeInconclusive, probe_effort
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.local_models import (
@@ -59,6 +63,7 @@ def is_valid_model_id(model_id: str) -> bool:
     """Loose format check — lets users pick any model id.
 
     Accepts:
+      • atlas/<model>                   (Atlas Cloud)
       • ollama/<model>, vllm/<model>, lm_studio/<model>, llamacpp/<model>
       • <org>/<model>[:<tag>]            (HF router; tag = provider or policy)
       • huggingface/<org>/<model>[:<tag>] (same, optional LiteLLM prefix)
@@ -69,6 +74,10 @@ def is_valid_model_id(model_id: str) -> bool:
     if not model_id:
         return False
     normalized_model_id = strip_huggingface_model_prefix(model_id) or model_id
+    if is_direct_model_id(normalized_model_id):
+        return True
+    if any(normalized_model_id.startswith(prefix) for prefix in DIRECT_MODEL_PREFIXES):
+        return False
     if is_local_model_id(normalized_model_id):
         return True
     if is_reserved_local_model_id(normalized_model_id):
@@ -92,7 +101,7 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
     against the router catalog when possible; the probe below covers provider
     availability for uncataloged ids.
     """
-    if is_local_model_id(model_id):
+    if is_direct_model_id(model_id) or is_local_model_id(model_id):
         return True
 
     from agent.core import hf_router_catalog as cat
@@ -163,6 +172,7 @@ def print_model_listing(config, console) -> None:
     console.print(
         "\n[dim]Paste any HF model id (e.g. 'MiniMaxAI/MiniMax-M3:novita').\n"
         "Add ':fastest', ':cheapest', ':preferred', or ':<provider>' to override routing.\n"
+        "Use 'atlas/<model>' for Atlas Cloud.\n"
         "Use 'ollama/<model>', 'vllm/<model>', 'lm_studio/<model>', or "
         "'llamacpp/<model>' for local OpenAI-compatible endpoints.[/dim]"
     )
@@ -173,11 +183,12 @@ def print_invalid_id(arg: str, console) -> None:
     console.print(
         "[dim]Expected:\n"
         "  • <org>/<model>[:tag]    (HF router — paste from huggingface.co)\n"
+        "  • atlas/<model>           (Atlas Cloud)\n"
         "  • ollama/<model> | vllm/<model> | lm_studio/<model> | llamacpp/<model>[/dim]"
     )
 
 
-async def _probe_local_model(model_id: str) -> None:
+async def _probe_direct_model(model_id: str) -> None:
     params = _resolve_llm_params(model_id)
     await asyncio.wait_for(
         acompletion(
@@ -208,15 +219,15 @@ async def probe_and_switch_model(
     * ✗ hard error (auth, model-not-found, quota) — we reject the switch
       and keep the current model so the user isn't stranded
 
-    For non-local models, transient errors (5xx, timeout) complete the switch
+    For HF Router models, transient errors (5xx, timeout) complete the switch
     with a yellow warning; the next real call re-surfaces the error if it's
-    persistent. Local models reject every probe error, including timeouts, and
-    keep the current model.
+    persistent. Direct and local models reject every probe error, including
+    timeouts, and keep the current model.
     """
-    if is_local_model_id(model_id):
-        console.print(f"[dim]checking local model {model_id}...[/dim]")
+    if is_direct_model_id(model_id) or is_local_model_id(model_id):
+        console.print(f"[dim]checking model {model_id}...[/dim]")
         try:
-            await _probe_local_model(model_id)
+            await _probe_direct_model(model_id)
         except Exception as e:
             console.print(f"[bold red]Switch failed:[/bold red] {e}")
             console.print(f"[dim]Keeping current model: {config.model_name}[/dim]")

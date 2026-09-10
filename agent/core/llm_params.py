@@ -7,6 +7,10 @@ creating circular imports.
 
 import os
 
+from agent.core.direct_models import (
+    direct_model_name,
+    direct_model_provider,
+)
 from agent.core.hf_tokens import resolve_hf_router_token
 from agent.core.local_models import (
     LOCAL_MODEL_API_KEY_DEFAULT,
@@ -47,7 +51,7 @@ class UnsupportedEffortError(ValueError):
     """
 
 
-def _local_api_base(base_url: str) -> str:
+def _openai_api_base(base_url: str) -> str:
     base = base_url.strip().rstrip("/")
     if base.endswith("/v1"):
         return base
@@ -82,7 +86,36 @@ def _resolve_local_model_params(
     )
     return {
         "model": f"openai/{local_name}",
-        "api_base": _local_api_base(raw_base),
+        "api_base": _openai_api_base(raw_base),
+        "api_key": api_key,
+    }
+
+
+def _resolve_direct_model_params(
+    model_name: str,
+    reasoning_effort: str | None = None,
+    strict: bool = False,
+) -> dict:
+    if reasoning_effort and strict:
+        raise UnsupportedEffortError(
+            "Direct OpenAI-compatible endpoints don't accept reasoning_effort"
+        )
+
+    upstream_name = direct_model_name(model_name)
+    provider = direct_model_provider(model_name)
+    if upstream_name is None or provider is None:
+        raise ValueError(f"Unsupported direct model id: {model_name}")
+
+    raw_base = os.environ.get(provider["base_url_env"]) or provider[
+        "base_url_default"
+    ]
+    api_key = os.environ.get(provider["api_key_env"], "").strip()
+    if not api_key:
+        raise ValueError(f"{provider['api_key_env']} is required for {model_name}")
+
+    return {
+        "model": f"openai/{upstream_name}",
+        "api_base": _openai_api_base(raw_base),
         "api_key": api_key,
     }
 
@@ -95,6 +128,9 @@ def _resolve_llm_params(
 ) -> dict:
     """
     Build LiteLLM kwargs for a given model id.
+
+    • ``atlas/<model>`` — Atlas Cloud's OpenAI-compatible endpoint, using
+      ``ATLASCLOUD_API_KEY`` and optional ``ATLASCLOUD_BASE_URL``.
 
     • ``ollama/<model>``, ``vllm/<model>``, ``lm_studio/<model>``, and
       ``llamacpp/<model>`` — local OpenAI-compatible endpoints. The id prefix
@@ -125,6 +161,11 @@ def _resolve_llm_params(
 
     if is_reserved_local_model_id(normalized_model):
         raise ValueError(f"Unsupported local model id: {normalized_model}")
+
+    if direct_model_provider(normalized_model) is not None:
+        return _resolve_direct_model_params(
+            normalized_model, reasoning_effort, strict
+        )
 
     if local_model_provider(normalized_model) is not None:
         return _resolve_local_model_params(normalized_model, reasoning_effort, strict)

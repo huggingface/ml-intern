@@ -28,6 +28,7 @@ from agent.core.agent_loop import submission_loop
 from agent.core import model_switcher
 from agent.core.hf_access import fetch_whoami_v2, normalize_hf_user_plan
 from agent.core.hf_tokens import resolve_hf_token
+from agent.core.direct_models import is_direct_model_id
 from agent.core.local_models import is_local_model_id
 from agent.core.model_ids import strip_huggingface_model_prefix
 from agent.core.session import OpType
@@ -1193,9 +1194,12 @@ async def main(model: str | None = None, sandbox_tools: bool = False):
     local_mode = _is_local_tool_runtime(config)
 
     # HF token — required for Hub-backed models/tools and sandbox tools, but
-    # not for local LLMs using only local filesystem tools.
+    # not for direct/local LLMs using only local filesystem tools.
     hf_token = resolve_hf_token()
-    if not hf_token and (not is_local_model_id(config.model_name) or not local_mode):
+    non_router_model = is_direct_model_id(config.model_name) or is_local_model_id(
+        config.model_name
+    )
+    if not hf_token and (not non_router_model or not local_mode):
         hf_token = await _prompt_and_save_hf_token(prompt_session)
 
     # Resolve username and plan from one whoami-v2 request for banner and CTAs.
@@ -1447,7 +1451,10 @@ async def headless_main(
     local_mode = _is_local_tool_runtime(config)
 
     hf_token = resolve_hf_token()
-    if not hf_token and (not is_local_model_id(config.model_name) or not local_mode):
+    non_router_model = is_direct_model_id(config.model_name) or is_local_model_id(
+        config.model_name
+    )
+    if not hf_token and (not non_router_model or not local_mode):
         print(
             "ERROR: No HF token found. Set HF_TOKEN or run `hf auth login`.",
             file=sys.stderr,

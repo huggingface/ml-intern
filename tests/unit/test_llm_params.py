@@ -90,6 +90,47 @@ def test_resolve_ollama_params_adds_v1_and_uses_default_key(monkeypatch):
     }
 
 
+def test_resolve_atlas_params_uses_default_endpoint(monkeypatch):
+    monkeypatch.setenv("ATLASCLOUD_API_KEY", "atlas-secret")
+    monkeypatch.delenv("ATLASCLOUD_BASE_URL", raising=False)
+
+    params = _resolve_llm_params("atlas/deepseek-ai/deepseek-v4-pro")
+
+    assert params == {
+        "model": "openai/deepseek-ai/deepseek-v4-pro",
+        "api_base": "https://api.atlascloud.ai/v1",
+        "api_key": "atlas-secret",
+    }
+
+
+def test_resolve_atlas_params_supports_endpoint_override(monkeypatch):
+    monkeypatch.setenv("ATLASCLOUD_API_KEY", "atlas-secret")
+    monkeypatch.setenv("ATLASCLOUD_BASE_URL", "https://example.com/openai/v1/")
+
+    params = _resolve_llm_params("atlas/custom/model")
+
+    assert params["model"] == "openai/custom/model"
+    assert params["api_base"] == "https://example.com/openai/v1"
+
+
+def test_resolve_atlas_params_requires_api_key(monkeypatch):
+    monkeypatch.delenv("ATLASCLOUD_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="ATLASCLOUD_API_KEY"):
+        _resolve_llm_params("atlas/deepseek-ai/deepseek-v4-pro")
+
+
+def test_atlas_params_reject_reasoning_effort_in_strict_mode(monkeypatch):
+    monkeypatch.setenv("ATLASCLOUD_API_KEY", "atlas-secret")
+
+    with pytest.raises(UnsupportedEffortError, match="reasoning_effort"):
+        _resolve_llm_params(
+            "atlas/deepseek-ai/deepseek-v4-pro",
+            reasoning_effort="high",
+            strict=True,
+        )
+
+
 def test_resolve_vllm_params_keeps_existing_v1_and_trims_slash(monkeypatch):
     monkeypatch.delenv("VLLM_API_KEY", raising=False)
     monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1/")

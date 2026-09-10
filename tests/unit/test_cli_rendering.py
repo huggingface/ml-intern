@@ -261,6 +261,39 @@ async def test_local_model_local_runtime_skips_hf_token_prompt(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_atlas_model_local_runtime_skips_hf_token_prompt(monkeypatch):
+    class StopAfterBanner(Exception):
+        pass
+
+    async def fail_prompt(_prompt_session):
+        raise AssertionError("Atlas direct model should not prompt for an HF token")
+
+    def fake_banner(*, model=None, hf_user=None, tool_runtime=None):
+        assert model == "atlas/deepseek-ai/deepseek-v4-pro"
+        assert hf_user is None
+        assert tool_runtime == "local filesystem"
+        raise StopAfterBanner
+
+    monkeypatch.setattr(main_mod.os, "system", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(main_mod, "PromptSession", lambda: object())
+    monkeypatch.setattr(main_mod, "resolve_hf_token", lambda: None)
+    monkeypatch.setattr(main_mod, "_prompt_and_save_hf_token", fail_prompt)
+    monkeypatch.setattr(
+        main_mod,
+        "load_config",
+        lambda _path, **_kwargs: SimpleNamespace(
+            model_name="atlas/deepseek-ai/deepseek-v4-pro",
+            mcpServers={},
+            tool_runtime="local",
+        ),
+    )
+    monkeypatch.setattr(main_mod, "print_banner", fake_banner)
+
+    with pytest.raises(StopAfterBanner):
+        await main_mod.main()
+
+
+@pytest.mark.asyncio
 async def test_local_model_sandbox_runtime_prompts_for_hf_token(monkeypatch):
     class StopAfterBanner(Exception):
         pass

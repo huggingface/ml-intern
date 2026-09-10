@@ -2,6 +2,7 @@ import pytest
 
 from agent.config import load_config
 from agent.core import model_switcher
+from agent.core.direct_models import is_direct_model_id
 from agent.core.local_models import is_local_model_id
 from agent.main import CLI_CONFIG_PATH
 
@@ -13,11 +14,18 @@ def test_local_model_helper_accepts_supported_prefixes():
     assert is_local_model_id("llamacpp/unsloth/Qwen3.5-2B")
 
 
+def test_direct_model_helper_accepts_atlas_prefix():
+    assert is_direct_model_id("atlas/deepseek-ai/deepseek-v4-pro")
+    assert not is_direct_model_id("atlas/")
+    assert not is_direct_model_id("atlas/model with spaces")
+
+
 def test_model_switcher_accepts_supported_local_prefixes():
     assert model_switcher.is_valid_model_id("ollama/llama3.1:8b")
     assert model_switcher.is_valid_model_id("vllm/meta-llama/Llama-3.1-8B")
     assert model_switcher.is_valid_model_id("lm_studio/google/gemma-3-4b")
     assert model_switcher.is_valid_model_id("llamacpp/llama-3.1-8b")
+    assert model_switcher.is_valid_model_id("atlas/deepseek-ai/deepseek-v4-pro")
 
 
 def test_model_switcher_rejects_empty_or_whitespace_local_ids():
@@ -26,6 +34,8 @@ def test_model_switcher_rejects_empty_or_whitespace_local_ids():
     assert not model_switcher.is_valid_model_id("lm_studio/")
     assert not model_switcher.is_valid_model_id("llamacpp/")
     assert not model_switcher.is_valid_model_id("ollama/llama 3.1")
+    assert not model_switcher.is_valid_model_id("atlas/")
+    assert not model_switcher.is_valid_model_id("atlas/model with spaces")
 
 
 def test_openai_compat_prefix_is_not_supported():
@@ -102,6 +112,57 @@ async def test_probe_and_switch_local_model_uses_no_effort(monkeypatch):
     assert calls[0]["model"] == "openai/llama3.1:8b"
     assert "reasoning_effort" not in calls[0]
     assert "extra_body" not in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_probe_and_switch_atlas_model_uses_direct_endpoint(monkeypatch):
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setenv("ATLASCLOUD_API_KEY", "atlas-secret")
+    monkeypatch.setattr(model_switcher, "acompletion", fake_acompletion)
+
+    class Config:
+        model_name = "anthropic/claude-opus-4.8:fal-ai"
+        reasoning_effort = "high"
+
+    class Session:
+        def __init__(self):
+            self.model_id = None
+            self.model_effective_effort = {}
+
+        def update_model(self, model_id):
+            self.model_id = model_id
+
+    class Console:
+        def print(self, *args, **kwargs):
+            pass
+
+    session = Session()
+    model_id = "atlas/deepseek-ai/deepseek-v4-pro"
+    await model_switcher.probe_and_switch_model(
+        model_id,
+        Config(),
+        session,
+        Console(),
+        hf_token=None,
+    )
+
+    assert session.model_id == model_id
+    assert session.model_effective_effort[model_id] is None
+    assert calls == [
+        {
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": False,
+            "model": "openai/deepseek-ai/deepseek-v4-pro",
+            "api_base": "https://api.atlascloud.ai/v1",
+            "api_key": "atlas-secret",
+        }
+    ]
 
 
 @pytest.mark.asyncio
