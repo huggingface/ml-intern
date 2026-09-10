@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <title>Space Invaders — Nouveau</title>
+  <meta name="description" content="A modern, mobile-responsive PWA recreation of Space Invaders in an Art Nouveau visual style." />
+  <meta name="theme-color" content="#120a24" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="stage">
+    <header id="hud">
+      <div class="hud-block">
+        <span class="hud-label">Score</span>
+        <span class="hud-value" id="score-value">0000</span>
+      </div>
+      <div class="hud-block hud-block--center">
+        <span class="hud-label">High Score</span>
+        <span class="hud-value" id="highscore-value">0000</span>
+      </div>
+      <div class="hud-block">
+        <span class="hud-label">Lives</span>
+        <span class="hud-value" id="lives-value">3</span>
+      </div>
+    </header>
+
+    <div id="canvas-frame">
+      <canvas id="game-canvas" width="224" height="256"></canvas>
+    </div>
+
+    <div id="touch-controls" aria-hidden="true">
+      <div class="dpad">
+        <button type="button" class="ctrl ctrl--left" data-control="left" aria-label="Move left">&#10094;</button>
+        <button type="button" class="ctrl ctrl--right" data-control="right" aria-label="Move right">&#10095;</button>
+      </div>
+      <button type="button" class="ctrl ctrl--fire" data-control="fire" aria-label="Fire">&#10022;</button>
+    </div>
+  </div>
+
+  <script type="module" src="js/game.js"></script>
+</body>
+</html>
