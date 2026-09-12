@@ -289,6 +289,17 @@ async def _seed_trackio_dashboard_safe(session: Any, space_id: str) -> None:
         await asyncio.to_thread(
             ensure_trackio_dashboard, space_id, session.hf_token, _log
         )
+        from agent.core import telemetry
+
+        await telemetry.record_hub_artifact(
+            session,
+            repo_type="space",
+            repo_id=space_id,
+            source="trackio",
+            is_sandbox=False,
+            private=True,
+            success=True,
+        )
     except Exception as e:
         _log(f"trackio dashboard seed failed: {e}")
 

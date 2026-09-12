@@ -560,6 +560,7 @@ class Session:
             "session_id": self.session_id,
             "user_id": self.user_id,
             "hf_username": self.hf_username,
+            "user_plan": self.user_plan,
             "session_start_time": self.session_start_time,
             "session_end_time": datetime.now().isoformat(),
             "model_name": self.config.model_name,

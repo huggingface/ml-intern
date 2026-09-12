@@ -148,6 +148,43 @@ def _add_environment_variables(
     return result
 
 
+def _normalize_expected_hub_artifacts(raw: Any) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return artifacts
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        repo_type = str(item.get("repo_type") or "model").strip().lower()
+        repo_id = (
+            item.get("repo_id")
+            or item.get("hub_model_id")
+            or item.get("hub_dataset_id")
+            or item.get("space_id")
+        )
+        if repo_type not in {"model", "dataset", "space"} or not repo_id:
+            continue
+        artifacts.append(
+            {
+                "repo_type": repo_type,
+                "repo_id": str(repo_id),
+                "private": item.get("private"),
+                "is_sandbox": bool(item.get("is_sandbox")),
+            }
+        )
+    return artifacts
+
+
+def _job_status_completed(status: Any) -> bool:
+    return str(status or "").strip().upper() in {
+        "COMPLETED",
+        "COMPLETE",
+        "SUCCEEDED",
+        "SUCCESS",
+        "DONE",
+    }
+
+
 def _build_uv_command(
     script: str,
     with_deps: list[str] | None = None,
@@ -389,7 +426,7 @@ class HfJobsTool:
                 "isError": True,
             }
 
-    async def _seed_trackio_dashboard(self, space_id: str) -> None:
+    async def _seed_trackio_dashboard(self, space_id: str) -> bool:
         """Idempotently install trackio dashboard files into *space_id* before
         the job runs. Surfaces seed progress as tool_log events but never
         raises — a seed failure should not block job submission, since trackio
@@ -410,9 +447,41 @@ class HfJobsTool:
             await asyncio.to_thread(
                 ensure_trackio_dashboard, space_id, self.hf_token, _log
             )
+            if self.session:
+                from agent.core import telemetry
+
+                await telemetry.record_hub_artifact(
+                    self.session,
+                    repo_type="space",
+                    repo_id=space_id,
+                    source="trackio",
+                    is_sandbox=False,
+                    private=True,
+                    success=True,
+                )
+            return True
         except Exception as e:
             logger.warning(f"trackio dashboard seed failed for {space_id}: {e}")
             _log(f"trackio dashboard seed failed: {e}")
+        return False
+
+    async def _record_successful_job_artifacts(
+        self, artifacts: list[dict[str, Any]]
+    ) -> None:
+        if not self.session:
+            return
+        from agent.core import telemetry
+
+        for artifact in artifacts:
+            await telemetry.record_hub_artifact(
+                self.session,
+                repo_type=artifact["repo_type"],
+                repo_id=artifact["repo_id"],
+                source="hf_job",
+                is_sandbox=artifact["is_sandbox"],
+                private=artifact.get("private"),
+                success=True,
+            )
 
     async def _wait_for_job_completion(
         self, job_id: str, namespace: Optional[str] = None
@@ -569,6 +638,9 @@ class HfJobsTool:
             # Run the job
             flavor = args.get("hardware_flavor", "cpu-basic")
             timeout_str = args.get("timeout", "30m")
+            expected_hub_artifacts = _normalize_expected_hub_artifacts(
+                args.get("expected_hub_artifacts")
+            )
 
             # Trackio: agent-declared space + project become env vars on the job
             # so trackio.init() picks them up automatically. We also surface them
@@ -658,6 +730,7 @@ class HfJobsTool:
                         "hardware_flavor": flavor,
                         "timeout": timeout_str,
                         "namespace": self.namespace,
+                        "expected_hub_artifacts": expected_hub_artifacts,
                     },
                     image=image,
                     job_type=job_type,
@@ -711,6 +784,8 @@ class HfJobsTool:
                         else None,
                         allow_zero_actual=True,
                     )
+                if _job_status_completed(final_status):
+                    await self._record_successful_job_artifacts(expected_hub_artifacts)
 
             # Untrack job ID (completed or failed, no longer needs cancellation)
             if self.session:
@@ -880,6 +955,14 @@ class HfJobsTool:
             job_id=job_id,
             namespace=self.namespace,
         )
+        if self.session:
+            from agent.core import telemetry
+
+            await telemetry.record_hf_job_cancel(
+                self.session,
+                job_id=job_id,
+                namespace=self.namespace,
+            )
 
         response = f"""✓ Job {job_id} has been cancelled.
 
@@ -1247,6 +1330,26 @@ HF_JOBS_TOOL_SPEC = {
                     "Optional. The trackio project name to log this run under. "
                     "Injected as TRACKIO_PROJECT env var and used by the UI to filter "
                     "the embedded dashboard to this project."
+                ),
+            },
+            "expected_hub_artifacts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "repo_type": {
+                            "type": "string",
+                            "enum": ["model", "dataset", "space"],
+                        },
+                        "repo_id": {"type": "string"},
+                        "private": {"type": "boolean"},
+                        "is_sandbox": {"type": "boolean"},
+                    },
+                    "required": ["repo_type", "repo_id"],
+                },
+                "description": (
+                    "Optional. Hub artifacts the job is expected to create. "
+                    "They are only counted after the job completes successfully."
                 ),
             },
             "namespace": {

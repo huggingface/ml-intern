@@ -138,6 +138,7 @@ def test_row_payload_scrubs_messages_events_and_tools(tmp_path):
     data = {
         "session_id": "session-123",
         "user_id": "lewtun",
+        "user_plan": "pro",
         "session_start_time": "2026-01-01T00:00:00",
         "session_end_time": "2026-01-01T00:00:03",
         "model_name": "anthropic/claude-opus-4.8:fal-ai",
@@ -163,6 +164,7 @@ def test_row_payload_includes_usage_scalars_and_parseable_metrics(tmp_path):
     data = {
         "session_id": "session-123",
         "user_id": "lewtun",
+        "user_plan": "pro",
         "session_start_time": "2026-01-01T00:00:00",
         "session_end_time": "2026-01-01T00:30:00",
         "model_name": "anthropic/claude-opus-4.8:fal-ai",
@@ -193,6 +195,7 @@ def test_row_payload_includes_usage_scalars_and_parseable_metrics(tmp_path):
     row = json.loads(tmp_file.read_text())
     assert row["session_id"] == "session-123"
     assert row["user_id"] == "lewtun"
+    assert row["user_plan"] == "pro"
     assert row["session_start_time"] == "2026-01-01T00:00:00"
     assert row["session_end_time"] == "2026-01-01T00:30:00"
     assert row["model_name"] == "anthropic/claude-opus-4.8:fal-ai"

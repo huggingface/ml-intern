@@ -290,6 +290,7 @@ def _write_row_payload(data: dict, tmp_path: str) -> None:
     session_row = {
         "session_id": data["session_id"],
         "user_id": data.get("user_id"),
+        "user_plan": data.get("user_plan") or "unknown",
         "session_start_time": data["session_start_time"],
         "session_end_time": data["session_end_time"],
         "model_name": data["model_name"],

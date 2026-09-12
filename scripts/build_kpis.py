@@ -1,175 +1,794 @@
 #!/usr/bin/env python3
-"""Hourly KPI rollup for the session-trajectory dataset.
+"""Build KPI dataset v2 facts and rollups.
 
-================================================================================
- Data flow
-================================================================================
-
-    ┌────────────────────┐   heartbeat      ┌────────────────────────────────┐
-    │  agent (CLI/web)   │ ───────────────▶ │  hf-agent-sessions  (dataset)  │
-    │  Session.send_event│                  │  sessions/YYYY-MM-DD/<id>.jsonl│
-    └────────────────────┘                  └───────────────┬────────────────┘
-                                                            │ cron @:05 each hour
-                                                            ▼
-                                         ┌──────────────────────────────────┐
-                                         │   scripts/build_kpis.py          │
-                                         │   (GitHub Actions)               │
-                                         └───────────────┬──────────────────┘
-                                                         │ upload CSV
-                                                         ▼
-                                         ┌──────────────────────────────────┐
-                                         │  hf-agent-kpis  (dataset)        │
-                                         │  hourly/YYYY-MM-DD/HH.csv        │
-                                         └──────────────────────────────────┘
-
-Each hourly run reads today's + yesterday's session folders (to cover sessions
-that crossed midnight), filters events into the target hour window
-``[hour, hour+1h)``, computes aggregates, and writes one CSV at
-``hourly/<date>/<HH>.csv`` in the target dataset. Uploads are idempotent —
-re-running the same hour overwrites.
-
-================================================================================
- Metrics (one row per hour)
-================================================================================
-
-    sessions            — distinct session_ids with ≥1 event in window
-    users               — distinct user ids (when present on session rows)
-    turns               — sum of user-message counts across active sessions
-    llm_calls           — count of llm_call events
-    tokens_prompt / _completion / _cache_read / _cache_creation
-    cost_usd            — sum of llm_call.cost_usd
-    cost_per_session_mean / _p50 / _p95  — per-session cost distribution
-    cache_hit_ratio     — cache_read / (cache_read + prompt)
-    tool_calls_total / _succeeded / _failed  — per-tool_output reliability counts
-    tool_success_rate   — succeeded / total (kept for back-compat)
-    successful_sessions / errored_sessions / regenerated_sessions  — outcome counts
-    failure_rate / regenerate_rate  — kept for back-compat
-    time_to_first_action_s_p50 / _p95  — from session_start to first tool_call
-    thumbs_up / thumbs_down
-    hf_jobs_submitted / _succeeded / _blocked
-    sandboxes_created / _cpu / _gpu  — sandbox_create events bucketed by hardware
-    pro_cta_clicks
-    gpu_hours_by_flavor_json   — JSON-serialised {flavor: gpu-hours}
-    research_calls             — total `research` tool_call events
-    sessions_with_research     — sessions that called `research` ≥1
-    research_calls_per_session_p50 / _p95 — among sessions that did any (zero-only sessions excluded)
-    distinct_tools_per_session_p50 / _p95 — among sessions with ≥1 named tool_call
-    tool_calls_per_session_p50 / _p95     — among sessions with ≥1 named tool_call
-    tool_calls_per_turn_p50 / _p95        — calls / turns, among sessions with turns>0
-    tool_calls_by_name_json    — JSON {tool: total_calls} (all tools seen)
-    sessions_using_tool_json   — JSON {tool: distinct_sessions_using}
-    sessions_by_model_json     — JSON {model_name: count} (router/local split)
-
-================================================================================
- Usage
-================================================================================
-
-    # Run for the most recently completed hour (default — the cron path):
-    python scripts/build_kpis.py
-
-    # Backfill last 24 hours:
-    python scripts/build_kpis.py --hours 24
-
-    # Explicit hour (UTC):
-    python scripts/build_kpis.py --datetime 2026-04-24T14
-
-Env:
-    HF_TOKEN (or HF_KPI_WRITE_TOKEN) — write access to the target dataset.
-
-================================================================================
- Deploy
-================================================================================
-
-See ``.github/workflows/build-kpis.yml`` — runs every hour at :05. To provision:
-
-    1. Create the target dataset (once):
-         huggingface-cli repo create hf-agent-kpis --type dataset
-    2. Put ``HF_KPI_WRITE_TOKEN`` (or ``HF_TOKEN``) into repo Actions secrets.
-    3. Merge this file; the first scheduled run fires within the hour.
+The v2 pipeline deliberately stops producing the legacy hourly/daily schema.
+It emits exact per-session facts plus hourly, daily, and monthly rollups under
+``v2/``. Raw user ids, session ids, and Hub artifact repo ids are never written;
+all identifiers are salted HMAC-SHA256 hashes.
 """
 
-from __future__ import annotations
-
 import argparse
+import calendar
+import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import sys
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 
 logger = logging.getLogger("build_kpis")
 
-# Rough gpu-hour pricing for hf_jobs flavor strings. Keep conservative; used
-# only to compute gpu-hours (not dollars) — wall_time_s * flavor_gpu_count.
-_FLAVOR_GPU_COUNT = {
-    "cpu-basic": 0,
-    "cpu-upgrade": 0,
-    "t4-small": 1,
-    "t4-medium": 1,
-    "l4x1": 1,
-    "l4x4": 4,
-    "l40sx1": 1,
-    "l40sx4": 4,
-    "l40sx8": 8,
-    "a10g-small": 1,
-    "a10g-large": 1,
-    "a10g-largex2": 2,
-    "a10g-largex4": 4,
-    "a100-large": 1,
-    "a100x2": 2,
-    "a100x4": 4,
-    "a100x8": 8,
-    "h100": 1,
-    "h100x8": 8,
-}
+SCHEMA_VERSION = 2
+V2_PREFIX = "v2"
+VALID_PLANS = {"free", "pro", "unknown"}
+VALID_REPO_TYPES = {"model", "dataset", "space"}
 
 
-def _percentile(values: list[float], p: float) -> float:
-    if not values:
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _require_hash_salt(salt: str | None = None) -> str:
+    resolved = salt if salt is not None else os.environ.get("KPI_USER_HASH_SALT")
+    if not resolved:
+        raise RuntimeError("KPI_USER_HASH_SALT is required for KPI v2 exports")
+    return resolved
+
+
+def _hash_identifier(value: Any, salt: str) -> str:
+    raw = "" if value is None else str(value)
+    return hmac.new(
+        salt.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _number(value: Any) -> float:
+    if isinstance(value, bool) or value is None:
         return 0.0
-    values = sorted(values)
-    k = (len(values) - 1) * p
-    f = int(k)
-    c = min(f + 1, len(values) - 1)
-    if f == c:
-        return float(values[f])
-    return float(values[f] + (values[c] - values[f]) * (k - f))
-
-
-def _parse_ts(s: Any) -> datetime | None:
-    if not s or not isinstance(s, str):
-        return None
     try:
-        dt = datetime.fromisoformat(s)
-    except Exception:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _integer(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
         return None
-    # Normalise to aware UTC so comparisons work against window bounds.
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    return dt.astimezone(timezone.utc)
 
 
-def _iter_session_files(api, repo_id: str, day: date, token: str) -> Iterable[str]:
-    """Yield repo-relative paths for all sessions under ``sessions/YYYY-MM-DD/``."""
+def _date_key(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _hour_key(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H")
+
+
+def _month_key_from_date_key(day: str) -> str:
+    return day[:7]
+
+
+def _normalize_plan(value: Any) -> str:
+    plan = str(value or "unknown").strip().lower()
+    return plan if plan in VALID_PLANS else "unknown"
+
+
+def _normalize_job_status(value: Any) -> str:
+    status = str(value or "unknown").strip().lower()
+    if status in {"completed", "complete", "succeeded", "success", "done"}:
+        return "completed"
+    if status in {"cancelled", "canceled", "cancelled_by_user", "canceled_by_user"}:
+        return "cancelled"
+    if "cancel" in status or status in {"stopped", "killed"}:
+        return "cancelled"
+    if status in {"failed", "failure", "error", "errored", "timeout", "timed_out"}:
+        return "failed"
+    if "fail" in status or "error" in status or "timeout" in status:
+        return "failed"
+    return "unknown"
+
+
+def _session_events(session: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        event for event in _as_list(session.get("events")) if isinstance(event, dict)
+    ]
+
+
+def _session_messages(session: dict[str, Any]) -> list[dict[str, Any]]:
+    return [msg for msg in _as_list(session.get("messages")) if isinstance(msg, dict)]
+
+
+def _event_data(event: dict[str, Any]) -> dict[str, Any]:
+    return _as_dict(event.get("data"))
+
+
+def _session_usage_metrics(session: dict[str, Any]) -> dict[str, Any]:
+    metrics = _as_dict(session.get("usage_metrics"))
+    if metrics:
+        return metrics
+    # Historical rows can lack usage_metrics. Keep the fallback minimal and do
+    # not use llm_call.cost_usd for the billing fields.
+    prompt = completion = cache_read = cache_creation = total = calls = 0
+    calls_by_model: Counter[str] = Counter()
+    for event in _session_events(session):
+        if event.get("event_type") != "llm_call":
+            continue
+        data = _event_data(event)
+        calls += 1
+        prompt += _integer(data.get("prompt_tokens"))
+        completion += _integer(data.get("completion_tokens"))
+        cache_read += _integer(data.get("cache_read_tokens"))
+        cache_creation += _integer(data.get("cache_creation_tokens"))
+        total += _integer(data.get("total_tokens")) or (
+            _integer(data.get("prompt_tokens"))
+            + _integer(data.get("completion_tokens"))
+            + _integer(data.get("cache_read_tokens"))
+            + _integer(data.get("cache_creation_tokens"))
+        )
+        calls_by_model[
+            str(data.get("model") or session.get("model_name") or "unknown")
+        ] += 1
+    return {
+        "total_usd": 0.0,
+        "total_usd_source": "missing_usage_metrics",
+        "app_total_usd": 0.0,
+        "hf_billing_total_usd": None,
+        "app_telemetry": {
+            "inference_usd": 0.0,
+            "hf_jobs_estimated_usd": 0.0,
+            "sandbox_estimated_usd": 0.0,
+        },
+        "hf_billing": {"available": False, "current_session": None},
+        "llm": {
+            "calls": calls,
+            "calls_by_model": dict(calls_by_model),
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cache_read_tokens": cache_read,
+            "cache_creation_tokens": cache_creation,
+            "total_tokens": total,
+        },
+        "hf_jobs": {"submits": 0, "estimated_usd": 0.0},
+        "sandboxes": {"creates": 0, "estimated_usd": 0.0},
+    }
+
+
+def _active_times(
+    session: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    event_timestamps = [
+        ts
+        for ts in (
+            _parse_ts(event.get("created_at") or event.get("timestamp"))
+            for event in events
+        )
+        if ts is not None
+    ]
+    timestamps = list(event_timestamps)
+    for key in ("session_start_time", "session_end_time"):
+        ts = _parse_ts(session.get(key))
+        if ts is not None:
+            timestamps.append(ts)
+    if not timestamps:
+        now = datetime.now(timezone.utc)
+        timestamps.append(now)
+
+    active_hours = {_hour_key(ts) for ts in timestamps}
+    start_ts = _parse_ts(session.get("session_start_time"))
+    end_ts = _parse_ts(session.get("session_end_time"))
+    if start_ts is not None and end_ts is not None and end_ts >= start_ts:
+        current = start_ts.replace(minute=0, second=0, microsecond=0)
+        final = end_ts.replace(minute=0, second=0, microsecond=0)
+        while current <= final:
+            active_hours.add(_hour_key(current))
+            current += timedelta(hours=1)
+
+    active_dates = {_date_key(ts) for ts in timestamps}
+    active_dates.update(hour[:10] for hour in active_hours)
+    return (sorted(active_dates), sorted(active_hours))
+
+
+def _session_status(events: list[dict[str, Any]]) -> str:
+    event_types = {event.get("event_type") for event in events}
+    if "error" in event_types:
+        return "failed"
+    if (
+        "interrupted" in event_types
+        or "cancelled" in event_types
+        or "canceled" in event_types
+    ):
+        return "cancelled"
+    if "turn_complete" in event_types:
+        return "completed"
+    return "unknown"
+
+
+def _usage_components(metrics: dict[str, Any]) -> dict[str, float | str]:
+    app = _as_dict(metrics.get("app_telemetry"))
+    hf_billing = _as_dict(metrics.get("hf_billing"))
+    current_session = _as_dict(hf_billing.get("current_session"))
+    source = str(metrics.get("total_usd_source") or "usage_metrics")
+
+    if hf_billing.get("available") and current_session:
+        inference = _number(current_session.get("inference_providers_usd"))
+        jobs = _number(current_session.get("hf_jobs_usd"))
+    else:
+        inference = _number(app.get("inference_usd"))
+        jobs = _number(app.get("hf_jobs_estimated_usd"))
+
+    sandboxes = _number(app.get("sandbox_estimated_usd"))
+    return {
+        "usage_total_usd": round(_number(metrics.get("total_usd")), 6),
+        "usage_inference_providers_usd": round(inference, 6),
+        "usage_hf_jobs_usd": round(jobs, 6),
+        "usage_sandboxes_usd": round(sandboxes, 6),
+        "usage_cost_source": source,
+    }
+
+
+def _model_usage_from_events(
+    session: dict[str, Any],
+    events: list[dict[str, Any]],
+    metrics: dict[str, Any],
+) -> dict[str, dict[str, int]]:
+    usage: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "sessions": 0,
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+    for event in events:
+        if event.get("event_type") != "llm_call":
+            continue
+        data = _event_data(event)
+        model = str(data.get("model") or session.get("model_name") or "unknown")
+        input_tokens = (
+            _integer(data.get("prompt_tokens"))
+            + _integer(data.get("cache_read_tokens"))
+            + _integer(data.get("cache_creation_tokens"))
+        )
+        output_tokens = _integer(data.get("completion_tokens"))
+        total_tokens = _integer(data.get("total_tokens")) or (
+            input_tokens + output_tokens
+        )
+        usage[model]["calls"] += 1
+        usage[model]["input_tokens"] += input_tokens
+        usage[model]["output_tokens"] += output_tokens
+        usage[model]["total_tokens"] += total_tokens
+
+    if not usage:
+        llm = _as_dict(metrics.get("llm"))
+        calls_by_model = _as_dict(llm.get("calls_by_model"))
+        if calls_by_model:
+            for model, calls in calls_by_model.items():
+                usage[str(model)]["calls"] = _integer(calls)
+            if len(calls_by_model) == 1:
+                model = next(iter(calls_by_model))
+                usage[str(model)]["input_tokens"] = (
+                    _integer(llm.get("prompt_tokens"))
+                    + _integer(llm.get("cache_read_tokens"))
+                    + _integer(llm.get("cache_creation_tokens"))
+                )
+                usage[str(model)]["output_tokens"] = _integer(
+                    llm.get("completion_tokens")
+                )
+                usage[str(model)]["total_tokens"] = _integer(llm.get("total_tokens"))
+        else:
+            model = str(session.get("model_name") or "unknown")
+            usage[model]["calls"] = _integer(llm.get("calls"))
+            usage[model]["input_tokens"] = (
+                _integer(llm.get("prompt_tokens"))
+                + _integer(llm.get("cache_read_tokens"))
+                + _integer(llm.get("cache_creation_tokens"))
+            )
+            usage[model]["output_tokens"] = _integer(llm.get("completion_tokens"))
+            usage[model]["total_tokens"] = _integer(llm.get("total_tokens"))
+
+    for model_usage in usage.values():
+        if model_usage["calls"] or model_usage["total_tokens"]:
+            model_usage["sessions"] = 1
+    return dict(sorted((model, dict(values)) for model, values in usage.items()))
+
+
+def _job_counts(events: list[dict[str, Any]]) -> dict[str, int]:
+    submitted = 0
+    terminal_by_id: dict[str, str] = {}
+    anonymous_terminal_statuses: list[str] = []
+    for idx, event in enumerate(events):
+        event_type = event.get("event_type")
+        data = _event_data(event)
+        if event_type == "hf_job_submit":
+            submitted += 1
+        elif event_type in {"hf_job_complete", "hf_job_cancel"}:
+            status = _normalize_job_status(
+                data.get("final_status") or data.get("status")
+            )
+            job_id = data.get("job_id")
+            if job_id:
+                terminal_by_id[str(job_id)] = status
+            else:
+                anonymous_terminal_statuses.append(status or f"unknown-{idx}")
+
+    statuses = Counter(terminal_by_id.values())
+    statuses.update(anonymous_terminal_statuses)
+    return {
+        "hf_jobs_submitted": submitted,
+        "hf_jobs_completed": int(statuses.get("completed", 0)),
+        "hf_jobs_failed": int(statuses.get("failed", 0)),
+        "hf_jobs_cancelled": int(statuses.get("cancelled", 0)),
+    }
+
+
+def _sandbox_counts(
+    events: list[dict[str, Any]], metrics: dict[str, Any]
+) -> dict[str, int]:
+    created = cpu = gpu = 0
+    for event in events:
+        if event.get("event_type") != "sandbox_create":
+            continue
+        data = _event_data(event)
+        created += 1
+        hardware = str(data.get("hardware") or "cpu-basic").lower()
+        if hardware.startswith("cpu-"):
+            cpu += 1
+        else:
+            gpu += 1
+    if created:
+        return {
+            "sandboxes_created": created,
+            "sandboxes_cpu": cpu,
+            "sandboxes_gpu": gpu,
+        }
+
+    sandboxes = _as_dict(metrics.get("sandboxes"))
+    hardware = _as_dict(sandboxes.get("hardware"))
+    created = _integer(sandboxes.get("creates"))
+    cpu = sum(
+        _integer(count)
+        for flavor, count in hardware.items()
+        if str(flavor).lower().startswith("cpu-")
+    )
+    gpu = max(0, created - cpu)
+    return {
+        "sandboxes_created": created,
+        "sandboxes_cpu": int(cpu),
+        "sandboxes_gpu": int(gpu),
+    }
+
+
+def _artifact_counts(events: list[dict[str, Any]]) -> dict[str, Any]:
+    by_hash: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("event_type") != "hub_artifact":
+            continue
+        data = _event_data(event)
+        if data.get("success") is False:
+            continue
+        artifact_hash = str(data.get("artifact_hash") or "").strip()
+        if not artifact_hash:
+            continue
+        repo_type = str(data.get("repo_type") or "").strip().lower()
+        if repo_type not in VALID_REPO_TYPES:
+            continue
+        by_hash[artifact_hash] = data
+
+    type_counts: Counter[str] = Counter()
+    non_sandbox_spaces = 0
+    for data in by_hash.values():
+        repo_type = str(data.get("repo_type") or "").lower()
+        type_counts[repo_type] += 1
+        if repo_type == "space" and not bool(data.get("is_sandbox")):
+            non_sandbox_spaces += 1
+
+    by_type = {
+        "model": int(type_counts.get("model", 0)),
+        "dataset": int(type_counts.get("dataset", 0)),
+        "space": int(type_counts.get("space", 0)),
+        "non_sandbox_space": int(non_sandbox_spaces),
+    }
+    return {
+        "hub_models_created": by_type["model"],
+        "hub_datasets_created": by_type["dataset"],
+        "hub_spaces_created": by_type["space"],
+        "hub_non_sandbox_spaces_created": by_type["non_sandbox_space"],
+        "hub_artifacts_by_type_json": _json_dumps(by_type),
+    }
+
+
+def _session_fact(session: dict[str, Any], salt: str | None = None) -> dict[str, Any]:
+    salt = _require_hash_salt(salt)
+    events = _session_events(session)
+    messages = _session_messages(session)
+    metrics = _session_usage_metrics(session)
+    llm = _as_dict(metrics.get("llm"))
+    active_dates, active_hours = _active_times(session, events)
+    usage = _usage_components(metrics)
+    jobs = _job_counts(events)
+    sandboxes = _sandbox_counts(events, metrics)
+    artifacts = _artifact_counts(events)
+    model_usage = _model_usage_from_events(session, events, metrics)
+
+    session_id = str(session.get("session_id") or "")
+    user_id = session.get("user_id") or f"session:{session_id}"
+    prompt_tokens = _integer(llm.get("prompt_tokens"))
+    completion_tokens = _integer(llm.get("completion_tokens"))
+    cache_read_tokens = _integer(llm.get("cache_read_tokens"))
+    cache_creation_tokens = _integer(llm.get("cache_creation_tokens"))
+    input_tokens = prompt_tokens + cache_read_tokens + cache_creation_tokens
+    output_tokens = completion_tokens
+    total_tokens = _integer(llm.get("total_tokens")) or (input_tokens + output_tokens)
+
+    models_used = sorted(model_usage.keys())
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "session_id_hash": _hash_identifier(session_id, salt),
+        "user_id_hash": _hash_identifier(user_id, salt),
+        "user_plan": _normalize_plan(session.get("user_plan")),
+        "session_start_time": session.get("session_start_time"),
+        "session_end_time": session.get("session_end_time"),
+        "active_dates": active_dates,
+        "active_hours": active_hours,
+        "turns": sum(1 for msg in messages if msg.get("role") == "user"),
+        "status": _session_status(events),
+        "models_used_json": _json_dumps(models_used),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        **jobs,
+        **sandboxes,
+        **artifacts,
+        **usage,
+        "model_usage_json": _json_dumps(model_usage),
+    }
+
+
+def _fact_active_in_hour(fact: dict[str, Any], hour_key: str) -> bool:
+    return hour_key in (fact.get("active_hours") or [])
+
+
+def _fact_active_in_day(fact: dict[str, Any], day_key: str) -> bool:
+    return day_key in (fact.get("active_dates") or [])
+
+
+def _fact_active_in_month(fact: dict[str, Any], month_key: str) -> bool:
+    return any(
+        str(day).startswith(f"{month_key}-") for day in fact.get("active_dates") or []
+    )
+
+
+def _avg(values: list[float]) -> float:
+    return round(sum(values) / len(values), 6) if values else 0.0
+
+
+def _stats(prefix: str, values: list[float]) -> dict[str, float]:
+    if not values:
+        return {
+            f"{prefix}_min": 0.0,
+            f"{prefix}_max": 0.0,
+            f"{prefix}_avg": 0.0,
+        }
+    return {
+        f"{prefix}_min": round(min(values), 6),
+        f"{prefix}_max": round(max(values), 6),
+        f"{prefix}_avg": _avg(values),
+    }
+
+
+def _latest_plan_counts(facts: list[dict[str, Any]]) -> dict[str, int]:
+    latest: dict[str, tuple[datetime, str]] = {}
+    for fact in facts:
+        user_hash = fact.get("user_id_hash")
+        if not user_hash:
+            continue
+        ts = _parse_ts(fact.get("session_end_time")) or _parse_ts(
+            fact.get("session_start_time")
+        )
+        if ts is None:
+            ts = datetime.min.replace(tzinfo=timezone.utc)
+        plan = _normalize_plan(fact.get("user_plan"))
+        previous = latest.get(user_hash)
+        if previous is None or ts >= previous[0]:
+            latest[user_hash] = (ts, plan)
+    counter = Counter(plan for _, plan in latest.values())
+    return {
+        "free_users": int(counter.get("free", 0)),
+        "pro_users": int(counter.get("pro", 0)),
+        "unknown_plan_users": int(counter.get("unknown", 0)),
+    }
+
+
+def _merge_model_usage(facts: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    merged: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "sessions": 0,
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+    sessions_by_model: dict[str, set[str]] = defaultdict(set)
+    for fact in facts:
+        session_hash = str(fact.get("session_id_hash") or "")
+        usage = _as_dict(fact.get("model_usage_json"))
+        for model, raw_values in usage.items():
+            values = _as_dict(raw_values)
+            if session_hash:
+                sessions_by_model[str(model)].add(session_hash)
+            merged[str(model)]["calls"] += _integer(values.get("calls"))
+            merged[str(model)]["input_tokens"] += _integer(values.get("input_tokens"))
+            merged[str(model)]["output_tokens"] += _integer(values.get("output_tokens"))
+            merged[str(model)]["total_tokens"] += _integer(values.get("total_tokens"))
+    for model, sessions in sessions_by_model.items():
+        merged[model]["sessions"] = len(sessions)
+    return dict(sorted((model, dict(values)) for model, values in merged.items()))
+
+
+def _rollup(facts: list[dict[str, Any]], bucket: str) -> dict[str, Any]:
+    facts = list(facts)
+    unique_users = {
+        fact.get("user_id_hash") for fact in facts if fact.get("user_id_hash")
+    }
+    unique_sessions = {
+        fact.get("session_id_hash") for fact in facts if fact.get("session_id_hash")
+    }
+    status_counts = Counter(str(fact.get("status") or "unknown") for fact in facts)
+    plan_counts = _latest_plan_counts(facts)
+    model_usage = _merge_model_usage(facts)
+
+    row: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "bucket": bucket,
+        "active_users": len(unique_users),
+        "active_sessions": len(unique_sessions),
+        **plan_counts,
+        "completed_sessions": int(status_counts.get("completed", 0)),
+        "failed_sessions": int(status_counts.get("failed", 0)),
+        "cancelled_sessions": int(status_counts.get("cancelled", 0)),
+        "unknown_status_sessions": int(status_counts.get("unknown", 0)),
+    }
+
+    stat_fields = [
+        "turns",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "usage_total_usd",
+        "usage_inference_providers_usd",
+        "usage_hf_jobs_usd",
+        "usage_sandboxes_usd",
+    ]
+    for field in stat_fields:
+        row.update(_stats(field, [_number(fact.get(field)) for fact in facts]))
+
+    sum_fields = [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+        "hf_jobs_submitted",
+        "hf_jobs_completed",
+        "hf_jobs_failed",
+        "hf_jobs_cancelled",
+        "sandboxes_created",
+        "sandboxes_cpu",
+        "sandboxes_gpu",
+        "hub_models_created",
+        "hub_datasets_created",
+        "hub_spaces_created",
+        "hub_non_sandbox_spaces_created",
+        "usage_total_usd",
+        "usage_inference_providers_usd",
+        "usage_hf_jobs_usd",
+        "usage_sandboxes_usd",
+    ]
+    for field in sum_fields:
+        total = sum(_number(fact.get(field)) for fact in facts)
+        if field.endswith("_usd"):
+            row[f"total_{field}"] = round(total, 6)
+        else:
+            row[f"total_{field}"] = int(total)
+
+    row["model_usage_json"] = _json_dumps(model_usage)
+    return row
+
+
+def _hourly_rollup(facts: list[dict[str, Any]], hour_key: str) -> dict[str, Any]:
+    return _rollup(
+        [fact for fact in facts if _fact_active_in_hour(fact, hour_key)], hour_key
+    )
+
+
+def _daily_rollup(facts: list[dict[str, Any]], day_key: str) -> dict[str, Any]:
+    return _rollup(
+        [fact for fact in facts if _fact_active_in_day(fact, day_key)], day_key
+    )
+
+
+def _monthly_rollup(facts: list[dict[str, Any]], month_key: str) -> dict[str, Any]:
+    return _rollup(
+        [fact for fact in facts if _fact_active_in_month(fact, month_key)],
+        month_key,
+    )
+
+
+def _csv_bytes(rows: list[dict[str, Any]]) -> bytes:
+    if not rows:
+        return b""
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return buf.getvalue().encode("utf-8")
+
+
+def _jsonl_bytes(rows: list[dict[str, Any]]) -> bytes:
+    return b"".join(
+        json.dumps(row, sort_keys=True).encode("utf-8") + b"\n"
+        for row in sorted(rows, key=lambda item: str(item.get("session_id_hash") or ""))
+    )
+
+
+def _upload_bytes(
+    api: Any,
+    *,
+    repo_id: str,
+    token: str,
+    path_in_repo: str,
+    content: bytes,
+    commit_message: str,
+) -> None:
+    try:
+        api.create_repo(
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=token,
+            private=False,
+            exist_ok=True,
+        )
+    except Exception as e:
+        logger.debug("create_repo(%s) skipped: %s", repo_id, e)
+
+    with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    try:
+        api.upload_file(
+            path_or_fileobj=tmp_path,
+            path_in_repo=path_in_repo,
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=token,
+            commit_message=commit_message,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _write_csv(
+    api: Any,
+    *,
+    repo_id: str,
+    token: str,
+    path_in_repo: str,
+    row: dict[str, Any],
+) -> None:
+    _upload_bytes(
+        api,
+        repo_id=repo_id,
+        token=token,
+        path_in_repo=path_in_repo,
+        content=_csv_bytes([row]),
+        commit_message=f"Update KPI v2 {path_in_repo}",
+    )
+
+
+def _fact_start_day(fact: dict[str, Any]) -> str:
+    start_ts = _parse_ts(fact.get("session_start_time"))
+    if start_ts:
+        return _date_key(start_ts)
+    return str((fact.get("active_dates") or ["unknown"])[0])
+
+
+def _write_session_facts(
+    api: Any,
+    *,
+    repo_id: str,
+    token: str,
+    facts: list[dict[str, Any]],
+) -> None:
+    by_start_day: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for fact in facts:
+        by_start_day[_fact_start_day(fact)].append(fact)
+
+    for day_key, day_facts in by_start_day.items():
+        _upload_bytes(
+            api,
+            repo_id=repo_id,
+            token=token,
+            path_in_repo=f"{V2_PREFIX}/session_facts/{day_key}.jsonl",
+            content=_jsonl_bytes(day_facts),
+            commit_message=f"Update KPI v2 session facts {day_key}",
+        )
+
+
+def _iter_session_files(api: Any, repo_id: str, day: date, token: str) -> Iterable[str]:
     prefix = f"sessions/{day.isoformat()}/"
     try:
         files = api.list_repo_files(repo_id=repo_id, repo_type="dataset", token=token)
     except Exception as e:
         logger.warning("list_repo_files(%s) failed: %s", repo_id, e)
         return []
-    return [f for f in files if f.startswith(prefix) and f.endswith(".jsonl")]
+    return [
+        path for path in files if path.startswith(prefix) and path.endswith(".jsonl")
+    ]
 
 
-def _download_session(repo_id: str, path: str, token: str) -> dict | None:
-    """Fetch one session JSONL and decode its single row.
-
-    ``hf_hub_download`` caches; second run within the same process / runner
-    directory is near-free.
-    """
+def _download_session(repo_id: str, path: str, token: str) -> dict[str, Any] | None:
     from huggingface_hub import hf_hub_download
 
     try:
@@ -182,586 +801,308 @@ def _download_session(repo_id: str, path: str, token: str) -> dict | None:
     except Exception as e:
         logger.warning("hf_hub_download(%s) failed: %s", path, e)
         return None
+
     try:
         with open(local, "r") as f:
             line = f.readline().strip()
         if not line:
             return None
         row = json.loads(line)
-        # Session uploader stores messages/events as JSON strings — unpack.
-        for key in ("messages", "events", "tools"):
-            v = row.get(key)
-            if isinstance(v, str):
+        for key in ("messages", "events", "tools", "usage_metrics"):
+            value = row.get(key)
+            if isinstance(value, str):
                 try:
-                    row[key] = json.loads(v)
-                except Exception:
-                    row[key] = []
+                    row[key] = json.loads(value)
+                except (TypeError, json.JSONDecodeError):
+                    row[key] = [] if key in {"messages", "events", "tools"} else {}
         return row
     except Exception as e:
         logger.warning("parse(%s) failed: %s", path, e)
         return None
 
 
-def _filter_session_to_window(
-    session: dict,
-    start: datetime,
-    end: datetime,
-) -> dict | None:
-    """Return a copy of ``session`` whose events are only those in ``[start, end)``.
-
-    ``None`` if no event falls in the window — the caller drops the session
-    from this hour's aggregate.
-    """
-    events = session.get("events") or []
-    in_window = []
-    for ev in events:
-        ts = _parse_ts(ev.get("timestamp"))
-        if ts is None:
-            continue
-        if start <= ts < end:
-            in_window.append(ev)
-    if not in_window:
-        return None
-    return {**session, "events": in_window}
-
-
-def _session_metrics(session: dict) -> dict:
-    """Reduce a single session trajectory to its KPI contributions.
-
-    Assumes ``events`` are already filtered to the target window by the caller.
-    """
-    # Pre-seed every numeric key so downstream aggregation can sum without
-    # having to special-case empty sessions.
-    out: dict = {
-        "sessions": 0,
-        "turns": 0,
-        "llm_calls": 0,
-        "tokens_prompt": 0,
-        "tokens_completion": 0,
-        "tokens_cache_read": 0,
-        "tokens_cache_creation": 0,
-        "cost_usd": 0.0,
-        "tool_calls_total": 0,
-        "tool_calls_success": 0,
-        "failures": 0,
-        "regenerate_sessions": 0,
-        "thumbs_up": 0,
-        "thumbs_down": 0,
-        "hf_jobs_submitted": 0,
-        "hf_jobs_succeeded": 0,
-        "hf_jobs_blocked": 0,
-        "pro_cta_clicks": 0,
-        "pro_conversions": 0,
-        "credits_topped_up": 0,
-        "sandboxes_created": 0,
-        "sandboxes_cpu": 0,
-        "sandboxes_gpu": 0,
-        "first_tool_s": -1,
-    }
-    events = session.get("events") or []
-    messages = session.get("messages") or []
-
-    turn_count = sum(1 for m in messages if m.get("role") == "user")
-    out["turns"] = turn_count
-    out["sessions"] = 1
-
-    tool_success = 0
-    tool_total = 0
-    had_error = False
-    had_undo = False
-    first_tool_ts = None
-    session_start = session.get("session_start_time")
-    gpu_hours_by_flavor: dict[str, float] = defaultdict(float)
-    jobs_submitted = 0
-    jobs_succeeded = 0
-    thumbs_up = 0
-    thumbs_down = 0
-    sandboxes_created = 0
-    sandboxes_cpu = 0
-    sandboxes_gpu = 0
-    jobs_blocked = 0
-    pro_cta_clicks = 0
-    pro_conversions = 0
-    credits_topped_up = 0
-    pro_cta_by_source: dict[str, int] = defaultdict(int)
-    # Per-tool counters from tool_call events. Counted off tool_call (which
-    # carries data["tool"]) rather than tool_output (which only carries
-    # success/output) so we can attribute calls to specific tools.
-    tool_calls_by_name: dict[str, int] = defaultdict(int)
-    total_named_tool_calls = 0
-
-    start_dt = _parse_ts(session_start)
-
-    for ev in events:
-        et = ev.get("event_type")
-        data = ev.get("data") or {}
-        ts = _parse_ts(ev.get("timestamp"))
-
-        if et == "llm_call":
-            out["llm_calls"] += 1
-            out["tokens_prompt"] += int(data.get("prompt_tokens") or 0)
-            out["tokens_completion"] += int(data.get("completion_tokens") or 0)
-            out["tokens_cache_read"] += int(data.get("cache_read_tokens") or 0)
-            out["tokens_cache_creation"] += int(data.get("cache_creation_tokens") or 0)
-            out["cost_usd"] += float(data.get("cost_usd") or 0.0)
-
-        elif et == "tool_output":
-            tool_total += 1
-            if data.get("success"):
-                tool_success += 1
-            if first_tool_ts is None and ts is not None and start_dt is not None:
-                first_tool_ts = (ts - start_dt).total_seconds()
-
-        elif et == "tool_call":
-            name = data.get("tool")
-            if name:
-                tool_calls_by_name[name] += 1
-                total_named_tool_calls += 1
-            if first_tool_ts is None and ts is not None and start_dt is not None:
-                first_tool_ts = (ts - start_dt).total_seconds()
-
-        elif et == "error":
-            had_error = True
-
-        elif et == "undo_complete":
-            had_undo = True
-
-        elif et == "feedback":
-            rating = data.get("rating")
-            if rating == "up":
-                thumbs_up += 1
-            elif rating == "down":
-                thumbs_down += 1
-
-        elif et == "hf_job_submit":
-            jobs_submitted += 1
-
-        elif et == "hf_job_complete":
-            flavor = data.get("flavor") or "unknown"
-            status = (data.get("final_status") or "").lower()
-            wall = float(data.get("wall_time_s") or 0.0)
-            gpus = _FLAVOR_GPU_COUNT.get(flavor, 0)
-            gpu_hours_by_flavor[flavor] += wall * gpus / 3600.0
-            if status in ("completed", "succeeded", "success"):
-                jobs_succeeded += 1
-
-        elif et == "jobs_access_blocked":
-            jobs_blocked += 1
-
-        elif et == "pro_cta_click":
-            pro_cta_clicks += 1
-            source = str(data.get("source") or "unknown")
-            pro_cta_by_source[source] += 1
-
-        elif et == "pro_conversion":
-            pro_conversions += 1
-
-        elif et == "credits_topped_up":
-            credits_topped_up += 1
-
-        elif et == "sandbox_create":
-            sandboxes_created += 1
-            hardware = (data.get("hardware") or "").lower()
-            # CPU flavors are explicitly named "cpu-*". Everything else
-            # (including unknown/missing hardware strings) lands in the GPU
-            # bucket, since the auto-create default is "cpu-basic" which is
-            # matched here — anything that isn't is almost always an explicit
-            # GPU choice.
-            if hardware.startswith("cpu-"):
-                sandboxes_cpu += 1
-            else:
-                sandboxes_gpu += 1
-
-    out["tool_calls_total"] = tool_total
-    out["tool_calls_success"] = tool_success
-    out["failures"] = 1 if had_error else 0
-    out["regenerate_sessions"] = 1 if had_undo else 0
-    out["thumbs_up"] = thumbs_up
-    out["thumbs_down"] = thumbs_down
-    out["hf_jobs_submitted"] = jobs_submitted
-    out["hf_jobs_succeeded"] = jobs_succeeded
-    out["sandboxes_created"] = sandboxes_created
-    out["sandboxes_cpu"] = sandboxes_cpu
-    out["sandboxes_gpu"] = sandboxes_gpu
-    out["hf_jobs_blocked"] = jobs_blocked
-    out["pro_cta_clicks"] = pro_cta_clicks
-    out["pro_conversions"] = pro_conversions
-    out["credits_topped_up"] = credits_topped_up
-    out["first_tool_s"] = first_tool_ts if first_tool_ts is not None else -1
-    out["_gpu_hours_by_flavor"] = dict(gpu_hours_by_flavor)
-    out["_pro_cta_by_source"] = dict(pro_cta_by_source)
-    out["_user"] = session.get("user_id") or session.get("session_id")
-    # Intra-session tool fields. Underscore-prefixed = consumed by _aggregate
-    # only, never written to CSV directly.
-    out["_tool_calls_by_name"] = dict(tool_calls_by_name)
-    out["_research_calls"] = tool_calls_by_name.get("research", 0)
-    out["_distinct_tools_used"] = len(tool_calls_by_name)
-    out["_total_named_tool_calls"] = total_named_tool_calls
-    out["_model_name"] = session.get("model_name") or "unknown"
-    return dict(out)
-
-
-def _aggregate(per_session: list[dict]) -> dict:
-    """Collapse a bucket's worth of session rollups into the final KPI row."""
-    ttfa_values = [
-        s["first_tool_s"] for s in per_session if s.get("first_tool_s", -1) >= 0
-    ]
-    gpu_hours: dict[str, float] = defaultdict(float)
-    for s in per_session:
-        for f, h in (s.get("_gpu_hours_by_flavor") or {}).items():
-            gpu_hours[f] += h
-
-    # Per-tool aggregates. ``sessions_using_tool`` counts each session at most
-    # once per tool, so the dashboard can show "how many sessions reached for
-    # research" alongside "how many research calls overall".
-    tool_calls_by_name: dict[str, int] = defaultdict(int)
-    sessions_using_tool: dict[str, int] = defaultdict(int)
-    sessions_by_model: dict[str, int] = defaultdict(int)
-    for s in per_session:
-        for name, count in (s.get("_tool_calls_by_name") or {}).items():
-            tool_calls_by_name[name] += int(count)
-            sessions_using_tool[name] += 1
-        sessions_by_model[s.get("_model_name") or "unknown"] += 1
-
-    # Percentile inputs. All "per session" percentiles exclude sessions that
-    # never reached for the relevant signal — otherwise quiet hours
-    # (status-check sessions, abandoned new conversations) drag every median
-    # to 0 and the chart tells you nothing.
-    research_calls_nz = [
-        s.get("_research_calls", 0)
-        for s in per_session
-        if s.get("_research_calls", 0) > 0
-    ]
-    distinct_tools_values = [
-        s.get("_distinct_tools_used", 0)
-        for s in per_session
-        if s.get("_distinct_tools_used", 0) > 0
-    ]
-    total_calls_values = [
-        s.get("_total_named_tool_calls", 0)
-        for s in per_session
-        if s.get("_total_named_tool_calls", 0) > 0
-    ]
-    # Per-turn intensity: turns>0 is the natural filter here (a session with
-    # 5 turns and 0 tools is a meaningful 0). Don't strip those.
-    calls_per_turn_values = [
-        s.get("_total_named_tool_calls", 0) / s["turns"]
-        for s in per_session
-        if s.get("turns", 0) > 0
-    ]
-
-    total_sessions = sum(s["sessions"] for s in per_session)
-    total_turns = sum(s["turns"] for s in per_session)
-    tokens_prompt = sum(s["tokens_prompt"] for s in per_session)
-    tokens_cache_read = sum(s["tokens_cache_read"] for s in per_session)
-    tool_total = sum(s["tool_calls_total"] for s in per_session)
-    tool_success = sum(s["tool_calls_success"] for s in per_session)
-    failures = int(sum(s["failures"] for s in per_session))
-    regenerates = int(sum(s["regenerate_sessions"] for s in per_session))
-    research_calls_total = int(sum(s.get("_research_calls", 0) for s in per_session))
-    sessions_with_research = sum(
-        1 for s in per_session if s.get("_research_calls", 0) > 0
-    )
-
-    # Per-session cost percentiles — chart "median session cost" alongside the
-    # mean so a few $700 outliers don't make you think every session is pricey.
-    session_costs = [float(s.get("cost_usd") or 0.0) for s in per_session]
-    cost_p50 = _percentile(session_costs, 0.5)
-    cost_p95 = _percentile(session_costs, 0.95)
-
-    unique_users = {s.get("_user") for s in per_session if s.get("_user")}
-
-    return {
-        "sessions": total_sessions,
-        "users": len(unique_users),
-        "turns": total_turns,
-        "llm_calls": int(sum(s["llm_calls"] for s in per_session)),
-        "tokens_prompt": int(tokens_prompt),
-        "tokens_completion": int(sum(s["tokens_completion"] for s in per_session)),
-        "tokens_cache_read": int(tokens_cache_read),
-        "tokens_cache_creation": int(
-            sum(s["tokens_cache_creation"] for s in per_session)
-        ),
-        "cost_usd": round(sum(s["cost_usd"] for s in per_session), 4),
-        # Per-session cost summaries.
-        "cost_per_session_mean": round(
-            sum(s["cost_usd"] for s in per_session) / total_sessions, 6
-        )
-        if total_sessions > 0
-        else 0.0,
-        "cost_per_session_p50": round(cost_p50, 6),
-        "cost_per_session_p95": round(cost_p95, 6),
-        "cache_hit_ratio": round(
-            tokens_cache_read / (tokens_cache_read + tokens_prompt), 4
-        )
-        if (tokens_cache_read + tokens_prompt) > 0
-        else 0.0,
-        # Raw reliability COUNTS (these are what the dashboard shows directly).
-        "tool_calls_total": int(tool_total),
-        "tool_calls_succeeded": int(tool_success),
-        "tool_calls_failed": int(tool_total - tool_success),
-        "errored_sessions": failures,
-        # Successful = "did not raise an error event". Mutually exclusive
-        # with errored_sessions; sums with errored_sessions to total sessions.
-        "successful_sessions": int(total_sessions - failures),
-        # Regenerated is an orthogonal dimension (the user retried) — a
-        # session can be both successful and regenerated, or both errored
-        # and regenerated.
-        "regenerated_sessions": regenerates,
-        # Rates kept for backwards compatibility with anything reading the
-        # KPI dataset directly.
-        "tool_success_rate": round(tool_success / tool_total, 4)
-        if tool_total > 0
-        else 0.0,
-        "failure_rate": round(failures / total_sessions, 4)
-        if total_sessions > 0
-        else 0.0,
-        "regenerate_rate": round(regenerates / total_sessions, 4)
-        if total_sessions > 0
-        else 0.0,
-        "time_to_first_action_s_p50": round(_percentile(ttfa_values, 0.5), 2),
-        "time_to_first_action_s_p95": round(_percentile(ttfa_values, 0.95), 2),
-        "thumbs_up": int(sum(s["thumbs_up"] for s in per_session)),
-        "thumbs_down": int(sum(s["thumbs_down"] for s in per_session)),
-        "hf_jobs_submitted": int(sum(s["hf_jobs_submitted"] for s in per_session)),
-        "hf_jobs_succeeded": int(sum(s["hf_jobs_succeeded"] for s in per_session)),
-        "sandboxes_created": int(
-            sum(s.get("sandboxes_created", 0) for s in per_session)
-        ),
-        "sandboxes_cpu": int(sum(s.get("sandboxes_cpu", 0) for s in per_session)),
-        "sandboxes_gpu": int(sum(s.get("sandboxes_gpu", 0) for s in per_session)),
-        "hf_jobs_blocked": int(sum(s.get("hf_jobs_blocked", 0) for s in per_session)),
-        "pro_cta_clicks": int(sum(s.get("pro_cta_clicks", 0) for s in per_session)),
-        "pro_conversions": int(sum(s.get("pro_conversions", 0) for s in per_session)),
-        "credits_topped_up": int(
-            sum(s.get("credits_topped_up", 0) for s in per_session)
-        ),
-        "gpu_hours_by_flavor_json": json.dumps(dict(gpu_hours), sort_keys=True),
-        # Research KPIs — answer "is the agent reaching for research?".
-        "research_calls": research_calls_total,
-        "sessions_with_research": int(sessions_with_research),
-        "research_calls_per_session_p50": round(_percentile(research_calls_nz, 0.5), 2),
-        "research_calls_per_session_p95": round(
-            _percentile(research_calls_nz, 0.95), 2
-        ),
-        # Intra-session breadth + intensity. p50 + p95 over per-session values.
-        "distinct_tools_per_session_p50": round(
-            _percentile(distinct_tools_values, 0.5), 2
-        ),
-        "distinct_tools_per_session_p95": round(
-            _percentile(distinct_tools_values, 0.95), 2
-        ),
-        "tool_calls_per_session_p50": round(_percentile(total_calls_values, 0.5), 2),
-        "tool_calls_per_session_p95": round(_percentile(total_calls_values, 0.95), 2),
-        "tool_calls_per_turn_p50": round(_percentile(calls_per_turn_values, 0.5), 2),
-        "tool_calls_per_turn_p95": round(_percentile(calls_per_turn_values, 0.95), 2),
-        # JSON columns let the dashboard add/remove tools without schema churn.
-        "tool_calls_by_name_json": json.dumps(dict(tool_calls_by_name), sort_keys=True),
-        "sessions_using_tool_json": json.dumps(
-            dict(sessions_using_tool), sort_keys=True
-        ),
-        # Surface split by selected model for dashboard drilldowns.
-        "sessions_by_model_json": json.dumps(dict(sessions_by_model), sort_keys=True),
-    }
-
-
-# Back-compat alias: older tests call _aggregate_day.
-_aggregate_day = _aggregate
-
-
-def _csv_cell(v: Any) -> str:
-    s = str(v)
-    if "," in s or '"' in s or "\n" in s:
-        return '"' + s.replace('"', '""') + '"'
-    return s
-
-
-def _write_csv(
-    api,
-    row: dict,
-    bucket_key: str,
-    path_in_repo: str,
-    target_repo: str,
+def _sessions_for_start_dates(
+    api: Any,
+    source_repo: str,
+    dates: Iterable[date],
     token: str,
-) -> None:
-    """Render ``row`` to CSV with a leading ``bucket`` column and upload.
+) -> list[dict[str, Any]]:
+    sessions: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for day in sorted(set(dates)):
+        for path in _iter_session_files(api, source_repo, day, token):
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            session = _download_session(source_repo, path, token)
+            if session:
+                sessions.append(session)
+    return sessions
 
-    ``bucket_key`` is the hour string (ISO ``YYYY-MM-DDTHH``) or date string;
-    written as the ``bucket`` column so downstream consumers can union all
-    CSVs without date-parsing paths. ``api`` is the caller's ``HfApi``
-    instance — reused so we don't spin up a fresh one per CSV.
-    """
-    columns = list(row.keys())
-    buf = io.StringIO()
-    buf.write(",".join(["bucket", *columns]) + "\n")
-    buf.write(",".join([bucket_key, *[_csv_cell(row[c]) for c in columns]]) + "\n")
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
-        tmp.write(buf.getvalue())
-        tmp_path = tmp.name
+def _facts_for_start_dates(
+    api: Any,
+    source_repo: str,
+    dates: Iterable[date],
+    token: str,
+    salt: str,
+) -> list[dict[str, Any]]:
+    return [
+        _session_fact(session, salt=salt)
+        for session in _sessions_for_start_dates(api, source_repo, dates, token)
+    ]
 
-    try:
-        api.create_repo(
-            repo_id=target_repo,
-            repo_type="dataset",
-            exist_ok=True,
-            token=token,
-        )
-        api.upload_file(
-            path_or_fileobj=tmp_path,
-            path_in_repo=path_in_repo,
-            repo_id=target_repo,
-            repo_type="dataset",
-            token=token,
-            commit_message=f"KPIs for {bucket_key}",
-        )
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+
+def _daily_start_dates(day: date) -> list[date]:
+    # Rollups read the target day and the previous start-date partition to
+    # include normal midnight-spanning sessions. Sessions active for more than
+    # one day before this window are not included; ML Intern sessions are
+    # expected to be short-lived.
+    return [day - timedelta(days=1), day]
+
+
+def _month_start_dates(month_key: str, through_day: date | None = None) -> list[date]:
+    year, month = (int(part) for part in month_key.split("-", 1))
+    last_day = calendar.monthrange(year, month)[1]
+    start = date(year, month, 1)
+    end = date(year, month, last_day)
+    if through_day is not None and through_day.strftime("%Y-%m") == month_key:
+        end = min(end, through_day)
+    dates = []
+    # Include the previous day to catch ordinary sessions that started before
+    # midnight on the first of the month and remained active after it.
+    current = start - timedelta(days=1)
+    while current <= end:
+        dates.append(current)
+        current += timedelta(days=1)
+    return dates
+
+
+def _write_daily_rollup(
+    api: Any,
+    *,
+    source_repo: str,
+    target_repo: str,
+    day: date,
+    token: str,
+    salt: str,
+) -> dict[str, Any]:
+    facts = _facts_for_start_dates(
+        api, source_repo, _daily_start_dates(day), token, salt
+    )
+    row = _daily_rollup(facts, day.isoformat())
+    _write_csv(
+        api,
+        repo_id=target_repo,
+        token=token,
+        path_in_repo=f"{V2_PREFIX}/daily/{day.isoformat()}.csv",
+        row=row,
+    )
+    return row
+
+
+def _write_monthly_rollup(
+    api: Any,
+    *,
+    source_repo: str,
+    target_repo: str,
+    month_key: str,
+    token: str,
+    salt: str,
+    through_day: date | None = None,
+) -> dict[str, Any]:
+    facts = _facts_for_start_dates(
+        api,
+        source_repo,
+        _month_start_dates(month_key, through_day=through_day),
+        token,
+        salt,
+    )
+    row = _monthly_rollup(facts, month_key)
+    _write_csv(
+        api,
+        repo_id=target_repo,
+        token=token,
+        path_in_repo=f"{V2_PREFIX}/monthly/{month_key}.csv",
+        row=row,
+    )
+    return row
 
 
 def run_for_hour(
-    api,
+    api: Any,
+    *,
     source_repo: str,
     target_repo: str,
     hour_dt: datetime,
     token: str,
-) -> dict:
-    """Roll up one UTC hour [hour_dt, hour_dt+1h).
-
-    Reads today's + yesterday's session folders so sessions that crossed
-    midnight land in the right hourly bucket.
-    """
-    if hour_dt.tzinfo is None:
-        hour_dt = hour_dt.replace(tzinfo=timezone.utc)
-    window_start = hour_dt.replace(minute=0, second=0, microsecond=0)
-    window_end = window_start + timedelta(hours=1)
-
-    # Sessions partition by session_start_time date. A session that started
-    # at 23:50 yesterday can still emit events in today's first hours, so we
-    # look at both folders.
-    candidate_dates = {window_start.date(), (window_start - timedelta(days=1)).date()}
-
-    per_session: list[dict] = []
-    for d in sorted(candidate_dates):
-        for path in _iter_session_files(api, source_repo, d, token):
-            sess = _download_session(source_repo, path, token)
-            if not sess:
-                continue
-            windowed = _filter_session_to_window(sess, window_start, window_end)
-            if windowed is None:
-                continue
-            per_session.append(_session_metrics(windowed))
-
-    if not per_session:
-        logger.info("No sessions in window %s — skipping", window_start.isoformat())
-        return {}
-
-    row = _aggregate(per_session)
-    bucket_key = window_start.strftime("%Y-%m-%dT%H")
-    path_in_repo = (
-        f"hourly/{window_start.strftime('%Y-%m-%d')}/{window_start.strftime('%H')}.csv"
+    salt: str | None = None,
+) -> dict[str, Any]:
+    salt = _require_hash_salt(salt)
+    hour_dt = hour_dt.astimezone(timezone.utc).replace(
+        minute=0, second=0, microsecond=0
     )
-    _write_csv(api, row, bucket_key, path_in_repo, target_repo, token)
-    logger.info(
-        "Wrote KPIs for %s (%d sessions): %s",
-        bucket_key,
-        per_session and len(per_session),
-        row,
+    day = hour_dt.date()
+    facts = _facts_for_start_dates(
+        api,
+        source_repo,
+        _daily_start_dates(day),
+        token,
+        salt,
+    )
+    current_day = day.isoformat()
+    _write_session_facts(
+        api,
+        repo_id=target_repo,
+        token=token,
+        facts=[fact for fact in facts if _fact_start_day(fact) == current_day],
+    )
+
+    hour = _hour_key(hour_dt)
+    row = _hourly_rollup(facts, hour)
+    _write_csv(
+        api,
+        repo_id=target_repo,
+        token=token,
+        path_in_repo=f"{V2_PREFIX}/hourly/{day.isoformat()}/{hour_dt:%H}.csv",
+        row=row,
+    )
+
+    _write_daily_rollup(
+        api,
+        source_repo=source_repo,
+        target_repo=target_repo,
+        day=day,
+        token=token,
+        salt=salt,
+    )
+    _write_monthly_rollup(
+        api,
+        source_repo=source_repo,
+        target_repo=target_repo,
+        month_key=day.strftime("%Y-%m"),
+        token=token,
+        salt=salt,
+        through_day=day,
     )
     return row
 
 
-# Back-compat for daily backfills — unchanged behaviour.
-def run_for_day(api, source_repo: str, target_repo: str, day: date, token: str) -> dict:
-    paths = _iter_session_files(api, source_repo, day, token)
-    per_session: list[dict] = []
-    for path in paths:
-        sess = _download_session(source_repo, path, token)
-        if not sess:
-            continue
-        per_session.append(_session_metrics(sess))
-    if not per_session:
-        logger.info("No sessions found for %s — skipping", day)
-        return {}
-    row = _aggregate(per_session)
-    path_in_repo = f"daily/{day.isoformat()}.csv"
-    _write_csv(api, row, day.isoformat(), path_in_repo, target_repo, token)
+def run_for_day(
+    api: Any,
+    *,
+    source_repo: str,
+    target_repo: str,
+    day: date,
+    token: str,
+    salt: str | None = None,
+) -> dict[str, Any]:
+    salt = _require_hash_salt(salt)
+    row = _write_daily_rollup(
+        api,
+        source_repo=source_repo,
+        target_repo=target_repo,
+        day=day,
+        token=token,
+        salt=salt,
+    )
+    _write_monthly_rollup(
+        api,
+        source_repo=source_repo,
+        target_repo=target_repo,
+        month_key=day.strftime("%Y-%m"),
+        token=token,
+        salt=salt,
+        through_day=day,
+    )
     return row
 
 
-def _parse_hour_arg(s: str) -> datetime:
-    """Accept ``YYYY-MM-DDTHH`` or full ISO — always pinned to the start of the hour, UTC."""
-    dt = datetime.fromisoformat(s)
+def _parse_hour(value: str) -> datetime:
+    if len(value) == 13:
+        value = value + ":00:00"
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.replace(minute=0, second=0, microsecond=0)
+    return dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--source", default="smolagents/ml-intern-sessions")
-    ap.add_argument("--target", default="smolagents/ml-intern-kpis")
-    ap.add_argument(
-        "--hours",
-        type=int,
-        default=1,
-        help="Number of trailing hours to roll up (default: 1 = last completed hour).",
+    parser = argparse.ArgumentParser(description="Build KPI dataset v2 rollups")
+    parser.add_argument("--source-repo", default="smolagents/ml-intern-sessions")
+    parser.add_argument("--target-repo", default="smolagents/ml-intern-kpis")
+    parser.add_argument(
+        "--hours", type=int, default=1, help="Number of completed hours to build"
     )
-    ap.add_argument(
-        "--datetime",
-        type=str,
-        default=None,
-        help="Single hour, ISO ``YYYY-MM-DDTHH`` (UTC); overrides --hours.",
-    )
-    ap.add_argument(
+    parser.add_argument("--datetime", help="Explicit UTC hour, e.g. 2026-04-24T14")
+    parser.add_argument(
         "--daily-backfill",
-        type=str,
-        default=None,
-        help="Escape hatch: aggregate a whole day at once (YYYY-MM-DD). "
-        "Writes to daily/<date>.csv. Use for historical backfill only.",
+        type=int,
+        default=0,
+        help="Backfill N UTC days ending yesterday",
     )
-    args = ap.parse_args(argv)
+    parser.add_argument("--month", help="Build one monthly rollup, e.g. 2026-06")
+    args = parser.parse_args(argv)
 
-    token = (
-        os.environ.get("HF_KPI_WRITE_TOKEN")
-        or os.environ.get("HF_SESSION_UPLOAD_TOKEN")
-        or os.environ.get("HF_TOKEN")
-        or os.environ.get("HF_ADMIN_TOKEN")
-    )
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    token = os.environ.get("HF_KPI_WRITE_TOKEN") or os.environ.get("HF_TOKEN")
     if not token:
-        logger.error(
-            "No HF token found. Set one of: HF_KPI_WRITE_TOKEN, "
-            "HF_SESSION_UPLOAD_TOKEN, HF_TOKEN, HF_ADMIN_TOKEN."
-        )
-        return 1
+        logger.error("HF_KPI_WRITE_TOKEN or HF_TOKEN is required")
+        return 2
+    try:
+        salt = _require_hash_salt()
+    except RuntimeError as e:
+        logger.error("%s", e)
+        return 2
 
     from huggingface_hub import HfApi
 
     api = HfApi()
-
-    if args.daily_backfill:
-        run_for_day(
+    if args.month:
+        _write_monthly_rollup(
             api,
-            args.source,
-            args.target,
-            date.fromisoformat(args.daily_backfill),
-            token,
+            source_repo=args.source_repo,
+            target_repo=args.target_repo,
+            month_key=args.month,
+            token=token,
+            salt=salt,
         )
         return 0
 
-    if args.datetime:
-        target_hours = [_parse_hour_arg(args.datetime)]
-    else:
-        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        # Roll up *completed* hours: start from the hour before ``now``.
-        target_hours = [now - timedelta(hours=i) for i in range(1, args.hours + 1)]
+    if args.daily_backfill:
+        yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+        for offset in range(args.daily_backfill):
+            day = yesterday - timedelta(days=offset)
+            run_for_day(
+                api,
+                source_repo=args.source_repo,
+                target_repo=args.target_repo,
+                day=day,
+                token=token,
+                salt=salt,
+            )
+        return 0
 
-    for hour in target_hours:
-        run_for_hour(api, args.source, args.target, hour, token)
+    if args.datetime:
+        hours = [_parse_hour(args.datetime)]
+    else:
+        last_completed = datetime.now(timezone.utc).replace(
+            minute=0, second=0, microsecond=0
+        ) - timedelta(hours=1)
+        hours = [
+            last_completed - timedelta(hours=offset) for offset in range(args.hours)
+        ]
+
+    for hour_dt in hours:
+        run_for_hour(
+            api,
+            source_repo=args.source_repo,
+            target_repo=args.target_repo,
+            hour_dt=hour_dt,
+            token=token,
+            salt=salt,
+        )
     return 0
 
 

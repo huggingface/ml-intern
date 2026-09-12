@@ -33,6 +33,93 @@ def test_extract_usage_reads_hf_router_cache_write_tokens():
 
 
 @pytest.mark.asyncio
+async def test_record_hub_artifact_hashes_repo_id(monkeypatch):
+    monkeypatch.setenv("KPI_USER_HASH_SALT", "stable-test-salt")
+    session = FakeSession()
+
+    await telemetry.record_hub_artifact(
+        session,
+        repo_type="model",
+        repo_id="alice/private-model",
+        source="hf_repo_git",
+        private=True,
+        success=True,
+    )
+
+    event = session.events[0]
+    assert event.event_type == "hub_artifact"
+    assert event.data["repo_type"] == "model"
+    assert event.data["artifact_hash"] != "alice/private-model"
+    assert "repo_id" not in event.data
+    assert event.data["source"] == "hf_repo_git"
+    assert event.data["private"] is True
+    assert event.data["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_record_hub_artifact_keeps_sandbox_space_separate(monkeypatch):
+    monkeypatch.setenv("KPI_USER_HASH_SALT", "stable-test-salt")
+    session = FakeSession()
+
+    await telemetry.record_hub_artifact(
+        session,
+        repo_type="space",
+        repo_id="alice/ml-intern-sandbox",
+        source="hf_repo_git",
+        is_sandbox=True,
+    )
+
+    event = session.events[0]
+    assert event.event_type == "hub_artifact"
+    assert event.data["repo_type"] == "space"
+    assert event.data["is_sandbox"] is True
+    assert "repo_id" not in event.data
+
+
+@pytest.mark.asyncio
+async def test_record_hf_job_submit_sanitizes_expected_artifacts(monkeypatch):
+    monkeypatch.setenv("KPI_USER_HASH_SALT", "stable-test-salt")
+    session = FakeSession()
+
+    await telemetry.record_hf_job_submit(
+        session,
+        SimpleNamespace(id="job-1", url="https://hf.co/jobs/job-1"),
+        {
+            "hardware_flavor": "a100-large",
+            "namespace": "alice",
+            "expected_hub_artifacts": [
+                {"repo_type": "model", "repo_id": "alice/model", "private": True}
+            ],
+        },
+        image="python:3.12",
+        job_type="Python",
+    )
+
+    data = session.events[0].data
+    assert data["expected_hub_artifacts_count"] == 1
+    assert data["expected_hub_artifacts"][0]["repo_type"] == "model"
+    assert data["expected_hub_artifacts"][0]["artifact_hash"] != "alice/model"
+    assert "repo_id" not in data["expected_hub_artifacts"][0]
+
+
+@pytest.mark.asyncio
+async def test_record_hf_job_cancel_emits_terminal_cancelled():
+    session = FakeSession()
+
+    await telemetry.record_hf_job_cancel(
+        session,
+        job_id="job-cancel",
+        namespace="alice",
+    )
+
+    data = session.events[0].data
+    assert session.events[0].event_type == "hf_job_complete"
+    assert data["job_id"] == "job-cancel"
+    assert data["final_status"] == "cancelled"
+    assert data["cost_estimate_source"] == "manual_cancel"
+
+
+@pytest.mark.asyncio
 async def test_record_hf_job_complete_emits_runtime_cost(monkeypatch):
     async def fake_catalog():
         return {"a100-large": 4.0}

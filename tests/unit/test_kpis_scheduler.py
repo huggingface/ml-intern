@@ -85,10 +85,23 @@ def test_start_is_no_op_when_disabled(monkeypatch):
     assert mod._scheduler is None  # never instantiated
 
 
+def test_start_is_no_op_without_hash_salt(monkeypatch, caplog):
+    mod = _load()
+    mod._scheduler = None
+    monkeypatch.delenv("ML_INTERN_KPIS_DISABLED", raising=False)
+    monkeypatch.delenv("KPI_USER_HASH_SALT", raising=False)
+
+    mod.start()
+
+    assert mod._scheduler is None
+    assert "KPI_USER_HASH_SALT is required" in caplog.text
+
+
 def test_start_skips_cleanly_without_apscheduler(monkeypatch):
     mod = _load()
     mod._scheduler = None
     monkeypatch.delenv("ML_INTERN_KPIS_DISABLED", raising=False)
+    monkeypatch.setenv("KPI_USER_HASH_SALT", "stable-test-salt")
 
     # Force the apscheduler import to fail — start() should log and return.
     real_import = (

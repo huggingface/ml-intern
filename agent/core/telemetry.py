@@ -17,7 +17,10 @@ and never raise — telemetry is best-effort and must not break the agent.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import os
 import time
 from typing import Any
 
@@ -150,6 +153,92 @@ def _infer_push_to_hub(script_or_cmd: Any) -> bool:
     )
 
 
+def _kpi_hash_identifier(value: Any) -> str | None:
+    salt = os.environ.get("KPI_USER_HASH_SALT")
+    if not salt or value is None:
+        return None
+    raw = str(value)
+    if not raw:
+        return None
+    return hmac.new(
+        salt.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def _sanitize_expected_hub_artifacts(artifacts: Any) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    if not isinstance(artifacts, list):
+        return sanitized
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        repo_type = str(artifact.get("repo_type") or "model").strip().lower()
+        repo_id = artifact.get("repo_id")
+        if repo_type not in {"model", "dataset", "space"} or not repo_id:
+            continue
+        artifact_hash = _kpi_hash_identifier(f"{repo_type}:{repo_id}")
+        if artifact_hash is None:
+            continue
+        sanitized.append(
+            {
+                "repo_type": repo_type,
+                "artifact_hash": artifact_hash,
+                "private": artifact.get("private"),
+                "is_sandbox": bool(artifact.get("is_sandbox")),
+            }
+        )
+    return sanitized
+
+
+async def record_hub_artifact(
+    session: Any,
+    *,
+    repo_type: str,
+    repo_id: str,
+    source: str,
+    is_sandbox: bool | None = None,
+    private: bool | None = None,
+    success: bool = True,
+) -> dict[str, Any]:
+    """Emit a sanitized Hub artifact event.
+
+    The raw repo id never leaves this function. Consumers dedupe artifacts by
+    ``artifact_hash``.
+    """
+    from agent.core.session import Event
+
+    try:
+        normalized_type = str(repo_type or "").strip().lower()
+        if normalized_type not in {"model", "dataset", "space"}:
+            return {}
+        if is_sandbox is None:
+            try:
+                from agent.core.hub_artifacts import is_sandbox_hub_repo
+
+                is_sandbox = is_sandbox_hub_repo(repo_id, normalized_type)
+            except Exception:
+                is_sandbox = False
+        artifact_hash = _kpi_hash_identifier(f"{normalized_type}:{repo_id}")
+        if artifact_hash is None:
+            logger.debug(
+                "record_hub_artifact skipped because KPI_USER_HASH_SALT is unset"
+            )
+            return {}
+        payload = {
+            "repo_type": normalized_type,
+            "artifact_hash": artifact_hash,
+            "source": str(source or "unknown"),
+            "is_sandbox": bool(is_sandbox),
+            "private": private,
+            "success": bool(success),
+        }
+        await session.send_event(Event(event_type="hub_artifact", data=payload))
+        return payload
+    except Exception as e:
+        logger.debug("record_hub_artifact failed (non-fatal): %s", e)
+    return {}
+
+
 async def record_hf_job_submit(
     session: Any,
     job: Any,
@@ -165,6 +254,9 @@ async def record_hf_job_submit(
     t_start = time.monotonic()
     try:
         script_text = args.get("script") or args.get("command") or ""
+        expected_artifacts = _sanitize_expected_hub_artifacts(
+            args.get("expected_hub_artifacts")
+        )
         await session.send_event(
             Event(
                 event_type="hf_job_submit",
@@ -177,6 +269,8 @@ async def record_hf_job_submit(
                     "image": image,
                     "namespace": args.get("namespace"),
                     "push_to_hub": _infer_push_to_hub(script_text),
+                    "expected_hub_artifacts": expected_artifacts,
+                    "expected_hub_artifacts_count": len(expected_artifacts),
                 },
             )
         )
@@ -228,6 +322,34 @@ async def record_hf_job_complete(
         return payload
     except Exception as e:
         logger.debug("record_hf_job_complete failed (non-fatal): %s", e)
+    return {}
+
+
+async def record_hf_job_cancel(
+    session: Any,
+    *,
+    job_id: str,
+    namespace: str | None = None,
+    flavor: str | None = None,
+) -> dict:
+    from agent.core.session import Event
+
+    try:
+        payload = {
+            "job_id": job_id,
+            "namespace": namespace,
+            "flavor": flavor,
+            "final_status": "cancelled",
+            "wall_time_s": 0,
+            "billable_seconds_estimate": 0,
+            "price_usd_per_hour": None,
+            "estimated_cost_usd": None,
+            "cost_estimate_source": "manual_cancel",
+        }
+        await session.send_event(Event(event_type="hf_job_complete", data=payload))
+        return payload
+    except Exception as e:
+        logger.debug("record_hf_job_cancel failed (non-fatal): %s", e)
     return {}
 
 

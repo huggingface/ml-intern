@@ -659,6 +659,17 @@ async def upload_session_dataset(
             hf_username=hf_username,
             hf_token=hf_token,
         )
+        from agent.core import telemetry
+
+        await telemetry.record_hub_artifact(
+            agent_session.session,
+            repo_type=uploaded.repo_type,
+            repo_id=uploaded.repo_id,
+            source="dataset_upload",
+            is_sandbox=False,
+            private=uploaded.private,
+            success=True,
+        )
         agent_session.session.context_manager.add_message(
             Message(role="user", content=dataset_context_note(uploaded))
         )

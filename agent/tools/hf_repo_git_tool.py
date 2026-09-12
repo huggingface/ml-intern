@@ -548,6 +548,17 @@ class HfRepoGitTool:
             session=self.session,
             extra_metadata=extra_metadata,
         )
+        if self.session:
+            from agent.core import telemetry
+
+            await telemetry.record_hub_artifact(
+                self.session,
+                repo_type=repo_type,
+                repo_id=repo_id,
+                source="hf_repo_git",
+                private=private,
+                success=True,
+            )
 
         return {
             "formatted": f"**Repository created:** {repo_id}\n**Private:** {private}\n{result}",
