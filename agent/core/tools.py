@@ -119,6 +119,35 @@ class ToolSpec:
     handler: Optional[Callable[[dict[str, Any]], Awaitable[tuple[str, bool]]]] = None
 
 
+def _tool_input_schema(tool) -> dict:
+    """Read a tool's parameter schema across MCP SDK versions.
+
+    SDK v2 renamed ``inputSchema`` to ``input_schema``; the old name still
+    works but warns.
+    """
+    schema = getattr(tool, "input_schema", None)
+    if schema is None:
+        schema = tool.inputSchema
+    return schema
+
+
+async def _initialize_mcp_client(client) -> None:
+    """Complete the MCP handshake across both fastmcp protocol eras.
+
+    fastmcp < 4 needs an explicit ``initialize()``. fastmcp >= 4 negotiates on
+    connect instead, and a server speaking the modern ``server/discover`` era
+    carries no ``InitializeResult`` — asking for one raises even though the
+    connection is already live. Entering the client has done the handshake by
+    that point, so that case is success, not a failed connection.
+    """
+    try:
+        await client.initialize()
+    except RuntimeError as e:
+        if "modern protocol era" not in str(e):
+            raise
+        logger.debug("MCP server negotiated the modern protocol era on connect")
+
+
 class ToolRouter:
     """
     Routes tool calls to appropriate handlers.
@@ -166,7 +195,7 @@ class ToolRouter:
                 ToolSpec(
                     name=tool.name,
                     description=tool.description,
-                    parameters=tool.inputSchema,
+                    parameters=_tool_input_schema(tool),
                     handler=None,
                 )
             )
@@ -215,7 +244,7 @@ class ToolRouter:
         if self.mcp_client is not None:
             try:
                 await self.mcp_client.__aenter__()
-                await self.mcp_client.initialize()
+                await _initialize_mcp_client(self.mcp_client)
                 await self.register_mcp_tools()
                 self._mcp_initialized = True
             except Exception as e:

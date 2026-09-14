@@ -140,3 +140,47 @@ async def test_probe_and_switch_local_model_rejects_probe_errors(monkeypatch):
     assert config.model_name == "anthropic/claude-opus-4.8:fal-ai"
     assert session.model_id is None
     assert "ollama/llama3.1:8b" not in session.model_effective_effort
+
+
+@pytest.mark.asyncio
+async def test_mcp_initialize_tolerates_the_modern_protocol_era():
+    """fastmcp >= 4 negotiates on connect; a modern server has no
+    InitializeResult and raises when asked for one, but the connection is
+    already live — that must not be reported as a failed MCP connection."""
+    from agent.core.tools import _initialize_mcp_client
+
+    class ModernClient:
+        async def initialize(self):
+            raise RuntimeError(
+                "The client negotiated a modern protocol era (server/discover), "
+                "which has no InitializeResult."
+            )
+
+    await _initialize_mcp_client(ModernClient())  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_mcp_initialize_still_propagates_real_failures():
+    from agent.core.tools import _initialize_mcp_client
+
+    class BrokenClient:
+        async def initialize(self):
+            raise RuntimeError("connection closed")
+
+    with pytest.raises(RuntimeError, match="connection closed"):
+        await _initialize_mcp_client(BrokenClient())
+
+
+@pytest.mark.asyncio
+async def test_mcp_initialize_runs_the_handshake_on_legacy_servers():
+    from agent.core.tools import _initialize_mcp_client
+
+    calls = []
+
+    class LegacyClient:
+        async def initialize(self):
+            calls.append("initialize")
+
+    await _initialize_mcp_client(LegacyClient())
+
+    assert calls == ["initialize"]
