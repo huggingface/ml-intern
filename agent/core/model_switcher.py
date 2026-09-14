@@ -24,7 +24,6 @@ from agent.core.llm_params import _resolve_llm_params
 from agent.core.local_models import (
     LOCAL_MODEL_PREFIXES,
     is_local_model_id,
-    is_reserved_local_model_id,
 )
 from agent.core.model_ids import (
     CLAUDE_OPUS_48_MODEL_ID,
@@ -60,6 +59,7 @@ def is_valid_model_id(model_id: str) -> bool:
 
     Accepts:
       • ollama/<model>, vllm/<model>, lm_studio/<model>, llamacpp/<model>
+      • openai-compat/<model>            (self-hosted / corporate gateway)
       • <org>/<model>[:<tag>]            (HF router; tag = provider or policy)
       • huggingface/<org>/<model>[:<tag>] (same, optional LiteLLM prefix)
 
@@ -71,8 +71,6 @@ def is_valid_model_id(model_id: str) -> bool:
     normalized_model_id = strip_huggingface_model_prefix(model_id) or model_id
     if is_local_model_id(normalized_model_id):
         return True
-    if is_reserved_local_model_id(normalized_model_id):
-        return False
     if any(normalized_model_id.startswith(prefix) for prefix in LOCAL_MODEL_PREFIXES):
         return False
     if "/" not in normalized_model_id:

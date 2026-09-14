@@ -154,9 +154,54 @@ def test_local_params_drop_reasoning_effort_in_non_strict_mode():
     assert "extra_body" not in params
 
 
-def test_openai_compat_prefix_is_not_a_local_escape_hatch():
-    with pytest.raises(ValueError, match="Unsupported local model id"):
+def test_openai_compat_params_target_configured_gateway(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://gateway.example.com/openai")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "gateway-secret")
+
+    params = _resolve_llm_params("openai-compat/custom-model")
+
+    assert params == {
+        "model": "openai/custom-model",
+        "api_base": "https://gateway.example.com/openai/v1",
+        "api_key": "gateway-secret",
+    }
+
+
+def test_openai_compat_keeps_multi_segment_model_names(monkeypatch):
+    """Gateways namespace models (``vertex/claude-...``); only strip the prefix."""
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://gateway.example.com/v1/")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "gateway-secret")
+
+    params = _resolve_llm_params("openai-compat/vertex/claude-opus-4-7")
+
+    assert params["model"] == "openai/vertex/claude-opus-4-7"
+    assert params["api_base"] == "https://gateway.example.com/v1"
+
+
+def test_openai_compat_falls_back_to_shared_local_env(monkeypatch):
+    monkeypatch.delenv("OPENAI_COMPAT_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPAT_API_KEY", raising=False)
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "https://gateway.example.com")
+    monkeypatch.setenv("LOCAL_LLM_API_KEY", "shared-secret")
+
+    params = _resolve_llm_params("openai-compat/custom-model")
+
+    assert params["api_base"] == "https://gateway.example.com/v1"
+    assert params["api_key"] == "shared-secret"
+
+
+def test_openai_compat_without_base_url_raises_actionable_error(monkeypatch):
+    """No localhost default to fall back on, so say what to set."""
+    monkeypatch.delenv("OPENAI_COMPAT_BASE_URL", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="OPENAI_COMPAT_BASE_URL"):
         _resolve_llm_params("openai-compat/custom-model")
+
+
+def test_empty_openai_compat_model_id_is_not_treated_as_hf_router():
+    with pytest.raises(ValueError, match="Unsupported local model id"):
+        _resolve_llm_params("openai-compat/")
 
 
 def test_empty_local_model_id_is_not_treated_as_hf_router():

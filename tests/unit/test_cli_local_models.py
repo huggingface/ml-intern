@@ -25,11 +25,14 @@ def test_model_switcher_rejects_empty_or_whitespace_local_ids():
     assert not model_switcher.is_valid_model_id("vllm/")
     assert not model_switcher.is_valid_model_id("lm_studio/")
     assert not model_switcher.is_valid_model_id("llamacpp/")
+    assert not model_switcher.is_valid_model_id("openai-compat/")
     assert not model_switcher.is_valid_model_id("ollama/llama 3.1")
 
 
-def test_openai_compat_prefix_is_not_supported():
-    assert not model_switcher.is_valid_model_id("openai-compat/custom-model")
+def test_openai_compat_prefix_is_accepted():
+    assert model_switcher.is_valid_model_id("openai-compat/custom-model")
+    assert model_switcher.is_valid_model_id("openai-compat/vertex/claude-opus-4-7")
+    assert not model_switcher.is_valid_model_id("openai-compat/")
 
 
 def test_suggested_models_include_router_claude_models_and_no_native_ids():

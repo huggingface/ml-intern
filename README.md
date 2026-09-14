@@ -39,6 +39,9 @@ HF_TOKEN=<your-hugging-face-token> # HF Router inference + Hub actions
 GITHUB_TOKEN=<github-personal-access-token>
 ```
 
+This `.env` is read from the directory you launch `ml-intern` in, so each
+project can carry its own credentials.
+
 All API-based model calls go through Hugging Face [Inference Providers](https://huggingface.co/docs/inference-providers/en/index), so your `HF_TOKEN` must be allowed to make Inference Provider calls. If no `HF_TOKEN` is set, the CLI will prompt you to paste one on first launch unless you start on a local model. To get a `GITHUB_TOKEN` follow the tutorial [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token). See the [local models section below](#local-models) for instructions on using agents that run on your hardware.
 
 ### Usage
@@ -104,6 +107,30 @@ local endpoint, or override a specific provider with its matching `*_BASE_URL`
 / `*_API_KEY` variable, such as `OLLAMA_BASE_URL` or `VLLM_API_KEY`.
 Provider-specific variables take precedence over the shared local variables.
 Base URLs may include or omit `/v1`.
+
+#### Self-hosted and corporate gateways
+
+Use the `openai-compat/` prefix for any other OpenAI-compatible endpoint that
+isn't one of the local servers above — a self-hosted gateway, or the LLM
+gateway your company puts in front of the model vendors:
+
+```bash
+OPENAI_COMPAT_BASE_URL=https://llm-gateway.your-company.com/openai/v1
+OPENAI_COMPAT_API_KEY=<your-gateway-key>
+```
+
+```bash
+ml-intern --model openai-compat/gpt-5.5 "your prompt"
+ml-intern --model openai-compat/vertex/claude-opus-4-7 "your prompt"
+```
+
+Everything after the prefix is sent to the gateway verbatim, so ids that are
+themselves namespaced (`vertex/claude-opus-4-7`, `openai/gpt-5.5`) work as-is.
+Unlike the local prefixes there is no localhost default, so
+`OPENAI_COMPAT_BASE_URL` (or the shared `LOCAL_LLM_BASE_URL`) is required.
+
+`HF_TOKEN` is still needed for the Hub-backed tools (docs, papers, datasets,
+Jobs) and for `--sandbox-tools`, but inference itself goes to your gateway.
 
 **CLI tool runtime:**
 

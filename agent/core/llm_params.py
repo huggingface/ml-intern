@@ -12,7 +12,6 @@ from agent.core.local_models import (
     LOCAL_MODEL_API_KEY_DEFAULT,
     LOCAL_MODEL_API_KEY_ENV,
     LOCAL_MODEL_BASE_URL_ENV,
-    is_reserved_local_model_id,
     local_model_name,
     local_model_provider,
 )
@@ -75,6 +74,12 @@ def _resolve_local_model_params(
         or os.environ.get(LOCAL_MODEL_BASE_URL_ENV)
         or provider["base_url_default"]
     )
+    if not raw_base:
+        raise ValueError(
+            f"No base URL configured for '{model_name}'. Set "
+            f"{provider['base_url_env']} (or {LOCAL_MODEL_BASE_URL_ENV}) to your "
+            "OpenAI-compatible endpoint, e.g. https://gateway.example.com/v1"
+        )
     api_key = (
         os.environ.get(provider["api_key_env"])
         or os.environ.get(LOCAL_MODEL_API_KEY_ENV)
@@ -102,6 +107,12 @@ def _resolve_llm_params(
       to LiteLLM as ``openai/<model>``. These endpoints don't receive
       ``reasoning_effort``.
 
+    • ``openai-compat/<model>`` — any other OpenAI-compatible endpoint, such
+      as a self-hosted or corporate LLM gateway. Same handling as the local
+      prefixes, but ``OPENAI_COMPAT_BASE_URL`` is required since there is no
+      localhost default. The model suffix may itself contain slashes
+      (``openai-compat/vendor/model-name``); only the prefix is stripped.
+
     • Anything else is treated as an HF Router id. We hit the auto-routing
       OpenAI-compatible endpoint at ``https://router.huggingface.co/v1``.
       The id can be bare or carry an HF routing suffix (``:fastest`` /
@@ -122,9 +133,6 @@ def _resolve_llm_params(
          local ``hf auth login`` cache.
     """
     normalized_model = strip_huggingface_model_prefix(model_name) or model_name
-
-    if is_reserved_local_model_id(normalized_model):
-        raise ValueError(f"Unsupported local model id: {normalized_model}")
 
     if local_model_provider(normalized_model) is not None:
         return _resolve_local_model_params(normalized_model, reasoning_effort, strict)

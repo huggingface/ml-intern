@@ -1,4 +1,11 @@
-"""Helpers for CLI local OpenAI-compatible model ids."""
+"""Helpers for CLI OpenAI-compatible model ids.
+
+Covers both local inference servers (Ollama, vLLM, LM Studio, llama.cpp)
+and the generic ``openai-compat/`` prefix, which points at any other
+OpenAI-compatible endpoint — typically a self-hosted or corporate LLM
+gateway. They share the same plumbing: a configurable base URL, an API
+key, and the model suffix forwarded verbatim to the endpoint.
+"""
 
 LOCAL_MODEL_PROVIDERS: dict[str, dict[str, str]] = {
     "ollama/": {
@@ -21,10 +28,17 @@ LOCAL_MODEL_PROVIDERS: dict[str, dict[str, str]] = {
         "base_url_default": "http://localhost:8080",
         "api_key_env": "LLAMACPP_API_KEY",
     },
+    # Generic escape hatch for self-hosted / corporate OpenAI-compatible
+    # gateways. No default base URL: there is no sensible guess, so the user
+    # has to say where the gateway lives.
+    "openai-compat/": {
+        "base_url_env": "OPENAI_COMPAT_BASE_URL",
+        "base_url_default": "",
+        "api_key_env": "OPENAI_COMPAT_API_KEY",
+    },
 }
 
 LOCAL_MODEL_PREFIXES = tuple(LOCAL_MODEL_PROVIDERS)
-RESERVED_LOCAL_MODEL_PREFIXES = ("openai-compat/",)
 LOCAL_MODEL_BASE_URL_ENV = "LOCAL_LLM_BASE_URL"
 LOCAL_MODEL_API_KEY_ENV = "LOCAL_LLM_API_KEY"
 LOCAL_MODEL_API_KEY_DEFAULT = "sk-local-no-key-required"
@@ -52,8 +66,3 @@ def is_local_model_id(model_id: str) -> bool:
     if not model_id or any(char.isspace() for char in model_id):
         return False
     return local_model_name(model_id) is not None
-
-
-def is_reserved_local_model_id(model_id: str) -> bool:
-    """Return True for local-style prefixes intentionally not supported."""
-    return model_id.startswith(RESERVED_LOCAL_MODEL_PREFIXES)
