@@ -646,6 +646,12 @@ def _friendly_error_message(
     user_plan: str | None = None,
 ) -> str | None:
     """Return a user-friendly message for known error types, or None to fall back to traceback."""
+    from agent.core.llm_params import EndpointNotConfiguredError
+
+    if isinstance(error, EndpointNotConfiguredError):
+        # Already written as an instruction — don't bury it in a traceback.
+        return str(error)
+
     err_str = str(error).lower()
 
     if (

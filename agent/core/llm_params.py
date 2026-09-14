@@ -12,8 +12,9 @@ from agent.core.local_models import (
     LOCAL_MODEL_API_KEY_DEFAULT,
     LOCAL_MODEL_API_KEY_ENV,
     LOCAL_MODEL_BASE_URL_ENV,
-    local_model_name,
-    local_model_provider,
+    endpoint_model_name,
+    endpoint_provider,
+    is_openai_compat_model_id,
 )
 from agent.core.model_ids import (
     HF_ROUTER_BASE_URL,
@@ -38,6 +39,13 @@ def _hf_router_effort_level(reasoning_effort: str) -> str:
     return level
 
 
+class EndpointNotConfiguredError(ValueError):
+    """A direct endpoint id was used without a base URL to send it to.
+
+    Its own type so the CLI can surface the fix instead of a traceback.
+    """
+
+
 class UnsupportedEffortError(ValueError):
     """The requested effort isn't valid for this provider's API surface.
 
@@ -53,21 +61,26 @@ def _local_api_base(base_url: str) -> str:
     return f"{base}/v1"
 
 
-def _resolve_local_model_params(
+def _resolve_endpoint_params(
     model_name: str,
     reasoning_effort: str | None = None,
     strict: bool = False,
 ) -> dict:
-    if reasoning_effort and strict:
+    is_gateway = is_openai_compat_model_id(model_name)
+
+    # Localhost servers don't do thinking params. Gateways front the same
+    # frontier models HF Router does, so effort goes through and the probe
+    # cascade discovers what the far side accepts — no capability table.
+    if reasoning_effort and strict and not is_gateway:
         raise UnsupportedEffortError(
             "Local OpenAI-compatible endpoints don't accept reasoning_effort"
         )
 
-    local_name = local_model_name(model_name)
+    local_name = endpoint_model_name(model_name)
     if local_name is None:
         raise ValueError(f"Unsupported local model id: {model_name}")
 
-    provider = local_model_provider(model_name)
+    provider = endpoint_provider(model_name)
     assert provider is not None
     raw_base = (
         os.environ.get(provider["base_url_env"])
@@ -75,7 +88,7 @@ def _resolve_local_model_params(
         or provider["base_url_default"]
     )
     if not raw_base:
-        raise ValueError(
+        raise EndpointNotConfiguredError(
             f"No base URL configured for '{model_name}'. Set "
             f"{provider['base_url_env']} (or {LOCAL_MODEL_BASE_URL_ENV}) to your "
             "OpenAI-compatible endpoint, e.g. https://gateway.example.com/v1"
@@ -85,11 +98,14 @@ def _resolve_local_model_params(
         or os.environ.get(LOCAL_MODEL_API_KEY_ENV)
         or LOCAL_MODEL_API_KEY_DEFAULT
     )
-    return {
+    params = {
         "model": f"openai/{local_name}",
         "api_base": _local_api_base(raw_base),
         "api_key": api_key,
     }
+    if is_gateway and reasoning_effort:
+        params["reasoning_effort"] = reasoning_effort
+    return params
 
 
 def _resolve_llm_params(
@@ -108,10 +124,13 @@ def _resolve_llm_params(
       ``reasoning_effort``.
 
     • ``openai-compat/<model>`` — any other OpenAI-compatible endpoint, such
-      as a self-hosted or corporate LLM gateway. Same handling as the local
-      prefixes, but ``OPENAI_COMPAT_BASE_URL`` is required since there is no
-      localhost default. The model suffix may itself contain slashes
-      (``openai-compat/vendor/model-name``); only the prefix is stripped.
+      as a self-hosted or corporate LLM gateway. ``OPENAI_COMPAT_BASE_URL``
+      is required since there is no localhost default. The model suffix may
+      itself contain slashes (``openai-compat/vendor/model-name``); only the
+      prefix is stripped. Unlike the local prefixes these do forward
+      ``reasoning_effort`` — a gateway usually fronts the same frontier
+      models HF Router does — as a top-level OpenAI parameter, with the
+      probe cascade walking down whatever the far side rejects.
 
     • Anything else is treated as an HF Router id. We hit the auto-routing
       OpenAI-compatible endpoint at ``https://router.huggingface.co/v1``.
@@ -134,8 +153,8 @@ def _resolve_llm_params(
     """
     normalized_model = strip_huggingface_model_prefix(model_name) or model_name
 
-    if local_model_provider(normalized_model) is not None:
-        return _resolve_local_model_params(normalized_model, reasoning_effort, strict)
+    if endpoint_provider(normalized_model) is not None:
+        return _resolve_endpoint_params(normalized_model, reasoning_effort, strict)
 
     hf_model = normalized_model
     api_key = _resolve_hf_router_token(session_hf_token)

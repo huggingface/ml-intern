@@ -129,6 +129,10 @@ themselves namespaced (`vertex/claude-opus-4-7`, `openai/gpt-5.5`) work as-is.
 Unlike the local prefixes there is no localhost default, so
 `OPENAI_COMPAT_BASE_URL` (or the shared `LOCAL_LLM_BASE_URL`) is required.
 
+Reasoning effort works the same as it does on HF Router models: `/model` fires
+the usual probe and caches whatever level your gateway accepts. (The local
+prefixes above don't send thinking params at all.)
+
 `HF_TOKEN` is still needed for the Hub-backed tools (docs, papers, datasets,
 Jobs) and for `--sandbox-tools`, but inference itself goes to your gateway.
 

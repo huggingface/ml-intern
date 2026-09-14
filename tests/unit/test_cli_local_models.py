@@ -29,6 +29,23 @@ def test_model_switcher_rejects_empty_or_whitespace_local_ids():
     assert not model_switcher.is_valid_model_id("ollama/llama 3.1")
 
 
+def test_gateway_ids_are_not_classified_as_local():
+    """The distinction drives effort handling: local servers get none, a
+    gateway goes through the same effort probe as an HF Router model."""
+    from agent.core.local_models import (
+        is_direct_endpoint_model_id,
+        is_openai_compat_model_id,
+    )
+
+    assert not is_local_model_id("openai-compat/vertex/claude-opus-5")
+    assert is_openai_compat_model_id("openai-compat/vertex/claude-opus-5")
+    assert is_direct_endpoint_model_id("openai-compat/vertex/claude-opus-5")
+
+    assert is_local_model_id("vllm/custom-model")
+    assert not is_openai_compat_model_id("vllm/custom-model")
+    assert is_direct_endpoint_model_id("vllm/custom-model")
+
+
 def test_openai_compat_prefix_is_accepted():
     assert model_switcher.is_valid_model_id("openai-compat/custom-model")
     assert model_switcher.is_valid_model_id("openai-compat/vertex/claude-opus-4-7")

@@ -2,6 +2,7 @@ import pytest
 
 from agent.core.hf_tokens import resolve_hf_request_token
 from agent.core.llm_params import (
+    EndpointNotConfiguredError,
     UnsupportedEffortError,
     _resolve_hf_router_token,
     _resolve_llm_params,
@@ -154,6 +155,38 @@ def test_local_params_drop_reasoning_effort_in_non_strict_mode():
     assert "extra_body" not in params
 
 
+def test_openai_compat_forwards_reasoning_effort(monkeypatch):
+    """A gateway fronts the same frontier models HF Router does, so effort
+    has to reach it — the local prefixes deliberately drop it."""
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://gateway.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "gateway-secret")
+
+    params = _resolve_llm_params(
+        "openai-compat/vertex/claude-opus-5",
+        reasoning_effort="high",
+        strict=True,
+    )
+
+    assert params["reasoning_effort"] == "high"
+
+
+def test_openai_compat_without_effort_sends_no_effort_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://gateway.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "gateway-secret")
+
+    params = _resolve_llm_params("openai-compat/custom-model")
+
+    assert "reasoning_effort" not in params
+
+
+def test_local_prefixes_still_reject_effort_in_strict_mode(monkeypatch):
+    """The gateway carve-out must not leak into the localhost servers."""
+    monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000")
+
+    with pytest.raises(UnsupportedEffortError, match="reasoning_effort"):
+        _resolve_llm_params("vllm/custom-model", reasoning_effort="high", strict=True)
+
+
 def test_openai_compat_params_target_configured_gateway(monkeypatch):
     monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://gateway.example.com/openai")
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "gateway-secret")
@@ -195,8 +228,17 @@ def test_openai_compat_without_base_url_raises_actionable_error(monkeypatch):
     monkeypatch.delenv("OPENAI_COMPAT_BASE_URL", raising=False)
     monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
 
-    with pytest.raises(ValueError, match="OPENAI_COMPAT_BASE_URL"):
+    with pytest.raises(EndpointNotConfiguredError, match="OPENAI_COMPAT_BASE_URL"):
         _resolve_llm_params("openai-compat/custom-model")
+
+
+def test_unconfigured_endpoint_is_reported_without_a_traceback():
+    """The message is already an instruction; don't bury it in stack frames."""
+    from agent.core.agent_loop import _friendly_error_message
+
+    error = EndpointNotConfiguredError("No base URL configured for 'openai-compat/x'.")
+
+    assert _friendly_error_message(error) == str(error)
 
 
 def test_empty_openai_compat_model_id_is_not_treated_as_hf_router():

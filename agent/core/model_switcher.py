@@ -22,7 +22,8 @@ from litellm import acompletion
 from agent.core.effort_probe import ProbeInconclusive, probe_effort
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.local_models import (
-    LOCAL_MODEL_PREFIXES,
+    DIRECT_ENDPOINT_PREFIXES,
+    is_direct_endpoint_model_id,
     is_local_model_id,
 )
 from agent.core.model_ids import (
@@ -69,9 +70,11 @@ def is_valid_model_id(model_id: str) -> bool:
     if not model_id:
         return False
     normalized_model_id = strip_huggingface_model_prefix(model_id) or model_id
-    if is_local_model_id(normalized_model_id):
+    if is_direct_endpoint_model_id(normalized_model_id):
         return True
-    if any(normalized_model_id.startswith(prefix) for prefix in LOCAL_MODEL_PREFIXES):
+    if any(
+        normalized_model_id.startswith(prefix) for prefix in DIRECT_ENDPOINT_PREFIXES
+    ):
         return False
     if "/" not in normalized_model_id:
         return False
@@ -86,11 +89,12 @@ def _print_hf_routing_info(model_id: str, console) -> bool:
     proceed with the switch, ``False`` to indicate a hard problem the user
     should notice before we fire the effort probe.
 
-    Local ids return ``True`` without printing anything. Router ids are checked
+    Directly-addressed endpoint ids return ``True`` without printing anything,
+    since they never reach the router. Router ids are checked
     against the router catalog when possible; the probe below covers provider
     availability for uncataloged ids.
     """
-    if is_local_model_id(model_id):
+    if is_direct_endpoint_model_id(model_id):
         return True
 
     from agent.core import hf_router_catalog as cat

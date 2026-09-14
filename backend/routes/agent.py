@@ -53,7 +53,7 @@ from session_manager import (
 
 from agent.core.hf_access import get_jobs_access
 from agent.core.hf_tokens import resolve_hf_request_token
-from agent.core.local_models import local_model_provider
+from agent.core.local_models import endpoint_provider
 from agent.core.llm_params import _resolve_llm_params
 from agent.core.model_ids import (
     CLAUDE_OPUS_48_MODEL_ID,
@@ -180,7 +180,7 @@ def _user_hf_token(user: dict[str, Any] | None) -> str | None:
 
 def _model_requires_hf_router_token(model_id: str | None) -> bool:
     normalized = strip_huggingface_model_prefix(model_id) or model_id or ""
-    return local_model_provider(normalized) is None
+    return endpoint_provider(normalized) is None
 
 
 def _reject_oversize_dataset_upload(request: Request) -> None:
