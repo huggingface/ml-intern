@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from pydantic import ValidationError
@@ -156,3 +157,37 @@ def test_invalid_tool_runtime_is_rejected(tmp_path):
 
     with pytest.raises(ValidationError):
         config_module.load_config(str(config_path))
+
+
+def test_load_config_reads_dotenv_from_the_launch_directory(tmp_path, monkeypatch):
+    """An installed CLI must see the .env of the project it is run in.
+
+    python-dotenv's default search starts from the calling module's directory,
+    so without ``usecwd=True`` this only ever found the .env inside the install
+    root and the user's project .env was silently ignored.
+    """
+    monkeypatch.delenv("ML_INTERN_DOTENV_PROBE", raising=False)
+    (tmp_path / ".env").write_text(
+        "ML_INTERN_DOTENV_PROBE=from-launch-dir\n", encoding="utf-8"
+    )
+    config_path = tmp_path / "config.json"
+    _write_json(config_path, {"model_name": "moonshotai/Kimi-K2.7-Code"})
+    monkeypatch.chdir(tmp_path)
+
+    config_module.load_config(str(config_path))
+
+    assert os.environ["ML_INTERN_DOTENV_PROBE"] == "from-launch-dir"
+
+
+def test_dotenv_does_not_override_the_exported_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("ML_INTERN_DOTENV_PROBE", "from-shell")
+    (tmp_path / ".env").write_text(
+        "ML_INTERN_DOTENV_PROBE=from-launch-dir\n", encoding="utf-8"
+    )
+    config_path = tmp_path / "config.json"
+    _write_json(config_path, {"model_name": "moonshotai/Kimi-K2.7-Code"})
+    monkeypatch.chdir(tmp_path)
+
+    config_module.load_config(str(config_path))
+
+    assert os.environ["ML_INTERN_DOTENV_PROBE"] == "from-shell"

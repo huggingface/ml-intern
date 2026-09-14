@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal, Union
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from fastmcp.mcp_config import (
     RemoteMCPServer,
     StdioMCPServer,
@@ -207,10 +207,14 @@ def load_config(
     Use ${VAR_NAME} in your JSON for any secret.
     Automatically loads from .env file.
     """
-    # Load .env from project root first (so it works from any directory),
-    # then CWD .env can override if present
-    load_dotenv(_PROJECT_ROOT / ".env")
-    load_dotenv(override=False)
+    # The .env in the directory the CLI was launched from wins, then the one
+    # next to the checkout so the CLI still works from an unrelated directory.
+    # ``usecwd=True`` matters: python-dotenv's default search starts from this
+    # module's own directory, so an installed CLI would otherwise only ever see
+    # the .env inside its install root and silently ignore the user's project.
+    # Neither call overrides variables already exported in the environment.
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+    load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
     raw_config = _load_json_config(Path(config_path))
     if include_user_defaults:
