@@ -8,7 +8,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent / "backend"
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from retired_main import HUGGINGCHAT_URL, app  # noqa: E402
+from retired_main import HUGGINGCHAT_URL, app, create_app  # noqa: E402
 
 client = TestClient(app)
 
@@ -22,6 +22,19 @@ def test_retirement_status_points_to_huggingchat():
         "status": "retired",
         "moved_to": HUGGINGCHAT_URL,
     }
+
+
+def test_retired_server_serves_static_frontend(tmp_path):
+    static_path = tmp_path / "static"
+    static_path.mkdir()
+    (static_path / "index.html").write_text(
+        "<h1>ML Intern has moved to HuggingChat</h1>", encoding="utf-8"
+    )
+
+    response = TestClient(create_app(static_path)).get("/")
+
+    assert response.status_code == 200
+    assert "ML Intern has moved to HuggingChat" in response.text
 
 
 @pytest.mark.parametrize(
