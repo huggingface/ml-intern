@@ -29,6 +29,7 @@ from agent.core import model_switcher
 from agent.core.hf_access import fetch_whoami_v2, normalize_hf_user_plan
 from agent.core.hf_tokens import resolve_hf_token
 from agent.core.local_models import is_direct_endpoint_model_id
+from agent.core.llm_params import endpoint_api_base
 from agent.core.model_ids import strip_huggingface_model_prefix
 from agent.core.session import OpType
 from agent.core.tools import ToolRouter
@@ -1055,6 +1056,8 @@ async def _handle_slash_command(
     if command == "/status":
         session = session_holder[0] if session_holder else None
         print(f"Model: {config.model_name}")
+        if (endpoint := endpoint_api_base(config.model_name)) is not None:
+            print(f"Endpoint: {endpoint}")
         print(f"Reasoning effort: {config.reasoning_effort or 'off'}")
         print(f"Tool runtime: {_tool_runtime_label(_is_local_tool_runtime(config))}")
         if session:
@@ -1207,6 +1210,7 @@ async def main(model: str | None = None, sandbox_tools: bool = False):
         model=config.model_name,
         hf_user=hf_user,
         tool_runtime=_tool_runtime_label(local_mode),
+        endpoint=endpoint_api_base(config.model_name),
     )
 
     # Pre-warm the HF router catalog in the background so /model switches
@@ -1469,6 +1473,8 @@ async def headless_main(
         config.max_iterations = max_iterations
 
     print(f"Model: {config.model_name}", file=sys.stderr)
+    if (endpoint := endpoint_api_base(config.model_name)) is not None:
+        print(f"Endpoint: {endpoint}", file=sys.stderr)
     print(f"Tool runtime: {_tool_runtime_label(local_mode)}", file=sys.stderr)
     print(f"Max iterations: {config.max_iterations}", file=sys.stderr)
     print(f"Prompt: {prompt}", file=sys.stderr)

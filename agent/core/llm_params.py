@@ -61,6 +61,25 @@ def _local_api_base(base_url: str) -> str:
     return f"{base}/v1"
 
 
+def endpoint_api_base(model_name: str) -> str | None:
+    """The base URL a direct-endpoint id resolves to, for display.
+
+    ``None`` for HF Router ids (always the same endpoint, so showing it is
+    noise) and for a direct-endpoint id with nothing configured — that case
+    is already reported by ``EndpointNotConfiguredError`` when it's used.
+    """
+    normalized = strip_huggingface_model_prefix(model_name) or model_name
+    provider = endpoint_provider(normalized)
+    if provider is None:
+        return None
+    raw_base = (
+        os.environ.get(provider["base_url_env"])
+        or os.environ.get(LOCAL_MODEL_BASE_URL_ENV)
+        or provider["base_url_default"]
+    )
+    return _local_api_base(raw_base) if raw_base else None
+
+
 def _resolve_endpoint_params(
     model_name: str,
     reasoning_effort: str | None = None,

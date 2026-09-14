@@ -97,6 +97,7 @@ def print_banner(
     model: str | None = None,
     hf_user: str | None = None,
     tool_runtime: str | None = None,
+    endpoint: str | None = None,
 ) -> None:
     """Print particle logo then CRT boot sequence with system info."""
     from agent.utils.particle_logo import run_particle_logo
@@ -116,10 +117,13 @@ def print_banner(
     gold = "rgb(255,200,80)"
     dim_gold = "rgb(180,140,40)"
 
+    # Keep any new line ABOVE "Tools: loading..." — print_init_done rewrites
+    # that line by counting cursor rows up from the bottom.
     boot_lines = [
         (f"{_I}Initializing agent runtime...", gold),
         (f"{_I}  User: {user_label}", dim_gold),
         (f"{_I}  Model: {model_label}", dim_gold),
+        *([(f"{_I}  Endpoint: {endpoint}", dim_gold)] if endpoint else []),
         (f"{_I}  Tool runtime: {tool_runtime or 'local filesystem'}", dim_gold),
         (f"{_I}  Tools: loading...", dim_gold),
         ("", ""),

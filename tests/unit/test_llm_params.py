@@ -317,3 +317,41 @@ def test_hf_request_token_does_not_use_cached_login(monkeypatch):
     monkeypatch.setattr(huggingface_hub, "get_token", lambda: "cached-token")
 
     assert resolve_hf_request_token(Request()) is None
+
+
+def test_endpoint_api_base_shows_where_a_gateway_id_resolves(monkeypatch):
+    """Surfaced at startup so a .env the user forgot about is visible."""
+    from agent.core.llm_params import endpoint_api_base
+
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://gateway.example.com/openai")
+
+    assert (
+        endpoint_api_base("openai-compat/vertex/claude-opus-5")
+        == "https://gateway.example.com/openai/v1"
+    )
+
+
+def test_endpoint_api_base_is_none_for_router_and_unconfigured_ids(monkeypatch):
+    from agent.core.llm_params import endpoint_api_base
+
+    monkeypatch.delenv("OPENAI_COMPAT_BASE_URL", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+
+    # HF Router always goes to the same place — showing it would be noise.
+    assert endpoint_api_base("zai-org/GLM-5.2:novita") is None
+    # Unconfigured gateway: EndpointNotConfiguredError already covers this.
+    assert endpoint_api_base("openai-compat/custom-model") is None
+
+
+def test_endpoint_api_base_reports_the_mixed_source_combination(monkeypatch):
+    """Precedence is per-variable, so a URL and key can come from different
+    files. Showing the resolved URL is what makes that visible."""
+    from agent.core.llm_params import endpoint_api_base
+
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "https://gateway-a.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://gateway-b.example.com/v1")
+
+    assert (
+        endpoint_api_base("openai-compat/custom-model")
+        == "https://gateway-b.example.com/v1"
+    )

@@ -202,7 +202,7 @@ async def test_interactive_main_applies_model_override_before_banner(monkeypatch
     class StopAfterBanner(Exception):
         pass
 
-    def fake_banner(*, model=None, hf_user=None, tool_runtime=None):
+    def fake_banner(*, model=None, hf_user=None, tool_runtime=None, endpoint=None):
         assert model == "openai/gpt-5.5:fal-ai"
         assert hf_user == "tester"
         assert tool_runtime == "local filesystem"
@@ -235,7 +235,7 @@ async def test_local_model_local_runtime_skips_hf_token_prompt(monkeypatch):
     async def fail_prompt(_prompt_session):
         raise AssertionError("local model with local tools should not prompt")
 
-    def fake_banner(*, model=None, hf_user=None, tool_runtime=None):
+    def fake_banner(*, model=None, hf_user=None, tool_runtime=None, endpoint=None):
         assert model == "llamacpp/model"
         assert hf_user is None
         assert tool_runtime == "local filesystem"
@@ -272,7 +272,7 @@ async def test_local_model_sandbox_runtime_prompts_for_hf_token(monkeypatch):
         prompted = True
         return "hf-token"
 
-    def fake_banner(*, model=None, hf_user=None, tool_runtime=None):
+    def fake_banner(*, model=None, hf_user=None, tool_runtime=None, endpoint=None):
         assert model == "llamacpp/model"
         assert hf_user == "tester"
         assert tool_runtime == "HF sandbox"
