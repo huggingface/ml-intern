@@ -42,6 +42,7 @@ from agent.utils.terminal_display import (
     print_compacted,
     print_error,
     print_help,
+    begin_quiet_boot,
     print_init_done,
     print_interrupted,
     print_markdown,
@@ -1206,6 +1207,9 @@ async def main(model: str | None = None, sandbox_tools: bool = False):
         hf_user=hf_user,
         tool_runtime=_tool_runtime_label(local_mode),
     )
+    # Tool setup logs to stderr; hold it back so it can't land in the middle
+    # of the banner that print_init_done is about to rewrite.
+    begin_quiet_boot()
 
     # Pre-warm the HF router catalog in the background so /model switches
     # don't block on a network fetch.

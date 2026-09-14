@@ -2,6 +2,11 @@
 Terminal display utilities — rich-powered CLI formatting.
 """
 
+import atexit
+import io
+import logging
+import sys
+from typing import Any
 import asyncio
 import re
 
@@ -93,6 +98,22 @@ def get_console() -> Console:
 # ── Banner ─────────────────────────────────────────────────────────────
 
 
+# Lines printed after "Tools: loading...". ``print_init_done`` walks back up
+# over exactly these to rewrite that line, so the two must stay in step —
+# hence one definition rather than a magic number in each place.
+def _BOOT_TAIL_LINES(gold: str) -> list[tuple[str, str]]:
+    return [
+        ("", ""),
+        (f"{_I}/help for commands · /model to switch · /quit to exit", gold),
+    ]
+
+
+# Rows occupying the screen after "Tools: loading...": the blank line and the
+# help line above, plus the extra newline rich's ``console.print`` appends to
+# the boot sequence's final frame.
+_BOOT_TAIL_ROWS = len(_BOOT_TAIL_LINES("")) + 1
+
+
 def print_banner(
     model: str | None = None,
     hf_user: str | None = None,
@@ -122,11 +143,83 @@ def print_banner(
         (f"{_I}  Model: {model_label}", dim_gold),
         (f"{_I}  Tool runtime: {tool_runtime or 'local filesystem'}", dim_gold),
         (f"{_I}  Tools: loading...", dim_gold),
-        ("", ""),
-        (f"{_I}/help for commands · /model to switch · /quit to exit", gold),
+        *_BOOT_TAIL_LINES(gold),
     ]
 
     run_boot_sequence(_console, boot_lines)
+
+
+# ── Quiet boot ─────────────────────────────────────────────────────────
+#
+# ``print_init_done`` rewrites the banner's "Tools: loading..." line by moving
+# the cursor up a fixed number of rows. That only lands correctly if nothing
+# else has written to the terminal since the banner was drawn. Tool setup runs
+# in between and logs warnings to stderr (a failing MCP server is the common
+# one), and a message long enough to wrap pushes the cursor down by an unknown
+# number of rows — so the rewrite erases the wrong lines and the log text
+# bleeds through the help line.
+#
+# Rather than guess at the offset, hold stderr and log output back for the
+# duration and replay it once the animation is finished.
+
+_boot_buffer: io.StringIO | None = None
+_boot_saved_stderr: Any = None
+_boot_saved_streams: list[tuple[logging.StreamHandler, Any]] = []
+
+
+def begin_quiet_boot() -> None:
+    """Buffer stderr and log output until :func:`end_quiet_boot`."""
+    global _boot_buffer, _boot_saved_stderr
+
+    if _boot_buffer is not None:  # already active — don't nest
+        return
+
+    _boot_buffer = io.StringIO()
+    _boot_saved_stderr = sys.stderr
+    sys.stderr = _boot_buffer
+    # If startup dies before "ready", the buffered warnings are very likely to
+    # say why — make sure they still reach the terminal.
+    atexit.register(end_quiet_boot)
+
+    # Handlers capture their stream at construction, so swapping sys.stderr
+    # isn't enough — redirect the ones already pointed at it.
+    for handler in _stderr_log_handlers(_boot_saved_stderr):
+        _boot_saved_streams.append((handler, handler.stream))
+        handler.setStream(_boot_buffer)
+
+
+def end_quiet_boot() -> None:
+    """Restore stderr and flush anything written while the banner was drawing."""
+    global _boot_buffer, _boot_saved_stderr
+
+    if _boot_buffer is None:
+        return
+
+    buffered = _boot_buffer.getvalue()
+    for handler, stream in _boot_saved_streams:
+        handler.setStream(stream)
+    _boot_saved_streams.clear()
+
+    sys.stderr = _boot_saved_stderr
+    _boot_buffer = None
+    _boot_saved_stderr = None
+    atexit.unregister(end_quiet_boot)
+
+    if buffered:
+        sys.stderr.write(buffered)
+        sys.stderr.flush()
+
+
+def _stderr_log_handlers(stream: Any) -> list[logging.StreamHandler]:
+    seen: list[logging.StreamHandler] = []
+    managed = logging.root.manager.loggerDict.values()
+    for logger in [logging.root, *managed]:
+        for handler in getattr(logger, "handlers", []):
+            if isinstance(handler, logging.StreamHandler) and (
+                getattr(handler, "stream", None) is stream
+            ):
+                seen.append(handler)
+    return seen
 
 
 # ── Init progress ──────────────────────────────────────────────────────
@@ -136,11 +229,11 @@ def print_init_done(tool_count: int = 0) -> None:
     import time
 
     f = _console.file
-    # Overwrite the "Tools: loading..." line with actual count
-    f.write(
-        "\033[A\033[A\033[A\033[K"
-    )  # Move up 3 lines (blank + help + blank) then up to tools line
-    f.write("\033[A\033[K")
+    # Walk back over the banner's tail to reach "Tools: loading...". This is
+    # relative cursor movement, so it only lands correctly if nothing else has
+    # written to the terminal since the banner — see ``quiet_boot``.
+    f.write("\033[A" * (_BOOT_TAIL_ROWS + 1))
+    f.write("\033[K")
     gold = "\033[38;2;180;140;40m"
     reset = "\033[0m"
     tool_text = f"{_I}  Tools: {tool_count} loaded"
@@ -158,6 +251,10 @@ def print_init_done(tool_count: int = 0) -> None:
         f"{_I}\033[38;2;255;200;80mReady. Let's build something impressive.{reset}\n"
     )
     f.flush()
+
+    # Screen is settled — now let anything logged during tool setup through,
+    # below the ready message instead of on top of the banner.
+    end_quiet_boot()
 
 
 # ── Tool calls ─────────────────────────────────────────────────────────
