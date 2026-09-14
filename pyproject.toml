@@ -1,9 +1,10 @@
 [project]
 name = "ml-intern"
 version = "0.1.0"
-description = "Add your description here"
+description = "Retired ML Intern CLI; continue with HuggingChat at https://huggingface.co/chat/"
 readme = "README.md"
 requires-python = ">=3.11"
+classifiers = ["Development Status :: 7 - Inactive"]
 dependencies = [
     # Core dependencies
     "datasets>=4.4.1",

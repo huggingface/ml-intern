@@ -1,19 +1,24 @@
+> [!IMPORTANT]
+> **ML Intern is no longer maintained.** Both the hosted web application and the `ml-intern` CLI have been retired. Continue with [HuggingChat](https://huggingface.co/chat/).
+>
+> This repository is retained for historical reference only. No support, bug fixes, or security updates will be provided.
+
+# ML Intern (retired)
+
 <p align="center">
   <img src="frontend/public/smolagents.webp" alt="smolagents logo" width="160" />
 </p>
 
 <p align="center">
     <a href="https://github.com/huggingface/ml-intern/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
-    <a href="https://smolagents-ml-intern.hf.space/"><img alt="Website" src="https://img.shields.io/website/https/smolagents-ml-intern.hf.space.svg?down_color=red&down_message=offline&up_message=online"></a>
+    <a href="https://huggingface.co/chat/"><img alt="Status: retired" src="https://img.shields.io/badge/status-retired-lightgrey.svg"></a>
 </p>
 
-# ML Intern
+## Historical documentation (unsupported)
 
-An ML intern that autonomously researches, writes, and ships good quality ML related code using the Hugging Face ecosystem — with deep access to docs, papers, datasets, and cloud compute.
+The documentation below is preserved for historical reference. The project is no longer supported or maintained.
 
-> [!IMPORTANT]
-> **The hosted ML Intern web app has moved to [HuggingChat](https://huggingface.co/chat/).**
-> The `ml-intern` CLI remains supported and available using the instructions below.
+ML Intern was an agent that autonomously researched, wrote, and shipped ML-related code using the Hugging Face ecosystem, with deep access to documentation, papers, datasets, and cloud compute.
 
 ## Quick Start
 
